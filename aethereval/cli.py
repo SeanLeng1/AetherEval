@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override max new tokens.")
     parser.add_argument("--temperature", type=float, default=None, help="Override temperature.")
     parser.add_argument("--top-p", type=float, default=None, help="Override top-p.")
-    parser.add_argument("--top-k", type=int, default=None, help="Override top-k.")
+    parser.add_argument("--top-k", type=int, default=None, help="Override top-k (default: -1).")
     parser.add_argument("--min-p", type=float, default=None, help="Override min-p.")
     parser.add_argument("--seed", type=int, default=None, help="Override sampling seed.")
 

@@ -135,10 +135,12 @@ def _merge_generation_config(
     cfg.setdefault("max_new_tokens", 256)
     cfg.setdefault("temperature", 0.0)
     cfg.setdefault("top_p", 1.0)
+    cfg.setdefault("top_k", -1)
     cfg["n"] = int(cfg["n"])
     cfg["max_new_tokens"] = int(cfg["max_new_tokens"])
     cfg["temperature"] = float(cfg["temperature"])
     cfg["top_p"] = float(cfg["top_p"])
+    cfg["top_k"] = int(cfg["top_k"]) if cfg.get("top_k") is not None else -1
     if cfg["n"] < 1:
         raise ValueError(f"n must be >= 1, got {cfg['n']}")
     if cfg["n"] > 1 and cfg["temperature"] == 0.0:

@@ -165,6 +165,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(backend.last_gen_cfg["max_new_tokens"], 99)
             self.assertAlmostEqual(float(backend.last_gen_cfg["top_p"]), 0.8, places=6)
             self.assertEqual(backend.last_gen_cfg["n"], 1)
+            self.assertEqual(int(backend.last_gen_cfg["top_k"]), -1)
 
     def test_default_run_id_uses_model_suffix_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

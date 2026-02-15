@@ -15,7 +15,7 @@ generation:
   max_new_tokens: 512
   temperature: 0.0
   top_p: 1.0
-  top_k: null
+  top_k: -1
   min_p: null
   seed: 42
 

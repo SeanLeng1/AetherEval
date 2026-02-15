@@ -58,7 +58,7 @@ RUN ABI_FLAG=$(python -c "import torch; print('TRUE' if torch._C._GLIBCXX_USE_CX
 
 # Install AetherRL
 ARG AetherRL_REF=b532dd59a71004d88f8152788d79cec617c8eff6
-RUN git clone https://github.com/allenai/olmes.git /opt/AetherEval && \
+RUN git clone https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
     cd /opt/AetherEval && \
     git checkout "${OLME_REF}" && git lfs install && git lfs pull \
     pip install --no-cache-dir -e /opt/olmes
