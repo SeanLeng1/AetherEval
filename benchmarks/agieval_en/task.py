@@ -68,12 +68,16 @@ def build_prompt(sample: Sample) -> str:
     question = str(sample.data["question"]).strip()
     choices = sample.data["choices"]
     letters = list(choices.keys())
-    letters_str = ", ".join(letters)
-    option_lines = "\n".join(f"{letter}) {choices[letter]}" for letter in letters)
-
-    instruction = (
-        "Answer the following multiple choice question. The last line of your response "
-        "should be of the following format: 'Answer: $LETTER' (without quotes) where "
-        f"LETTER is one of {letters_str}. Think step by step before answering."
+    letter_block = ", ".join(f"({letter})" for letter in letters)
+    option_lines = "\n".join(f" ({letter}) {choices[letter]}" for letter in letters)
+    return (
+        "Answer the following multiple-choice question by giving the correct answer letter in "
+        "parentheses. Provide CONCISE reasoning for the answer, and make sure to finish the "
+        'response with "Therefore, the answer is (ANSWER_LETTER)" where (ANSWER_LETTER) is one '
+        f"of {letter_block}.\n\n"
+        f"Question: {question}\n"
+        f"{option_lines}\n\n"
+        "Answer the above question and REMEMBER to finish your response with the exact phrase "
+        '"Therefore, the answer is (ANSWER_LETTER)" where (ANSWER_LETTER) is one of '
+        f"{letter_block}."
     )
-    return f"{instruction}\n\n{question}\n\n{option_lines}"

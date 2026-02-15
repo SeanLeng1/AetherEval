@@ -13,24 +13,30 @@ benchmarks/zebralogic/
 
 ## Data
 
-- Source: `jgyasu/bbeh` subset `zebra_puzzles` (same subset used in lighteval BBEH)
+- Task format follows OLMES ZebraLogic (`grid_mode`): each row contains
+  `id`, `size`, `puzzle`, and full `solution` table (`header` + `rows`).
+- `prepare_data.py` load order:
+  1. `allenai/ZebraLogicBench-private/grid_mode` (preferred, gated)
+  2. `WildEval/ZebraLogic/grid_mode` (public mirror with answers)
+  3. `allenai/ZebraLogicBench/grid_mode` (public fallback, rejected if redacted)
 - Local offline file: `data/eval.jsonl`
-- Regeneration script: `prepare_data.py`
 
 ## Prompting
 
 - Implemented in `task.py`
-- Uses direct puzzle prompt and requests final line format `ANSWER: <answer>`.
+- Prompt is OLMES-style ZebraLogic grid prompt with:
+  - one worked example,
+  - the target puzzle,
+  - explicit instruction to return JSON in schema:
+    `{"reasoning": "...", "solution": {"House 1": {...}, ...}}`.
 
 ## Metrics
 
 - Implemented in `metrics.py`
-- Extracts answer from:
-  - last `ANSWER:` line, else
-  - last non-empty line
-- Compares normalized string exact-match.
+- Parses the last complete JSON object in generation output.
+- Compares generated `solution` cells against gold table.
 - Reports:
-  - `accuracy`, `accuracy_stderr`
-  - `accuracy@n` when `n>1`
-  - `pass@k` (`k=1,2,4,...,n` by default)
-  - `parsed_rate`
+  - `puzzle_accuracy` (all cells correct)
+  - `cell_accuracy` (fraction of correct cells)
+  - `parsed` (JSON parse success rate)
+  - difficulty subgroup means (`*_sub_easy`, `*_sub_hard`)

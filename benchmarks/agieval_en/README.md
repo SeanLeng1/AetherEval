@@ -30,11 +30,17 @@ benchmarks/agieval_en/
 
 - Implemented in `task.py`
 - Converts AGIEval query to clean MCQ prompt with explicit options
-- Requires final line format: `Answer: <LETTER>`
+- Uses OLMo3-midtrain-style target ending:
+  - `Therefore, the answer is (LETTER)`
+  - plus concise reasoning before the final line
 
 ## Metrics
 
 - Implemented in `metrics.py`
+- Extraction follows OLMo3-style regex priority:
+  - exact `Therefore, the answer is (X)`
+  - template fallbacks (`so the answer is ...`, `answer: ...`, etc.)
+  - final raw letter fallback
 - Reported metrics include:
   - `accuracy`, `accuracy_stderr`
   - `accuracy@n` when `n>1`
