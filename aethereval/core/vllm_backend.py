@@ -197,7 +197,7 @@ class VLLMBackend:
         llm_args = {
             "model": self.model,
             "tensor_parallel_size": self.tensor_parallel_size,
-            "enforce_eager": True,
+            "enforce_eager": False,
         }
         llm_args.update(self.model_kwargs)
         self._llm = vllm.LLM(**llm_args)
@@ -220,7 +220,7 @@ class VLLMBackend:
         llm_args = {
             "model": self.model,
             "tensor_parallel_size": self.tensor_parallel_size,
-            "enforce_eager": True,
+            "enforce_eager": False,
         }
         llm_args.update(self.model_kwargs)
 
