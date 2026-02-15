@@ -1,0 +1,15 @@
+Files in this folder are sourced from Google Research IFEval:
+https://github.com/google-research/google-research/tree/master/instruction_following_eval
+
+Imported files:
+- evaluation_lib.py
+- instructions.py
+- instructions_registry.py
+- instructions_util.py
+
+Original copyright:
+Copyright 2026 The Google Research Authors.
+Licensed under the Apache License, Version 2.0.
+
+Local adaptations:
+- package import paths are rewritten to local relative imports.

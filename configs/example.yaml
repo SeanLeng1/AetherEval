@@ -1,0 +1,33 @@
+run:
+  model: "Qwen/Qwen3-0.6B-Base"
+  tasks: ["ifeval"]
+  inspect: false
+  output_dir: "outputs"
+  run_id: null
+  resume: false
+
+runtime:
+  dp_size: 1
+  tp_size: 1
+
+generation:
+  n: 1
+  max_new_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+  top_k: null
+  min_p: null
+  seed: 42
+
+metrics:
+  bootstrap_resamples: 1000
+  bootstrap_seed: 42
+  bootstrap_confidence: 0.95
+
+vllm:
+  gpu_memory_utilization: 0.8
+  max_model_len: 16384
+  dtype: "bfloat16"
+  extra_model_kwargs:
+    trust_remote_code: true
+    max_num_seqs: 512
