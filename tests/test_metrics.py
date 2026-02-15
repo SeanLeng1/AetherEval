@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import unittest
 
 from aethereval.core.task_register import load_task
@@ -627,6 +628,74 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["accuracy_atcoder"], 0.5, places=6)
         self.assertAlmostEqual(result["accuracy_leetcode"], 0.0, places=6)
 
+    def test_livecodebench_score_generation_requires_fenced_code(self) -> None:
+        bundle = load_task("livecodebench")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="lcb_fenced_only",
+            gold=None,
+            meta={"platform": "atcoder"},
+            data={
+                "question_content": "Print 42.",
+                "starter_code": "",
+                "fn_name": None,
+                "inputs": [""],
+                "outputs": ["42\n"],
+                "timeout_sec": 6,
+            },
+        )
+        scored = metrics_module.score_generation(sample, "print(42)")
+        self.assertEqual(scored["score"], 0.0)
+        self.assertFalse(scored["is_pass"])
+        self.assertFalse(scored["parsed"]["had_code"])
+        self.assertEqual(scored["parsed"]["extract_method"], "no_fenced_code")
+
+    def test_livecodebench_prompt_template_alignment(self) -> None:
+        bundle = load_task("livecodebench")
+
+        sample_no_starter = Sample(
+            id="lcb_prompt_std",
+            gold=None,
+            meta={"platform": "atcoder"},
+            data={
+                "question_content": "Given n, print n.",
+                "starter_code": "",
+                "fn_name": None,
+                "inputs": ["1"],
+                "outputs": ["1"],
+            },
+        )
+        prompt_no_starter = bundle.task_module.build_prompt(sample_no_starter)
+        self.assertEqual(prompt_no_starter[0]["role"], "system")
+        self.assertIn(
+            "question (problem specification) and will generate a correct Python program",
+            prompt_no_starter[0]["content"],
+        )
+        self.assertIn("### Question:", prompt_no_starter[1]["content"])
+        self.assertIn("### Format:", prompt_no_starter[1]["content"])
+        self.assertIn("Read the inputs from stdin solve the problem", prompt_no_starter[1]["content"])
+        self.assertIn("### Answer: (use the provided format with backticks)", prompt_no_starter[1]["content"])
+
+        sample_with_starter = Sample(
+            id="lcb_prompt_func",
+            gold=None,
+            meta={"platform": "leetcode"},
+            data={
+                "question_content": "Implement add.",
+                "starter_code": "class Solution:\n    def add(self, a, b):\n        pass",
+                "fn_name": "add",
+                "inputs": ["1\n2"],
+                "outputs": ["3"],
+            },
+        )
+        prompt_with_starter = bundle.task_module.build_prompt(sample_with_starter)
+        self.assertIn(
+            "You will use the following starter code to write the solution to the problem",
+            prompt_with_starter[1]["content"],
+        )
+        self.assertIn("class Solution:", prompt_with_starter[1]["content"])
+
     def test_humaneval_plus_score_generation(self) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module
@@ -705,6 +774,39 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["accuracy@2"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@2"], 0.5, places=6)
+
+    def test_humaneval_plus_score_generation_does_not_mutate_inputs(self) -> None:
+        bundle = load_task("humaneval_plus")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="HumanEval/mutation_guard",
+            gold=None,
+            meta={"entry_point": "find_closest_elements"},
+            data={
+                "task_id": "HumanEval/mutation_guard",
+                "prompt": "def find_closest_elements(numbers):\n",
+                "entry_point": "find_closest_elements",
+                "canonical_solution": (
+                    "    numbers.sort()\n"
+                    "    return (numbers[0], numbers[1])\n"
+                ),
+                "base_input": [[[3.0, 1.0, 2.0]], [[5.0, 4.0, 6.0]]],
+                "plus_input": [[[9.0, 7.0, 8.0]]],
+                "atol": 0.0,
+            },
+        )
+
+        before_base = copy.deepcopy(sample.data["base_input"])
+        before_plus = copy.deepcopy(sample.data["plus_input"])
+
+        metrics_module.score_generation(
+            sample,
+            "```python\ndef find_closest_elements(numbers):\n    return (numbers[0], numbers[1])\n```",
+        )
+
+        self.assertEqual(sample.data["base_input"], before_base)
+        self.assertEqual(sample.data["plus_input"], before_plus)
 
 
 if __name__ == "__main__":

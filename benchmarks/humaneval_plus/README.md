@@ -9,7 +9,6 @@ benchmarks/humaneval_plus/
   task.py
   metrics.py
   prepare_data.py
-  eval_runtime.py
 ```
 
 ## Data
@@ -29,7 +28,7 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 ## Metrics
 
 - Implemented in `metrics.py`
-- Uses benchmark-local runtime (`eval_runtime.py`) adapted from EvalPlus execution logic.
+- Directly uses EvalPlus runtime (`evalplus.gen.util.trusted_exec` and `evalplus.eval.untrusted_check`).
 - For each generation:
   - run base tests
   - run plus tests only if base passes

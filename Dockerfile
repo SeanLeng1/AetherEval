@@ -48,7 +48,7 @@ RUN pip install --no-cache-dir "vllm==0.15.1" && pip install torch-memory-saver 
 RUN pip install --no-cache-dir tensordict torchdata "transformers[hf_xet]==4.57.6" accelerate datasets peft hf-transfer \
     "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
     ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel==0.6.4 mathruler blobfile xgrammar \
-    pytest py-spy pre-commit ruff more_itertools tensorboard gcsfs math-verify langdetect
+    pytest py-spy pre-commit ruff more_itertools tensorboard gcsfs math-verify langdetect openai anthropic cohere mistralai pebble together
 
 # Install flash-attn-2.8.3
 RUN ABI_FLAG=$(python -c "import torch; print('TRUE' if torch._C._GLIBCXX_USE_CXX11_ABI else 'FALSE')") && \
@@ -61,6 +61,10 @@ RUN git clone --branch main --single-branch https://github.com/SeanLeng1/AetherE
     cd /opt/AetherEval && \
     git lfs install && git lfs pull && \
     pip install --no-cache-dir -e /opt/AetherEval
+
+# Install upstream metric references from pinned commits.
+RUN pip install --no-cache-dir --no-deps \
+    "evalplus @ git+https://github.com/evalplus/evalplus.git@26d6d00bb1fd0fa37f39c99d5290da67891d1c5e"
 
 # Install DeepEP
 # the dependency of IBGDA

@@ -1,48 +1,32 @@
 from __future__ import annotations
 
-import re
-import sys
-from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
-from aethereval.metrics.common import mean, mean_stderr, pass_at_k, resolve_pass_k_values, to_records
-from aethereval.core.types import Sample
-
-
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from lcb_eval_runtime import evaluate_candidate
+from aethereval.metrics.common import aggregate_binary_results
+from aethereval.core.types import GenerationRecord, Sample
+from benchmarks.livecodebench.lcb_eval_runtime import evaluate_candidate
 
 
 PRIMARY_METRIC = "pass@1"
 
 
-_CODE_BLOCK_RE = re.compile(
-    r"```(?P<lang>[A-Za-z0-9_-]*)\s*\n(?P<code>.*?)```",
-    re.DOTALL,
-)
-
-
 def _extract_code(text: str) -> tuple[str, str]:
-    matches = list(_CODE_BLOCK_RE.finditer(text))
-    if matches:
-        python_blocks = []
-        for match in matches:
-            lang = match.group("lang").strip().lower()
-            code = match.group("code").rstrip()
-            if lang in {"python", "py"}:
-                python_blocks.append(code)
-        if python_blocks:
-            return python_blocks[-1], "fenced_python"
-        return matches[-1].group("code").rstrip(), "fenced_code"
+    output_lines = text.split("\n")
+    fence_lines = [i for i, line in enumerate(output_lines) if "```" in line]
+    if len(fence_lines) < 2:
+        return "", "no_fenced_code"
 
-    stripped = text.strip()
-    if stripped:
-        return stripped, "raw_text"
-    return "", "empty"
+    start, end = fence_lines[-2], fence_lines[-1]
+    if end <= start:
+        return "", "invalid_fenced_code"
+
+    return "\n".join(output_lines[start + 1 : end]).rstrip(), "fenced_last_block"
+
+
+def _is_pass_status(value: int | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    return int(value) > 0
 
 
 def _first_error_code(statuses: list[int | bool]) -> int | None:
@@ -51,6 +35,11 @@ def _first_error_code(statuses: list[int | bool]) -> int | None:
             continue
         return int(value)
     return None
+
+
+def _parsed_has_code(record: GenerationRecord) -> bool:
+    parsed = record.parsed if isinstance(record.parsed, dict) else {}
+    return bool(parsed.get("had_code", False))
 
 
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
@@ -83,8 +72,8 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
         fn_name=fn_name,
         timeout=timeout,
     )
-    passed = bool(statuses) and all(value is True for value in statuses)
-    passed_tests = sum(1 for value in statuses if value is True)
+    passed = bool(statuses) and all(_is_pass_status(value) for value in statuses)
+    passed_tests = sum(1 for value in statuses if _is_pass_status(value))
 
     parsed = {
         "extract_method": extract_method,
@@ -111,80 +100,9 @@ def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    options = metric_options or {}
-    n_hint = int(options.get("n", 0)) if options.get("n") is not None else 0
-
-    if not sample_results:
-        return {
-            "accuracy": 0.0,
-            "accuracy_stderr": 0.0,
-            "parsed_rate": 0.0,
-            "pass@1": 0.0,
-            "pass@1_stderr": 0.0,
-        }
-
-    sample_mean_scores: list[float] = []
-    sample_parsed_rates: list[float] = []
-    sample_binary_scores: list[list[int]] = []
-    grouped_scores: dict[str, list[float]] = defaultdict(list)
-
-    for item in sample_results:
-        records = to_records(item.get("records", []))
-        if not records:
-            continue
-
-        scores: list[float] = []
-        parsed_flags: list[float] = []
-        for record in records:
-            scores.append(float(record.score))
-            parsed = record.parsed if isinstance(record.parsed, dict) else {}
-            parsed_flags.append(1.0 if bool(parsed.get("had_code", False)) else 0.0)
-
-        sample_mean = mean(scores)
-        sample_mean_scores.append(sample_mean)
-        sample_parsed_rates.append(mean(parsed_flags))
-        sample_binary_scores.append([1 if s >= 1.0 else 0 for s in scores])
-
-        meta = item.get("meta", {}) if isinstance(item.get("meta", {}), dict) else {}
-        platform = str(meta.get("platform", "")).strip().lower().replace("-", "_")
-        platform = re.sub(r"[^a-z0-9_]+", "_", platform).strip("_")
-        if platform:
-            grouped_scores[platform].append(sample_mean)
-
-    if not sample_mean_scores:
-        return {
-            "accuracy": 0.0,
-            "accuracy_stderr": 0.0,
-            "parsed_rate": 0.0,
-            "pass@1": 0.0,
-            "pass@1_stderr": 0.0,
-        }
-
-    n_ref = n_hint if n_hint > 0 else max(len(x) for x in sample_binary_scores)
-    pass_k_values = resolve_pass_k_values(options.get("pass_k_values"), n_ref)
-    if 1 not in pass_k_values and n_ref >= 1:
-        pass_k_values = [1] + pass_k_values
-
-    pass_metrics: dict[int, list[float]] = defaultdict(list)
-    for binary_scores in sample_binary_scores:
-        for k in pass_k_values:
-            if k <= len(binary_scores):
-                pass_metrics[k].append(pass_at_k(binary_scores, k))
-
-    result: dict[str, float] = {
-        "accuracy": mean(sample_mean_scores),
-        "accuracy_stderr": mean_stderr(sample_mean_scores),
-        "parsed_rate": mean(sample_parsed_rates),
-    }
-    if n_ref > 1:
-        result[f"accuracy@{n_ref}"] = result["accuracy"]
-
-    for k in sorted(pass_metrics):
-        values = pass_metrics[k]
-        result[f"pass@{k}"] = mean(values)
-        result[f"pass@{k}_stderr"] = mean_stderr(values)
-
-    for platform in sorted(grouped_scores):
-        result[f"accuracy_{platform}"] = mean(grouped_scores[platform])
-
-    return result
+    return aggregate_binary_results(
+        sample_results,
+        metric_options,
+        parsed_flag_fn=_parsed_has_code,
+        group_key="platform",
+    )

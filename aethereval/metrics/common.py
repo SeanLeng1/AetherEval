@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -313,10 +314,18 @@ def score_generation_mcq(sample: Sample, generation: str) -> dict[str, Any]:
     }
 
 
-def aggregate_mcq_results(
+def _default_mcq_parsed_flag(record: GenerationRecord) -> bool:
+    parsed = record.parsed if isinstance(record.parsed, dict) else {}
+    prediction = parsed.get("prediction")
+    return isinstance(prediction, str) and bool(prediction)
+
+
+def aggregate_binary_results(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
     *,
+    score_fn: Callable[[GenerationRecord], float] | None = None,
+    parsed_flag_fn: Callable[[GenerationRecord], bool] | None = None,
     group_key: str | None = None,
     group_metric_prefix: str = "accuracy_",
 ) -> dict[str, float]:
@@ -337,21 +346,16 @@ def aggregate_mcq_results(
     sample_binary_scores: list[list[int]] = []
     grouped_scores: dict[str, list[float]] = defaultdict(list)
 
+    value_fn = score_fn or (lambda record: float(record.score))
+    parsed_fn = parsed_flag_fn or _default_mcq_parsed_flag
+
     for item in sample_results:
         records = to_records(item.get("records", []))
         if not records:
             continue
 
-        record_scores: list[float] = []
-        record_parsed_flags: list[float] = []
-
-        for record in records:
-            score = float(record.score)
-            parsed = record.parsed if isinstance(record.parsed, dict) else {}
-            prediction = parsed.get("prediction")
-
-            record_scores.append(score)
-            record_parsed_flags.append(1.0 if isinstance(prediction, str) and prediction else 0.0)
+        record_scores = [float(value_fn(record)) for record in records]
+        record_parsed_flags = [1.0 if parsed_fn(record) else 0.0 for record in records]
 
         sample_acc = mean(record_scores)
         sample_parsed = mean(record_parsed_flags)
@@ -381,10 +385,12 @@ def aggregate_mcq_results(
         pass_k_values = [1] + pass_k_values
 
     pass_metrics: dict[int, list[float]] = defaultdict(list)
-    for binary_scores in sample_binary_scores:
-        for k in pass_k_values:
-            if k <= len(binary_scores):
-                pass_metrics[k].append(pass_at_k(binary_scores, k))
+    for k in pass_k_values:
+        # Match official EvalPlus/LiveCodeBench convention:
+        # only report pass@k when every sample has at least k generations.
+        if not all(len(binary_scores) >= k for binary_scores in sample_binary_scores):
+            continue
+        pass_metrics[k] = [pass_at_k(binary_scores, k) for binary_scores in sample_binary_scores]
 
     result: dict[str, float] = {
         "accuracy": mean(sample_acc_values),
@@ -403,3 +409,19 @@ def aggregate_mcq_results(
         result[f"{group_metric_prefix}{group_name}"] = mean(grouped_scores[group_name])
 
     return result
+
+
+def aggregate_mcq_results(
+    sample_results: list[dict[str, Any]],
+    metric_options: dict[str, Any] | None = None,
+    *,
+    group_key: str | None = None,
+    group_metric_prefix: str = "accuracy_",
+) -> dict[str, float]:
+    return aggregate_binary_results(
+        sample_results,
+        metric_options,
+        parsed_flag_fn=_default_mcq_parsed_flag,
+        group_key=group_key,
+        group_metric_prefix=group_metric_prefix,
+    )

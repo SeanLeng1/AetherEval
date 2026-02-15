@@ -8,6 +8,7 @@ import platform
 import signal
 import sys
 import time
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from io import StringIO
@@ -22,7 +23,7 @@ except Exception:
     pass
 
 
-_IMPORT_STRING = (
+IMPORT_STRING = (
     "from string import *\n"
     "from re import *\n"
     "from datetime import *\n"
@@ -61,6 +62,14 @@ _IMPORT_STRING = (
 )
 
 
+def truncatefn(s: Any, length: int = 300) -> str:
+    if not isinstance(s, str):
+        s = str(s)
+    if len(s) <= length:
+        return s
+    return s[: length // 2] + "...(truncated) ..." + s[-length // 2 :]
+
+
 class CodeType(Enum):
     CALL_BASED = 0
     STANDARD_INPUT = 1
@@ -70,16 +79,18 @@ class TimeoutException(Exception):
     pass
 
 
-def _timeout_handler(signum: int, frame: Any) -> None:
-    raise TimeoutException("alarm timeout")
+def timeout_handler(signum: int, frame: Any) -> None:
+    del signum, frame
+    print("timeout occured: alarm went off")
+    raise TimeoutException
 
 
 class Capturing(list):
     def __enter__(self) -> "Capturing":
         self._stdout = sys.stdout
         self._stringio = StringIO()
-        # Keep compatibility with code that closes stdout.
-        self._stringio.close = lambda: None  # type: ignore[assignment]
+        # Make closing StringIO a no-op for compatibility.
+        self._stringio.close = lambda x: 1  # type: ignore[assignment]
         sys.stdout = self._stringio
         return self
 
@@ -89,61 +100,59 @@ class Capturing(list):
         sys.stdout = self._stdout
 
 
-class _MockBuffer:
+class MockBuffer:
     def __init__(self, inputs: str) -> None:
-        self._inputs = inputs.encode("utf-8")
+        self.inputs = inputs.encode("utf-8")
 
     def read(self, *args: Any) -> bytes:
-        return self._inputs
+        return self.inputs
 
     def readline(self, *args: Any) -> bytes:
-        return self._inputs.split(b"\n")[0] + b"\n"
+        return self.inputs.split(b"\n")[0] + b"\n"
 
 
-class _MockStdinWithBuffer:
+class MockStdinWithBuffer:
     def __init__(self, inputs: str) -> None:
-        self._inputs = inputs
+        self.inputs = inputs
         self._stringio = StringIO(inputs)
-        self.buffer = _MockBuffer(inputs)
+        self.buffer = MockBuffer(inputs)
 
     def read(self, *args: Any) -> str:
-        return self._inputs
+        return self.inputs
 
     def readline(self, *args: Any) -> str:
         return self._stringio.readline(*args)
 
     def readlines(self, *args: Any) -> list[str]:
-        return self._inputs.split("\n")
+        return self.inputs.split("\n")
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stringio, name)
 
 
-def _clean_if_name(code: str) -> str:
+def clean_if_name(code: str) -> str:
     try:
         astree = ast.parse(code)
         last_block = astree.body[-1]
         if isinstance(last_block, ast.If):
-            condition = ast.unparse(last_block.test).strip()
-            if condition == "__name__ == '__main__'":
-                prefix = "\n".join(ast.unparse(stmt) for stmt in astree.body[:-1])
-                body = "\n".join(ast.unparse(stmt) for stmt in last_block.body)
-                code = prefix + ("\n" if prefix else "") + body
+            condition = last_block.test
+            if ast.unparse(condition).strip() == "__name__ == '__main__'":
+                code = ast.unparse(astree.body[:-1]) + "\n" + ast.unparse(last_block.body)  # type: ignore[arg-type]
     except Exception:
-        return code
+        pass
     return code
 
 
-def _make_function(code: str) -> str:
+def make_function(code: str) -> str:
     try:
-        astree = ast.parse(code)
         import_stmts = []
-        body_stmts = []
+        all_other_stmts = []
+        astree = ast.parse(code)
         for stmt in astree.body:
             if isinstance(stmt, (ast.Import, ast.ImportFrom)):
                 import_stmts.append(stmt)
             else:
-                body_stmts.append(stmt)
+                all_other_stmts.append(stmt)
 
         function_ast = ast.FunctionDef(
             name="wrapped_function",
@@ -154,203 +163,330 @@ def _make_function(code: str) -> str:
                 kw_defaults=[],
                 defaults=[],
             ),
-            body=body_stmts,
+            body=all_other_stmts,
             decorator_list=[],
             lineno=-1,
         )
-        import_text = "\n".join(ast.unparse(stmt) for stmt in import_stmts)
-        return (
-            _IMPORT_STRING
+        main_code = (
+            IMPORT_STRING
             + "\n"
-            + import_text
+            + ast.unparse(import_stmts)  # type: ignore[arg-type]
             + "\n"
             + ast.unparse(function_ast)
         )
+        return main_code
     except Exception:
         return code
 
 
-def _call_method(method: Any, inputs: list[str] | str) -> Any:
+def call_method(method: Any, inputs: list[str] | str) -> Any:
     if isinstance(inputs, list):
         inputs = "\n".join(inputs)
 
-    iter_lines = iter(inputs.split("\n"))
-    mock_stdin = _MockStdinWithBuffer(inputs)
+    inputs_line_iterator = iter(inputs.split("\n"))
+    mock_stdin = MockStdinWithBuffer(inputs)
 
     @patch("builtins.open", mock_open(read_data=inputs))
     @patch("sys.stdin", mock_stdin)
-    @patch("sys.stdin.readline", lambda *args: next(iter_lines))
+    @patch("sys.stdin.readline", lambda *args: next(inputs_line_iterator))
     @patch("sys.stdin.readlines", lambda *args: inputs.split("\n"))
     @patch("sys.stdin.read", lambda *args: inputs)
-    def _inner_call(inner_method: Any) -> Any:
+    def _inner_call_method(_method: Any) -> Any:
         try:
-            return inner_method()
+            return _method()
         except SystemExit:
             return None
 
-    return _inner_call(method)
+    return _inner_call_method(method)
 
 
-def _get_function(compiled_sol: Any, fn_name: str | None) -> Any:
-    if not fn_name:
-        return None
+def get_function(compiled_sol: Any, fn_name: str) -> Any:
     try:
-        if not hasattr(compiled_sol, fn_name):
-            return None
+        assert hasattr(compiled_sol, fn_name)
         return getattr(compiled_sol, fn_name)
     except Exception:
         return None
 
 
-def _compile_code(code: str, timeout: int) -> Any:
+def compile_code(code: str, timeout: int) -> Any:
     signal.alarm(timeout)
     try:
         tmp_sol = ModuleType("tmp_sol", "")
         exec(code, tmp_sol.__dict__)
         if "class Solution" in code:
-            return tmp_sol.Solution()
-        return tmp_sol
+            compiled_sol = tmp_sol.Solution()
+        else:
+            compiled_sol = tmp_sol
+        assert compiled_sol is not None
     finally:
         signal.alarm(0)
 
+    return compiled_sol
 
-def _convert_line_to_decimals(line: str) -> tuple[bool, list[Decimal]]:
+
+def convert_line_to_decimals(line: str) -> tuple[bool, list[Decimal]]:
     try:
-        return True, [Decimal(elem) for elem in line.split()]
+        decimal_line = [Decimal(elem) for elem in line.split()]
     except Exception:
         return False, []
+    return True, decimal_line
 
 
-def _get_stripped_lines(value: str) -> list[str]:
-    text = value.strip()
-    return [item.strip() for item in text.split("\n")]
+def get_stripped_lines(val: str) -> list[str]:
+    val = val.strip()
+    return [val_line.strip() for val_line in val.split("\n")]
 
 
-def _grade_call_based(
+def grade_call_based(
     code: str,
     all_inputs: list[str],
     all_outputs: list[str],
     fn_name: str,
     timeout: int,
-) -> list[int | bool]:
-    code = _IMPORT_STRING + "\n\n" + code
-    compiled_sol = _compile_code(code, timeout)
+) -> tuple[list[int | bool], dict[str, Any]] | None:
+    code = IMPORT_STRING + "\n\n" + code
+    compiled_sol = compile_code(code, timeout)
+
     if compiled_sol is None:
-        return [-4]
+        return None
 
-    method = _get_function(compiled_sol, fn_name)
+    method = get_function(compiled_sol, fn_name)
+
     if method is None:
-        return [-4]
+        return None
 
-    parsed_inputs = [
-        [json.loads(line) for line in inp.split("\n") if line.strip()]
-        for inp in all_inputs
-    ]
-    parsed_outputs = [json.loads(out) for out in all_outputs]
+    all_inputs = [[json.loads(line) for line in inputs.split("\n")] for inputs in all_inputs]
+    all_outputs = [json.loads(output) for output in all_outputs]
 
-    results: list[int | bool] = []
-    for gt_input, gt_output in zip(parsed_inputs, parsed_outputs):
+    total_execution = 0.0
+    all_results: list[int | bool] = []
+    for gt_inp, gt_out in zip(all_inputs, all_outputs):
         signal.alarm(timeout)
         faulthandler.enable()
         try:
-            prediction = method(*gt_input)
+            start = time.time()
+            prediction = method(*gt_inp)
+            total_execution += time.time() - start
             signal.alarm(0)
+
             if isinstance(prediction, tuple):
                 prediction = list(prediction)
-            is_correct = prediction == gt_output
-            results.append(bool(is_correct))
-            if not is_correct:
-                return results
-        except Exception as exc:
+
+            tmp_result = prediction == gt_out
+            all_results.append(bool(tmp_result))
+
+            if not tmp_result:
+                return all_results, {
+                    "output": truncatefn(prediction),
+                    "inputs": truncatefn(gt_inp),
+                    "expected": truncatefn(gt_out),
+                    "error_code": -2,
+                    "error_message": "Wrong Answer",
+                }
+        except Exception as e:  # noqa: BLE001
             signal.alarm(0)
-            if "timeoutexception" in repr(exc).lower():
-                results.append(-3)
-            else:
-                results.append(-4)
-            return results
+            if "timeoutexception" in repr(e).lower():
+                all_results.append(-3)
+                return all_results, {
+                    "error": repr(e),
+                    "error_code": -3,
+                    "error_message": "Time Limit Exceeded",
+                    "inputs": truncatefn(gt_inp),
+                    "expected": truncatefn(gt_out),
+                }
+
+            all_results.append(-4)
+            return all_results, {
+                "error": repr(e),
+                "error_code": -4,
+                "error_message": "Runtime Error",
+                "inputs": truncatefn(gt_inp),
+                "expected": truncatefn(gt_out),
+            }
         finally:
             signal.alarm(0)
             faulthandler.disable()
 
-    return results
+    return all_results, {"execution time": total_execution}
 
 
-def _grade_stdio(
+def grade_stdio(
     code: str,
     all_inputs: list[str],
     all_outputs: list[str],
     timeout: int,
-) -> list[int | bool]:
-    code = _clean_if_name(code)
-    code = _make_function(code)
+) -> tuple[list[int | bool], dict[str, Any]] | None:
+    code = clean_if_name(code)
+    code = make_function(code)
 
-    compiled_sol = _compile_code(code, timeout)
+    compiled_sol = compile_code(code, timeout)
     if compiled_sol is None:
-        return [-4]
+        return None
 
-    method = _get_function(compiled_sol, "wrapped_function")
+    method = get_function(compiled_sol, "wrapped_function")
+
     if method is None:
-        return [-4]
+        return None
 
-    results: list[int | bool] = []
-    for gt_input, gt_output in zip(all_inputs, all_outputs):
+    all_results: list[int | bool] = []
+    total_execution_time = 0.0
+    for gt_inp, gt_out in zip(all_inputs, all_outputs):
         signal.alarm(timeout)
         faulthandler.enable()
+
+        signal.alarm(timeout)
         with Capturing() as captured_output:
             try:
-                _call_method(method, gt_input)
+                start = time.time()
+                call_method(method, gt_inp)
+                total_execution_time += time.time() - start
                 signal.alarm(0)
-            except Exception as exc:
+            except Exception as e:  # noqa: BLE001
                 signal.alarm(0)
-                if "timeoutexception" in repr(exc).lower():
-                    results.append(-3)
-                else:
-                    results.append(-4)
-                return results
+                if "timeoutexception" in repr(e).lower():
+                    all_results.append(-3)
+                    return all_results, {
+                        "error": repr(e),
+                        "error_code": -3,
+                        "error_message": "Time Limit Exceeded",
+                        "inputs": truncatefn(gt_inp),
+                        "expected": truncatefn(gt_out),
+                    }
+
+                all_results.append(-4)
+                return all_results, {
+                    "error": repr(e),
+                    "error_code": -4,
+                    "error_message": "Runtime Error",
+                    "inputs": truncatefn(gt_inp),
+                    "expected": truncatefn(gt_out),
+                }
             finally:
                 signal.alarm(0)
                 faulthandler.disable()
 
-        prediction = captured_output[0] if captured_output else ""
-        pred_lines = _get_stripped_lines(prediction)
-        gold_lines = _get_stripped_lines(gt_output)
+        prediction = captured_output[0]
 
-        if len(pred_lines) != len(gold_lines):
-            results.append(-2)
-            return results
+        stripped_prediction_lines = get_stripped_lines(prediction)
+        stripped_gt_out_lines = get_stripped_lines(gt_out)
 
-        matched = True
-        for pred_line, gold_line in zip(pred_lines, gold_lines):
-            if pred_line == gold_line:
+        wa_send_args: dict[str, Any] = {
+            "output": truncatefn(prediction),
+            "inputs": truncatefn(gt_inp),
+            "expected": truncatefn(gt_out),
+            "error_code": -2,
+        }
+
+        if len(stripped_prediction_lines) != len(stripped_gt_out_lines):
+            all_results.append(-2)
+            wa_send_args["error_message"] = "Wrong answer: mismatched output length"
+            return all_results, wa_send_args
+
+        for output_line_idx, (
+            stripped_prediction_line,
+            stripped_gt_out_line,
+        ) in enumerate(zip(stripped_prediction_lines, stripped_gt_out_lines)):
+            wa_send_args["error_message"] = (
+                f"Wrong answer at {output_line_idx=}: "
+                f"{truncatefn(stripped_prediction_line)} != {truncatefn(stripped_gt_out_line)}"
+            )
+
+            if stripped_prediction_line == stripped_gt_out_line:
                 continue
 
-            ok_pred, pred_decimals = _convert_line_to_decimals(pred_line)
-            if not ok_pred:
-                matched = False
-                break
-            ok_gold, gold_decimals = _convert_line_to_decimals(gold_line)
-            if not ok_gold:
-                matched = False
-                break
-            if pred_decimals != gold_decimals:
-                matched = False
-                break
+            success, decimal_prediction_line = convert_line_to_decimals(stripped_prediction_line)
+            if not success:
+                all_results.append(-2)
+                return all_results, wa_send_args
 
-        if matched:
-            results.append(True)
-        else:
-            results.append(-2)
-            return results
+            success, decimal_gtout_line = convert_line_to_decimals(stripped_gt_out_line)
+            if not success:
+                all_results.append(-2)
+                return all_results, wa_send_args
 
-    return results
+            if decimal_prediction_line == decimal_gtout_line:
+                continue
+
+            all_results.append(-2)
+            return all_results, wa_send_args
+
+        all_results.append(True)
+
+    return all_results, {"execution time": total_execution_time}
 
 
-def _safe_disable_attr(obj: Any, name: str) -> None:
-    if hasattr(obj, name):
+def run_test(
+    sample: dict[str, Any],
+    test: str | None = None,
+    debug: bool = False,
+    timeout: int = 6,
+) -> tuple[list[int | bool], dict[str, Any]]:
+    signal.signal(signal.SIGALRM, timeout_handler)
+    reliability_guard()
+
+    if debug:
+        print(f"start = {datetime.now().time()}")
+
+    try:
+        in_outs = json.loads(sample["input_output"])
+    except ValueError as e:
+        raise e
+
+    if in_outs.get("fn_name") is None:
+        which_type = CodeType.STANDARD_INPUT
+        method_name = None
+    else:
+        which_type = CodeType.CALL_BASED
+        method_name = in_outs["fn_name"]
+
+    if debug:
+        print(f"loaded input_output = {datetime.now().time()}")
+
+    if test is None:
+        raise AssertionError("should not happen: test code is none")
+
+    if debug:
+        print(f"loading test code = {datetime.now().time()}")
+
+    if which_type == CodeType.CALL_BASED:
+        signal.alarm(timeout)
         try:
-            setattr(obj, name, None)
-        except Exception:
-            return
+            result = grade_call_based(
+                code=test,
+                all_inputs=in_outs["inputs"],
+                all_outputs=in_outs["outputs"],
+                fn_name=method_name,
+                timeout=timeout,
+            )
+            if result is None:
+                raise RuntimeError("call-based grader returned None")
+            return result
+        except Exception as e:  # noqa: BLE001
+            return [-4], {
+                "error_code": -4,
+                "error_message": f"Error during testing: {e}",
+            }
+        finally:
+            signal.alarm(0)
+
+    signal.alarm(timeout)
+    try:
+        result = grade_stdio(
+            code=test,
+            all_inputs=in_outs["inputs"],
+            all_outputs=in_outs["outputs"],
+            timeout=timeout,
+        )
+        if result is None:
+            raise RuntimeError("stdio grader returned None")
+        return result
+    except Exception as e:  # noqa: BLE001
+        return [-4], {
+            "error_code": -4,
+            "error_message": f"Error during testing: {e}",
+        }
+    finally:
+        signal.alarm(0)
 
 
 def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
@@ -359,123 +495,133 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
 
         resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
         resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
-        if platform.uname().system != "Darwin":
-            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+        if not platform.uname().system == "Darwin":
+            resource.setrlimit(
+                resource.RLIMIT_STACK,
+                (maximum_memory_bytes, maximum_memory_bytes),
+            )
 
     faulthandler.disable()
 
     import builtins
+
+    builtins.quit = None
+
     import os
-    import shutil
-    import subprocess
 
     os.environ["OMP_NUM_THREADS"] = "1"
 
-    _safe_disable_attr(builtins, "quit")
+    os.kill = None
+    os.system = None
+    os.putenv = None
+    os.remove = None
+    os.removedirs = None
+    os.rmdir = None
+    os.fchdir = None
+    os.setuid = None
+    os.fork = None
+    os.forkpty = None
+    os.killpg = None
+    os.rename = None
+    os.renames = None
+    os.truncate = None
+    os.replace = None
+    os.unlink = None
+    os.fchmod = None
+    os.fchown = None
+    os.chmod = None
+    os.chown = None
+    os.chroot = None
+    os.fchdir = None
+    os.lchflags = None
+    os.lchmod = None
+    os.lchown = None
+    os.getcwd = None
+    os.chdir = None
 
-    for attr in (
-        "kill",
-        "system",
-        "putenv",
-        "remove",
-        "removedirs",
-        "rmdir",
-        "fchdir",
-        "setuid",
-        "fork",
-        "forkpty",
-        "killpg",
-        "rename",
-        "renames",
-        "truncate",
-        "replace",
-        "unlink",
-        "fchmod",
-        "fchown",
-        "chmod",
-        "chown",
-        "chroot",
-        "lchflags",
-        "lchmod",
-        "lchown",
-        "getcwd",
-        "chdir",
-    ):
-        _safe_disable_attr(os, attr)
+    import shutil
 
-    for attr in ("rmtree", "move", "chown"):
-        _safe_disable_attr(shutil, attr)
+    shutil.rmtree = None
+    shutil.move = None
+    shutil.chown = None
 
-    _safe_disable_attr(subprocess, "Popen")
-    for name in ("ipdb", "joblib", "resource", "psutil", "tkinter"):
-        try:
-            sys.modules[name] = None
-        except Exception:
-            continue
+    import subprocess
+
+    subprocess.Popen = None  # type: ignore[assignment]
 
     try:
-        if isinstance(__builtins__, dict):
-            __builtins__["help"] = None
+        __builtins__["help"] = None  # type: ignore[index]
     except Exception:
         pass
 
-
-def run_test(sample: dict[str, Any], test: str | None = None, timeout: int = 6) -> list[int | bool]:
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    reliability_guard()
-
-    in_outs = json.loads(sample["input_output"])
-    fn_name = in_outs.get("fn_name")
-    code_type = CodeType.CALL_BASED if fn_name is not None else CodeType.STANDARD_INPUT
-
-    if test is None:
-        return [-4]
-
-    if code_type == CodeType.CALL_BASED:
-        signal.alarm(timeout)
-        try:
-            return _grade_call_based(
-                code=test,
-                all_inputs=in_outs["inputs"],
-                all_outputs=in_outs["outputs"],
-                fn_name=str(fn_name),
-                timeout=timeout,
-            )
-        except Exception:
-            return [-4]
-        finally:
-            signal.alarm(0)
-
-    signal.alarm(timeout)
-    try:
-        return _grade_stdio(
-            code=test,
-            all_inputs=in_outs["inputs"],
-            all_outputs=in_outs["outputs"],
-            timeout=timeout,
-        )
-    except Exception:
-        return [-4]
-    finally:
-        signal.alarm(0)
+    sys.modules["ipdb"] = None
+    sys.modules["joblib"] = None
+    sys.modules["resource"] = None
+    sys.modules["psutil"] = None
+    sys.modules["tkinter"] = None
 
 
-def check_correctness(sample: dict[str, Any], generation: str, timeout: int) -> list[int | bool]:
-    def _temp_run(local_sample: dict[str, Any], local_generation: str, result: Any) -> None:
-        result.append(run_test(local_sample, test=local_generation, timeout=timeout))
+def _temp_run(
+    sample: dict[str, Any],
+    generation: str,
+    debug: bool,
+    result: Any,
+    metadata_list: Any,
+    timeout: int,
+) -> None:
+    res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
+    result.append(res)
+    metadata_list.append(metadata)
 
+
+def check_correctness(
+    sample: dict[str, Any],
+    generation: str,
+    timeout: int,
+    debug: bool = False,
+) -> tuple[list[int | bool], dict[str, Any]]:
     manager = multiprocessing.Manager()
     result = manager.list()
-    process = multiprocessing.Process(target=_temp_run, args=(sample, generation, result))
-    process.start()
-    process.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
-    if process.is_alive():
-        process.kill()
+    metadata_list = manager.list()
+    p = multiprocessing.Process(
+        target=_temp_run,
+        args=(sample, generation, debug, result, metadata_list, timeout),
+    )
+    p.start()
+    p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
+    if p.is_alive():
+        p.kill()
 
     if not result:
-        num_tests = len(json.loads(sample["input_output"])["inputs"])
-        return [-1 for _ in range(num_tests)]
-    return list(result[0])
+        in_outs = json.loads(sample["input_output"])
+        result = [[-1 for _ in range(len(in_outs["inputs"]))]]
+        if not metadata_list:
+            metadata_list = [
+                {
+                    "error_code": -1,
+                    "error_message": "Global Timeout",
+                }
+            ]
+        if debug:
+            print("global timeout")
+
+    metadata = metadata_list[0] if metadata_list else {"error_code": -1, "error_message": "Global Timeout"}
+    return list(result[0]), dict(metadata)
+
+
+def _normalize_status(value: Any) -> int | bool:
+    # Keep official semantics: booleans are pass/fail, negatives are error codes.
+    if hasattr(value, "item"):
+        try:
+            value = value.item(0)
+        except Exception:
+            pass
+    if isinstance(value, bool):
+        return value
+    try:
+        return int(value)
+    except Exception:
+        return -5
 
 
 def evaluate_candidate(
@@ -495,13 +641,21 @@ def evaluate_candidate(
             }
         )
     }
-    start = time.time()
+
     try:
-        statuses = check_correctness(payload, code, timeout=int(timeout))
+        statuses, metadata = check_correctness(payload, code, timeout=int(timeout), debug=False)
     except Exception as exc:  # noqa: BLE001
         return [-5], f"{type(exc).__name__}: {exc}"
 
-    elapsed = time.time() - start
-    if elapsed > max(2.0, (timeout + 1) * max(len(inputs), 1) + 5.0):
-        return statuses, "global timeout"
-    return statuses, None
+    normalized = [_normalize_status(x) for x in statuses]
+
+    runtime_error: str | None = None
+    error_code = metadata.get("error_code") if isinstance(metadata, dict) else None
+    if error_code in (-1, -3, -4, -5):
+        message = metadata.get("error_message") if isinstance(metadata, dict) else None
+        if not message and isinstance(metadata, dict):
+            message = metadata.get("error")
+        if isinstance(message, str) and message:
+            runtime_error = message
+
+    return normalized, runtime_error

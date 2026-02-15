@@ -204,7 +204,7 @@ class VLLMBackend:
         self._tokenizer = self._llm.get_tokenizer()
 
     def _init_ray(self) -> None:
-        vllm = self._import_vllm()
+        self._import_vllm()
         try:
             import ray
         except ImportError as exc:

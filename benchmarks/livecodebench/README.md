@@ -38,6 +38,7 @@ Why `v6`:
 
 - Implemented in `metrics.py`
 - Runtime executor is benchmark-local in `lcb_eval_runtime.py` (call-based + stdio execution).
+- Code extraction follows official-style fenced-code parsing (uses last fenced block; no raw-text fallback).
 - Per generation score:
   - `1.0` if all tests pass
   - `0.0` otherwise
@@ -48,3 +49,6 @@ Reported metrics:
 - `pass@k` (`k=1,2,4,...,n` by default)
 - `parsed_rate`
 - `accuracy_<platform>` (e.g., `accuracy_atcoder`, `accuracy_leetcode`)
+
+Performance note:
+- Scoring concurrency is controlled globally from CLI via `--score-workers`.

@@ -16,7 +16,6 @@
 
 import functools
 import random
-import re
 
 import nltk
 

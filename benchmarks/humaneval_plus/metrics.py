@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import re
-import sys
-from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
-from aethereval.metrics.common import mean, mean_stderr, pass_at_k, resolve_pass_k_values, to_records
-from aethereval.core.types import Sample
+from aethereval.metrics.common import aggregate_binary_results, mean, mean_stderr, to_records
+from aethereval.core.types import GenerationRecord, Sample
 
-
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from eval_runtime import PASS, trusted_exec, untrusted_check
+try:
+    from evalplus.config import DEFAULT_GT_TIME_LIMIT_FACTOR, DEFAULT_MIN_TIME_LIMIT
+    from evalplus.eval import PASS, untrusted_check as _evalplus_untrusted_check
+    from evalplus.gen.util import trusted_exec
+except ImportError as exc:  # pragma: no cover
+    raise RuntimeError(
+        "evalplus is required for humaneval_plus metrics. Install with `pip install evalplus`."
+    ) from exc
 
 
 PRIMARY_METRIC = "pass@1"
@@ -22,6 +21,63 @@ PRIMARY_METRIC = "pass@1"
 
 _CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 _ORACLE_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _empty_aggregate_result() -> dict[str, float]:
+    return {
+        "accuracy": 0.0,
+        "accuracy_stderr": 0.0,
+        "accuracy_plus": 0.0,
+        "accuracy_plus_stderr": 0.0,
+        "accuracy_base": 0.0,
+        "accuracy_base_stderr": 0.0,
+        "pass@1": 0.0,
+        "pass@1_stderr": 0.0,
+    }
+
+
+def _untrusted_check(
+    code: str,
+    inputs: list[Any],
+    entry_point: str,
+    *,
+    expected: list[Any],
+    atol: float,
+    ref_time: list[float],
+    fast_check: bool = False,
+    min_time_limit: float = DEFAULT_MIN_TIME_LIMIT,
+    gt_time_limit_factor: float = DEFAULT_GT_TIME_LIMIT_FACTOR,
+) -> tuple[str, list[bool]]:
+    status, details = _evalplus_untrusted_check(
+        "humaneval",
+        code,
+        inputs,
+        entry_point,
+        expected=expected,
+        atol=atol,
+        ref_time=ref_time,
+        fast_check=fast_check,
+        min_time_limit=min_time_limit,
+        gt_time_limit_factor=gt_time_limit_factor,
+    )
+    return status, [bool(x) for x in list(details)]
+
+
+def _record_plus_score(record: GenerationRecord) -> float:
+    parsed = record.parsed if isinstance(record.parsed, dict) else {}
+    plus_pass = bool(parsed.get("plus_pass", bool(record.score >= 1.0)))
+    return 1.0 if plus_pass else 0.0
+
+
+def _record_base_score(record: GenerationRecord) -> float:
+    parsed = record.parsed if isinstance(record.parsed, dict) else {}
+    plus_pass = bool(parsed.get("plus_pass", bool(record.score >= 1.0)))
+    base_pass = bool(parsed.get("base_pass", plus_pass))
+    return 1.0 if base_pass else 0.0
+
+
+def _record_has_parsed(record: GenerationRecord) -> bool:
+    return isinstance(record.parsed, dict) and bool(record.parsed)
 
 
 def _normalize_inputs(raw_inputs: list[Any]) -> list[list[Any]]:
@@ -104,7 +160,7 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     oracle = _oracle(sample)
     solution, is_full_solution = _candidate_solution(sample, generation)
 
-    base_status, _ = untrusted_check(
+    base_status, _ = _untrusted_check(
         solution,
         oracle["base_input"],
         entry_point,
@@ -117,7 +173,7 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     if base_status != PASS:
         plus_status = base_status
     else:
-        plus_status, _ = untrusted_check(
+        plus_status, _ = _untrusted_check(
             solution,
             oracle["plus_input"],
             entry_point,
@@ -152,89 +208,40 @@ def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    options = metric_options or {}
-    n_hint = int(options.get("n", 0)) if options.get("n") is not None else 0
-
     if not sample_results:
-        return {
-            "accuracy": 0.0,
-            "accuracy_stderr": 0.0,
-            "accuracy_plus": 0.0,
-            "accuracy_plus_stderr": 0.0,
-            "accuracy_base": 0.0,
-            "accuracy_base_stderr": 0.0,
-            "pass@1": 0.0,
-            "pass@1_stderr": 0.0,
-        }
+        return _empty_aggregate_result()
 
-    plus_means: list[float] = []
     base_means: list[float] = []
-    parsed_flags: list[float] = []
-    sample_binary_plus: list[list[int]] = []
+    plus_metrics = aggregate_binary_results(
+        sample_results,
+        metric_options,
+        score_fn=_record_plus_score,
+        parsed_flag_fn=_record_has_parsed,
+    )
 
     for item in sample_results:
         records = to_records(item.get("records", []))
         if not records:
             continue
 
-        plus_scores: list[float] = []
-        base_scores: list[float] = []
-        parsed_local: list[float] = []
-
-        for record in records:
-            parsed = record.parsed if isinstance(record.parsed, dict) else {}
-            plus_pass = bool(parsed.get("plus_pass", bool(record.score >= 1.0)))
-            base_pass = bool(parsed.get("base_pass", plus_pass))
-            plus_scores.append(1.0 if plus_pass else 0.0)
-            base_scores.append(1.0 if base_pass else 0.0)
-            parsed_local.append(1.0 if isinstance(parsed, dict) and parsed else 0.0)
-
-        plus_means.append(mean(plus_scores))
+        base_scores = [_record_base_score(record) for record in records]
         base_means.append(mean(base_scores))
-        parsed_flags.append(mean(parsed_local))
-        sample_binary_plus.append([int(x >= 1.0) for x in plus_scores])
 
-    if not plus_means:
-        return {
-            "accuracy": 0.0,
-            "accuracy_stderr": 0.0,
-            "accuracy_plus": 0.0,
-            "accuracy_plus_stderr": 0.0,
-            "accuracy_base": 0.0,
-            "accuracy_base_stderr": 0.0,
-            "pass@1": 0.0,
-            "pass@1_stderr": 0.0,
+    if not base_means:
+        return _empty_aggregate_result()
+
+    accuracy_plus = float(plus_metrics.get("accuracy", 0.0))
+    accuracy_plus_stderr = float(plus_metrics.get("accuracy_stderr", 0.0))
+    result: dict[str, float] = dict(plus_metrics)
+    result.update(
+        {
+            "accuracy": accuracy_plus,
+            "accuracy_stderr": accuracy_plus_stderr,
+            "accuracy_plus": accuracy_plus,
+            "accuracy_plus_stderr": accuracy_plus_stderr,
+            "accuracy_base": mean(base_means),
+            "accuracy_base_stderr": mean_stderr(base_means),
         }
-
-    n_ref = n_hint if n_hint > 0 else max(len(x) for x in sample_binary_plus)
-    pass_k_values = resolve_pass_k_values(options.get("pass_k_values"), n_ref)
-    if 1 not in pass_k_values and n_ref >= 1:
-        pass_k_values = [1] + pass_k_values
-
-    pass_metrics: dict[int, list[float]] = defaultdict(list)
-    for binary_scores in sample_binary_plus:
-        for k in pass_k_values:
-            if k <= len(binary_scores):
-                pass_metrics[k].append(pass_at_k(binary_scores, k))
-
-    accuracy_plus = mean(plus_means)
-    accuracy_plus_stderr = mean_stderr(plus_means)
-    result: dict[str, float] = {
-        "accuracy": accuracy_plus,
-        "accuracy_stderr": accuracy_plus_stderr,
-        "accuracy_plus": accuracy_plus,
-        "accuracy_plus_stderr": accuracy_plus_stderr,
-        "accuracy_base": mean(base_means),
-        "accuracy_base_stderr": mean_stderr(base_means),
-        "parsed_rate": mean(parsed_flags),
-    }
-
-    if n_ref > 1:
-        result[f"accuracy@{n_ref}"] = accuracy_plus
-
-    for k in sorted(pass_metrics):
-        values = pass_metrics[k]
-        result[f"pass@{k}"] = mean(values)
-        result[f"pass@{k}_stderr"] = mean_stderr(values)
+    )
 
     return result

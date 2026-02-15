@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Tensor parallel size per worker.",
     )
+    parser.add_argument(
+        "--score-workers",
+        type=int,
+        default=None,
+        help="Scoring process pool workers for metric score_generation (default: 1).",
+    )
 
     parser.add_argument("--n", type=int, default=None, help="Override number of generations per sample.")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override max new tokens.")
@@ -116,7 +122,7 @@ def main() -> None:
     _info(
         f"model={resolved['model']} tasks={resolved['tasks']} "
         f"dp_size={resolved['dp_size']} tp_size={resolved['tp_size']} "
-        f"overwrite={resolved['overwrite']}"
+        f"score_workers={resolved['score_workers']} overwrite={resolved['overwrite']}"
     )
     _info(
         f"output_dir={resolved['output_dir']} "
@@ -159,6 +165,7 @@ def main() -> None:
         bootstrap_resamples=resolved["bootstrap_resamples"],
         bootstrap_seed=resolved["bootstrap_seed"],
         bootstrap_confidence=resolved["bootstrap_confidence"],
+        score_workers=resolved["score_workers"],
         overwrite=resolved["overwrite"],
         run_id=resolved["run_id"],
         model_kwargs=resolved["model_kwargs"],

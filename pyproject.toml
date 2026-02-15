@@ -26,4 +26,4 @@ dependencies = [
 aethereval = "aethereval.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["aethereval*"]
+include = ["aethereval*", "benchmarks*"]

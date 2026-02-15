@@ -95,6 +95,57 @@ def _write_toy_benchmark(root: Path) -> None:
     )
 
 
+def _write_toy2_benchmark(root: Path) -> None:
+    task_dir = root / "toy2"
+    data_dir = task_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = [
+        {"id": "1", "question": "whoami", "answer": "unknown"},
+        {"id": "2", "question": "name", "answer": "unknown"},
+    ]
+    with (data_dir / "eval.jsonl").open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    (task_dir / "task.py").write_text(
+        "from __future__ import annotations\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "from aethereval.core.types import Sample\n"
+        "TASK_NAME='toy2'\n"
+        "DATA_FILE='data/eval.jsonl'\n"
+        "DEFAULT_GEN={'n': 1, 'max_new_tokens': 16, 'temperature': 0.0, 'top_p': 1.0}\n"
+        "def load_samples(task_dir: Path):\n"
+        "    rows = []\n"
+        "    with (task_dir / DATA_FILE).open('r', encoding='utf-8') as f:\n"
+        "        for line in f:\n"
+        "            line = line.strip()\n"
+        "            if not line:\n"
+        "                continue\n"
+        "            rows.append(json.loads(line))\n"
+        "    out = []\n"
+        "    for row in rows:\n"
+        "        out.append(Sample(id=str(row['id']), gold=row['answer'], meta={'question': row['question']}, data={'question': row['question']}))\n"
+        "    return out\n"
+        "def build_prompt(sample: Sample):\n"
+        "    return f\"Question: {sample.data['question']}\\nAnswer:\"\n",
+        encoding="utf-8",
+    )
+
+    (task_dir / "metrics.py").write_text(
+        "from __future__ import annotations\n"
+        "def score_generation(sample, generation):\n"
+        "    pred = generation.strip().lower()\n"
+        "    gold = str(sample.gold).strip().lower()\n"
+        "    return {'score': 1.0 if pred == gold else 0.0}\n"
+        "def aggregate(sample_results, metric_options=None):\n"
+        "    first_scores = [float(item['scores'][0]) if item.get('scores') else 0.0 for item in sample_results]\n"
+        "    return {'accuracy_first': sum(first_scores)/len(first_scores) if first_scores else 0.0}\n",
+        encoding="utf-8",
+    )
+
+
 class RunnerTests(unittest.TestCase):
     def test_end_to_end_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +302,41 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["sample_id"], "1")
             self.assertIn("Question: 2 + 2", rows[0]["prompt"])
+
+    def test_run_summary_includes_existing_tasks_under_same_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            _write_toy2_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="run_merge",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+            )
+            second = run_evaluation(
+                model="fake-model",
+                tasks="toy2",
+                output_dir=out,
+                run_id="run_merge",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+            )
+
+            self.assertEqual(second["selected_tasks"], ["toy2"])
+            self.assertEqual(second["tasks"], ["toy", "toy2"])
+            self.assertIn("toy", second["results"])
+            self.assertIn("toy2", second["results"])
+            self.assertEqual(second["summary"]["num_tasks"], 2)
+            self.assertAlmostEqual(
+                second["summary"]["metrics"]["accuracy_first"],
+                1.0,
+                places=6,
+            )
 
 
 if __name__ == "__main__":

@@ -16,8 +16,20 @@ DATA_FILE = "data/eval.jsonl"
 
 _SYSTEM_PROMPT = (
     "You are an expert Python programmer. "
-    "Write a correct Python solution that follows the required I/O format "
-    "and passes all hidden tests."
+    "You will be given a question (problem specification) and will generate a correct "
+    "Python program that matches the specification and passes all tests."
+)
+
+_FORMATTING_MESSAGE_WITH_STARTER_CODE = (
+    "You will use the following starter code to write the solution to the problem "
+    "and enclose your code within delimiters."
+)
+
+_FORMATTING_WITHOUT_STARTER_CODE = (
+    "Read the inputs from stdin solve the problem and write the answer to stdout "
+    "(do not directly test on the sample inputs). Enclose your code within delimiters "
+    "as follows. Ensure that when the python program runs, it reads the inputs, runs "
+    "the algorithm and writes output to STDOUT."
 )
 
 
@@ -139,26 +151,21 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
 def build_prompt(sample: Sample) -> list[dict[str, str]]:
     question = str(sample.data["question_content"])
-    starter_code = str(sample.data.get("starter_code", "")).rstrip()
+    starter_code = str(sample.data.get("starter_code", ""))
 
-    user_prompt = (
-        "You will be given a programming problem. "
-        "Write a correct Python program that matches the specification and passes all tests.\n\n"
-        f"Question:\n{question}\n\n"
-    )
+    user_prompt = f"### Question:\n{question}\n\n"
 
     if starter_code:
         user_prompt += (
-            "Use the following starter code and complete it.\n"
-            "Return only Python code enclosed in triple backticks.\n\n"
+            f"### Format: {_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
             f"```python\n{starter_code}\n```\n"
         )
     else:
         user_prompt += (
-            "Read from stdin and write to stdout.\n"
-            "Return only Python code enclosed in triple backticks.\n\n"
+            f"### Format: {_FORMATTING_WITHOUT_STARTER_CODE}\n"
             "```python\n# YOUR CODE HERE\n```\n"
         )
+    user_prompt += "\n### Answer: (use the provided format with backticks)\n\n"
 
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},

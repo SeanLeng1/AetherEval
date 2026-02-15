@@ -1,21 +1,13 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 from aethereval.metrics.common import aggregate_instruction_following_results
 from aethereval.core.types import Sample
+from benchmarks.ifbench.ifbench_lib import evaluation_lib
 
 
 PRIMARY_METRIC = "prompt_level_strict_acc"
-
-
-_THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
-
-from ifbench_lib import evaluation_lib
 
 
 def _build_input_example(sample: Sample) -> evaluation_lib.InputExample:

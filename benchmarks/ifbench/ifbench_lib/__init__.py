@@ -1,1 +1,2 @@
-"""IFBench evaluation library (vendored from allenai/IFBench)."""
+"""IFBench helper library package."""
+
