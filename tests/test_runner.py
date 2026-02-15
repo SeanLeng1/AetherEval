@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aethereval.runner import inspect_prompts, run_evaluation
-from aethereval.types import GenerationInput, GenerationOutput
+from aethereval.core.runner import inspect_prompts, run_evaluation
+from aethereval.core.types import GenerationInput, GenerationOutput
 
 
 class FakeBackend:
@@ -61,7 +61,7 @@ def _write_toy_benchmark(root: Path) -> None:
         "from __future__ import annotations\n"
         "import json\n"
         "from pathlib import Path\n"
-        "from aethereval.types import Sample\n"
+        "from aethereval.core.types import Sample\n"
         "TASK_NAME='toy'\n"
         "DATA_FILE='data/eval.jsonl'\n"
         "DEFAULT_GEN={'n': 1, 'max_new_tokens': 16, 'temperature': 0.0, 'top_p': 1.0}\n"
@@ -115,11 +115,16 @@ class RunnerTests(unittest.TestCase):
             summary = first["results"]["toy"]
             self.assertEqual(summary["new_records"], 2)
             self.assertAlmostEqual(summary["metrics"]["accuracy_first"], 1.0, places=6)
+            self.assertEqual(summary["primary_metric"], "accuracy_first")
+            self.assertAlmostEqual(float(summary["primary_score"]), 1.0, places=6)
             self.assertAlmostEqual(
                 first["summary"]["metrics"]["accuracy_first"],
                 1.0,
                 places=6,
             )
+            self.assertIn("primary_scores", first)
+            self.assertEqual(first["primary_scores"]["toy"]["metric"], "accuracy_first")
+            self.assertAlmostEqual(float(first["primary_scores"]["toy"]["score"]), 1.0, places=6)
             predictions_path = out / "run1" / "toy" / "predictions.jsonl"
             with predictions_path.open("r", encoding="utf-8") as f:
                 first_row = json.loads(f.readline())
@@ -134,7 +139,6 @@ class RunnerTests(unittest.TestCase):
                 output_dir=out,
                 run_id="run1",
                 backend=resume_backend,
-                resume=True,
                 benchmarks_dir=root,
             )
             summary2 = second["results"]["toy"]
@@ -162,7 +166,7 @@ class RunnerTests(unittest.TestCase):
             self.assertAlmostEqual(float(backend.last_gen_cfg["top_p"]), 0.8, places=6)
             self.assertEqual(backend.last_gen_cfg["n"], 1)
 
-    def test_default_run_id_uses_model_suffix_and_timestamp(self) -> None:
+    def test_default_run_id_uses_model_suffix_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"
             _write_toy_benchmark(root)
@@ -178,8 +182,35 @@ class RunnerTests(unittest.TestCase):
             )
 
             run_id = str(result["run_id"])
-            self.assertRegex(run_id, r"^qwen3-0\.6b-base_\d{8}_\d{6}$")
+            self.assertEqual(run_id, "qwen3-0.6b-base")
             self.assertTrue((out / run_id / "run_summary.json").exists())
+
+    def test_overwrite_rebuilds_predictions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="same_run",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+            )
+            rebuilt = run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="same_run",
+                backend=FakeBackend(),
+                overwrite=True,
+                benchmarks_dir=root,
+            )
+            summary = rebuilt["results"]["toy"]
+            self.assertEqual(summary["existing_records"], 0)
+            self.assertEqual(summary["new_records"], 2)
 
     def test_n_gt_1_with_zero_temperature_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

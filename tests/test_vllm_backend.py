@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import warnings
 
-import aethereval.vllm_backend as vllm_backend
+import aethereval.core.vllm_backend as vllm_backend
 
 
 class _TokenizerWithTemplate:

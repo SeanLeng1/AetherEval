@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from aethereval.metrics_utils import aggregate_mcq_results, score_generation_mcq
-from aethereval.types import Sample
+from aethereval.metrics.common import aggregate_mcq_results, score_generation_mcq
+from aethereval.core.types import Sample
+
+
+PRIMARY_METRIC = "accuracy"
+
 
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     return score_generation_mcq(sample, generation)

@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aethereval.io import read_jsonl
-from aethereval.types import Sample
+from aethereval.core.io import read_jsonl
+from aethereval.core.types import Sample
 
 
 TASK_NAME = "ifeval"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 1280,
-    "temperature": 0.0,
-    "top_p": 1.0,
-}
 
 
 def load_samples(task_dir: Path) -> list[Sample]:

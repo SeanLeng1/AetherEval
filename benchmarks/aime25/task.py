@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aethereval.io import read_jsonl
-from aethereval.types import Sample
+from aethereval.core.io import read_jsonl
+from aethereval.core.types import Sample
 
 
 TASK_NAME = "aime25"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 16,
-    "max_new_tokens": 4096,
-    "temperature": 0.7,
-    "top_p": 1.0,
-}
 
 _MATH_PROMPT_TEMPLATE = (
     "{Question}\n\n"

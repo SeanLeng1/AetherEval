@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from aethereval.bootstrap import bootstrap_mean
+from aethereval.metrics.bootstrap import bootstrap_mean
 
 
 class BootstrapTests(unittest.TestCase):

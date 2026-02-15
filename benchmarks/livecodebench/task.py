@@ -7,18 +7,12 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from aethereval.io import read_jsonl
-from aethereval.types import Sample
+from aethereval.core.io import read_jsonl
+from aethereval.core.types import Sample
 
 
 TASK_NAME = "livecodebench"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 16,
-    "max_new_tokens": 4096,
-    "temperature": 0.2,
-    "top_p": 0.95,
-}
 
 _SYSTEM_PROMPT = (
     "You are an expert Python programmer. "

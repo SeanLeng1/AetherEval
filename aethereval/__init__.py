@@ -1,5 +1,5 @@
 """AetherEval package."""
 
-from .runner import run_evaluation
+from .core.runner import run_evaluation
 
 __all__ = ["run_evaluation"]

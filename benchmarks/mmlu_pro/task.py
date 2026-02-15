@@ -3,18 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from string import ascii_uppercase
 
-from aethereval.io import read_jsonl
-from aethereval.types import Sample
+from aethereval.core.io import read_jsonl
+from aethereval.core.types import Sample
 
 
 TASK_NAME = "mmlu_pro"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 1024,
-    "temperature": 0.0,
-    "top_p": 1.0,
-}
 
 
 def _to_choice_map(raw: dict) -> dict[str, str]:

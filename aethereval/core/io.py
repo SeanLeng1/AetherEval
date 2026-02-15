@@ -2,13 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-
-
-def utc_run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def default_run_id_for_model(model: str) -> str:
@@ -16,7 +11,7 @@ def default_run_id_for_model(model: str) -> str:
     safe_suffix = re.sub(r"[^a-z0-9._-]+", "-", raw_suffix).strip("-")
     if not safe_suffix:
         safe_suffix = "model"
-    return f"{safe_suffix}_{utc_run_id()}"
+    return safe_suffix
 
 
 def ensure_dir(path: Path) -> None:
@@ -31,9 +26,18 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         first_line = f.readline()
         if first_line.startswith("version https://git-lfs.github.com/spec/v1"):
+            oid_line = f.readline().strip()
+            size_line = f.readline().strip()
+            details: list[str] = []
+            if oid_line.startswith("oid "):
+                details.append(oid_line)
+            if size_line.startswith("size "):
+                details.append(size_line)
+            details_text = f" ({', '.join(details)})" if details else ""
             raise RuntimeError(
-                f"{path} looks like a Git LFS pointer file. "
-                "Run `git lfs install && git lfs pull` to fetch benchmark data."
+                f"{path} is a Git LFS pointer file{details_text}. "
+                "Run `git lfs install && git lfs pull` to fetch benchmark data, "
+                "then verify with `git lfs ls-files`."
             )
 
     with path.open("r", encoding="utf-8") as f:

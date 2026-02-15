@@ -2,11 +2,61 @@ from __future__ import annotations
 
 import unittest
 
-from aethereval.task_register import load_task
-from aethereval.types import Sample
+from aethereval.core.task_register import load_task
+from aethereval.core.types import Sample
 
 
 class MetricsTests(unittest.TestCase):
+    def _assert_instruction_following_micro_aggregation(self, task_name: str) -> None:
+        bundle = load_task(task_name)
+        metrics_module = bundle.metrics_module
+
+        sample_results = [
+            {
+                "sample_id": "s1",
+                "meta": {"instruction_id_list": ["i1"]},
+                "records": [
+                    {
+                        "sample_id": "s1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {
+                            "prompt_level_strict_acc": 1.0,
+                            "prompt_level_loose_acc": 1.0,
+                            "inst_level_strict_acc": [True],
+                            "inst_level_loose_acc": [True],
+                        },
+                    },
+                ],
+            },
+            {
+                "sample_id": "s2",
+                "meta": {"instruction_id_list": ["i1", "i2", "i3"]},
+                "records": [
+                    {
+                        "sample_id": "s2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {
+                            "prompt_level_strict_acc": 0.0,
+                            "prompt_level_loose_acc": 0.0,
+                            "inst_level_strict_acc": [False, False, False],
+                            "inst_level_loose_acc": [True, False, False],
+                        },
+                    },
+                ],
+            },
+        ]
+
+        result = metrics_module.aggregate(sample_results, {})
+        self.assertAlmostEqual(result["prompt_level_strict_acc"], 0.5, places=6)
+        self.assertAlmostEqual(result["prompt_level_loose_acc"], 0.5, places=6)
+        # Instruction-level should be micro-averaged over all instruction instances.
+        self.assertAlmostEqual(result["inst_level_strict_acc"], 0.25, places=6)
+        self.assertAlmostEqual(result["inst_level_loose_acc"], 0.5, places=6)
+
     def test_ifeval_score_generation(self) -> None:
         bundle = load_task("ifeval")
         metrics_module = bundle.metrics_module
@@ -197,6 +247,12 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["prompt_level_loose_acc"], 0.75, places=6)
         self.assertAlmostEqual(result["inst_level_loose_acc"], 0.625, places=6)
 
+    def test_ifeval_instruction_level_metrics_use_micro_averaging(self) -> None:
+        self._assert_instruction_following_micro_aggregation("ifeval")
+
+    def test_ifbench_instruction_level_metrics_use_micro_averaging(self) -> None:
+        self._assert_instruction_following_micro_aggregation("ifbench")
+
     def test_gpqa_score_generation_parsing(self) -> None:
         bundle = load_task("gpqa_diamond")
         metrics_module = bundle.metrics_module
@@ -225,6 +281,16 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result2["score"], 0.0)
         self.assertFalse(result2["is_pass"])
         self.assertEqual(result2["parsed"]["prediction"], "B")
+
+        # Do not parse letters embedded in normal words.
+        result3 = metrics_module.score_generation(sample, "Answer: because of uncertainty.")
+        self.assertEqual(result3["score"], 0.0)
+        self.assertIsNone(result3["parsed"]["prediction"])
+
+        # Do not fallback to option-text matching; only explicit choice letters count.
+        result4 = metrics_module.score_generation(sample, "My answer is gamma option.")
+        self.assertEqual(result4["score"], 0.0)
+        self.assertIsNone(result4["parsed"]["prediction"])
 
     def test_gpqa_aggregate_task_defined_metrics(self) -> None:
         bundle = load_task("gpqa_diamond")

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aethereval.io import read_jsonl
+from aethereval.core.io import read_jsonl
 
 
 class IOTests(unittest.TestCase):

@@ -7,7 +7,8 @@ A lightweight, generative-only LLM eval framework.
 - Benchmark root is fixed to `./benchmarks`.
 - Task discovery is automatic: any `benchmarks/<task>/task.py + metrics.py` is picked up.
 - Backend is offline vLLM only (`dp_size=1` single process, `dp_size>1` Ray data parallel).
-- Single-worker generation uses vLLM's built-in tqdm progress bar.
+- Generation uses vLLM's built-in tqdm progress bar.
+- Scoring (`score_generation`) has a framework tqdm progress bar.
 - Task owns prompt/data/metric logic; core only orchestrates loading, generation, scoring, resume, and output writing.
 - Supports `n` sampling; metrics are fully task-defined.
 
@@ -24,6 +25,14 @@ pip install -e .
 aethereval --list-tasks
 ```
 
+```bash
+aethereval --list-task-defaults
+```
+
+Task generation defaults are centrally defined in `configs/task_defaults.yaml`.
+You can edit this file to adjust per-task `n/max_new_tokens/temperature/top_p`.
+CLI and run YAML still override these defaults.
+
 ## Run (single GPU)
 
 ```bash
@@ -36,8 +45,11 @@ aethereval \
 
 `dp-size` and `tp-size` default to `1`, so you only need to set them when overriding.
 If `--run-id` is not provided, the default is:
-`<model_suffix_lower>_<YYYYMMDD_HHMMSS>` (UTC), for example:
-`qwen3-0.6b-base_20260215_013000`.
+`<model_suffix_lower>`, for example:
+`qwen3-0.6b-base`.
+
+If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
+Use `--overwrite` to discard old predictions and rerun from scratch.
 
 ## Run With YAML
 
@@ -74,9 +86,10 @@ benchmarks/<task_name>/
 
 - `TASK_NAME: str`
 - `DATA_FILE: str` (must be `.jsonl`)
-- `DEFAULT_GEN: dict`
 - `load_samples(task_dir) -> list[Sample]`
 - `build_prompt(sample) -> str | list[dict]`
+
+`DEFAULT_GEN` is optional in `task.py`; per-task generation defaults are loaded from `configs/task_defaults.yaml`.
 
 Prompt handling:
 
@@ -88,6 +101,10 @@ Prompt handling:
 
 - `score_generation(sample, generation) -> dict` (`score` required)
 - `aggregate(sample_results, metric_options) -> dict[str, float]`
+
+Recommended:
+
+- `PRIMARY_METRIC: str` (used by runner to surface report metric in `summary.json`)
 
 ## Bootstrap
 
@@ -131,12 +148,38 @@ outputs/<run_id>/
 - `error`
 - `meta`
 
-`summary.json` is task-level aggregate.
+`summary.json` is task-level aggregate, and includes:
+
+- `metrics`: full metric dict from task aggregate
+- `primary_metric`: report metric name
+- `primary_score`: report metric value
 
 `run_summary.json` is run-level summary:
 
 - `results`: all per-task summaries
+- `primary_scores`: each task's primary metric name/value
 - `summary.metrics`: average of same metric names across tasks
+
+## Package Structure
+
+```text
+aethereval/
+  cli.py
+  config.py
+  core/
+    io.py
+    types.py
+    task_defaults.py
+    task_register.py
+    vllm_backend.py
+    runner.py
+  metrics/
+    common.py
+    bootstrap.py
+configs/
+  example.yaml
+  task_defaults.yaml
+```
 
 ## Git LFS
 

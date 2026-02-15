@@ -4,8 +4,12 @@ import argparse
 import json
 
 from .config import load_yaml_config, resolve_run_arguments
-from .runner import inspect_prompts, run_evaluation
-from .task_register import list_tasks
+from .core.runner import inspect_prompts, run_evaluation
+from .core.task_register import list_task_default_gens, list_tasks
+
+
+def _info(message: str) -> None:
+    print(f"[aethereval] {message}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="AetherEval: lightweight generative-only vLLM eval framework."
     )
     parser.add_argument("--list-tasks", action="store_true", help="List discovered tasks and exit.")
+    parser.add_argument(
+        "--list-task-defaults",
+        action="store_true",
+        help="Print effective DEFAULT_GEN for all tasks and exit.",
+    )
     parser.add_argument("--config", type=str, default=None, help="YAML config file path.")
     parser.add_argument("--tasks", type=str, default=None, help="Task names: all or comma-separated.")
     parser.add_argument("--model", type=str, default=None, help="Model name/path for vLLM.")
@@ -27,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-id",
         type=str,
         default=None,
-        help="Optional run id. Default: <model_suffix_lower>_<YYYYMMDD_HHMMSS>.",
+        help="Optional run id. Default: <model_suffix_lower>.",
     )
 
     parser.add_argument("--dp-size", type=int, default=None, help="Data parallel worker count.")
@@ -76,10 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--resume",
+        "--overwrite",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Resume from existing predictions.jsonl.",
+        help="Overwrite existing predictions.jsonl for the same run_id.",
     )
     return parser
 
@@ -92,12 +101,34 @@ def main() -> None:
         for task_name in list_tasks():
             print(task_name)
         return
+    if args.list_task_defaults:
+        payload = list_task_default_gens()
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
 
     cfg = load_yaml_config(args.config)
     resolved = resolve_run_arguments(args, cfg)
 
     if not resolved["model"]:
         parser.error("--model is required unless --list-tasks is set.")
+
+    _info(f"config={args.config if args.config else '(none)'}")
+    _info(
+        f"model={resolved['model']} tasks={resolved['tasks']} "
+        f"dp_size={resolved['dp_size']} tp_size={resolved['tp_size']} "
+        f"overwrite={resolved['overwrite']}"
+    )
+    _info(
+        f"output_dir={resolved['output_dir']} "
+        f"run_id={resolved['run_id'] if resolved['run_id'] else '(auto:model_suffix)'}"
+    )
+    explicit_gen_overrides = {
+        k: v for k, v in resolved["gen_overrides"].items() if v is not None
+    }
+    if explicit_gen_overrides:
+        _info(f"generation_overrides={explicit_gen_overrides}")
+    if resolved["model_kwargs"]:
+        _info(f"vllm_model_kwargs={resolved['model_kwargs']}")
 
     if resolved["inspect"]:
         inspected = inspect_prompts(
@@ -128,7 +159,7 @@ def main() -> None:
         bootstrap_resamples=resolved["bootstrap_resamples"],
         bootstrap_seed=resolved["bootstrap_seed"],
         bootstrap_confidence=resolved["bootstrap_confidence"],
-        resume=resolved["resume"],
+        overwrite=resolved["overwrite"],
         run_id=resolved["run_id"],
         model_kwargs=resolved["model_kwargs"],
     )

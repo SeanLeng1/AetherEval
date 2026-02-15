@@ -86,7 +86,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 
     output_dir = _pick(args.output_dir, _cfg_get(cfg, "output_dir", "run"), "outputs")
     run_id = _pick(args.run_id, _cfg_get(cfg, "run_id", "run"))
-    resume = bool(_pick(args.resume, _cfg_get(cfg, "resume", "run"), False))
+    overwrite = bool(_pick(args.overwrite, _cfg_get(cfg, "overwrite", "run"), False))
     inspect = bool(_pick(getattr(args, "inspect", None), _cfg_get(cfg, "inspect", "run"), False))
 
     arg_dp_size = getattr(args, "dp_size", None)
@@ -157,7 +157,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "inspect": inspect,
         "output_dir": output_dir,
         "run_id": run_id,
-        "resume": resume,
+        "overwrite": overwrite,
         "dp_size": dp_size,
         "tp_size": tp_size,
         "gen_overrides": gen_overrides,

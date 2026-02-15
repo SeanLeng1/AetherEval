@@ -4,8 +4,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from aethereval.metrics_utils import aggregate_instruction_following_results
-from aethereval.types import Sample
+from aethereval.metrics.common import aggregate_instruction_following_results
+from aethereval.core.types import Sample
+
+
+PRIMARY_METRIC = "prompt_level_strict_acc"
 
 
 _THIS_DIR = Path(__file__).resolve().parent

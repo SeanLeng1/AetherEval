@@ -4,8 +4,11 @@ import re
 from collections import defaultdict
 from typing import Any
 
-from aethereval.metrics_utils import mean, mean_stderr, pass_at_k, resolve_pass_k_values, to_records
-from aethereval.types import Sample
+from aethereval.metrics.common import mean, mean_stderr, pass_at_k, resolve_pass_k_values, to_records
+from aethereval.core.types import Sample
+
+
+PRIMARY_METRIC = "accuracy"
 
 
 _ANSWER_LINE_RE = re.compile(r"(?im)^\s*answer\s*[:：]\s*(?P<ans>.+?)\s*$")

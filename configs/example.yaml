@@ -4,7 +4,7 @@ run:
   inspect: false
   output_dir: "outputs"
   run_id: null
-  resume: false
+  overwrite: false
 
 runtime:
   dp_size: 1

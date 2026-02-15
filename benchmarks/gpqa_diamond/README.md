@@ -36,7 +36,7 @@ benchmarks/gpqa_diamond/
   - `answer ...`
   - `option/choice ...`
   - line-start choice marker
-- Fallback: option-text match when letter extraction fails
+- No option-text fallback; only extracted choice letters are scored
 
 Reported metrics:
 

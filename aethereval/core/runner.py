@@ -20,6 +20,59 @@ from .vllm_backend import (
 )
 
 
+def _info(message: str) -> None:
+    print(f"[aethereval] {message}")
+
+
+def _metric_keys_preview(metrics: dict[str, Any], limit: int = 8) -> str:
+    keys = sorted(str(k) for k in metrics.keys())
+    if len(keys) <= limit:
+        return ", ".join(keys)
+    head = ", ".join(keys[:limit])
+    return f"{head}, ... (+{len(keys) - limit})"
+
+
+def _make_progress_bar(total: int, desc: str) -> Any:
+    if total <= 0:
+        return None
+    try:
+        from tqdm.auto import tqdm
+    except Exception:  # noqa: BLE001
+        return None
+    return tqdm(total=total, desc=desc, unit="gen", dynamic_ncols=True)
+
+
+def _resolve_primary_metric(
+    metrics_module: Any,
+    metrics: dict[str, Any],
+) -> tuple[str | None, float | None]:
+    declared = getattr(metrics_module, "PRIMARY_METRIC", None)
+    if declared is not None:
+        if not isinstance(declared, str) or not declared.strip():
+            raise ValueError("metrics.PRIMARY_METRIC must be a non-empty string when provided.")
+        if declared not in metrics:
+            raise ValueError(
+                f"metrics.PRIMARY_METRIC='{declared}' not found in aggregate output keys: "
+                f"{sorted(metrics.keys())}"
+            )
+        value = metrics.get(declared)
+        if not isinstance(value, (int, float)):
+            raise ValueError(
+                f"metrics.PRIMARY_METRIC='{declared}' must map to numeric value, got {type(value).__name__}."
+            )
+        return declared, float(value)
+
+    for candidate in ("pass@1", "accuracy", "prompt_level_strict_acc"):
+        value = metrics.get(candidate)
+        if isinstance(value, (int, float)):
+            return candidate, float(value)
+
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            return str(key), float(value)
+    return None, None
+
+
 def _to_sample(item: Any) -> Sample:
     if isinstance(item, Sample):
         return item
@@ -203,9 +256,10 @@ def _run_single_task(
     task_output_dir: Path,
     gen_overrides: dict[str, Any],
     metric_options: dict[str, Any],
-    resume: bool,
+    overwrite: bool,
     run_config_common: dict[str, Any],
 ) -> dict[str, Any]:
+    _info(f"[{task_name}] loading task from {task_dir}")
     samples_raw = task_module.load_samples(task_dir)
     samples = [_to_sample(item) for item in samples_raw]
     sample_id_set = set()
@@ -216,14 +270,23 @@ def _run_single_task(
 
     gen_cfg = _merge_generation_config(task_module.DEFAULT_GEN, gen_overrides)
     n = int(gen_cfg["n"])
+    _info(
+        f"[{task_name}] samples={len(samples)} n={n} overwrite={overwrite} "
+        f"data_file={getattr(task_module, 'DATA_FILE', '(unknown)')}"
+    )
 
     ensure_dir(task_output_dir)
     predictions_path = task_output_dir / "predictions.jsonl"
     summary_path = task_output_dir / "summary.json"
     run_config_path = task_output_dir / "run_config.json"
 
+    if overwrite and predictions_path.exists():
+        _info(f"[{task_name}] overwrite enabled: removing {predictions_path}")
+        predictions_path.unlink()
+
     existing_records: list[GenerationRecord] = []
-    if resume and predictions_path.exists():
+    if predictions_path.exists():
+        _info(f"[{task_name}] resume: loading existing predictions from {predictions_path}")
         raw_existing = _load_existing_records(predictions_path)
         dedup: dict[tuple[str, int], GenerationRecord] = {}
         for record in raw_existing:
@@ -240,9 +303,11 @@ def _run_single_task(
 
     pending_inputs: list[GenerationInput] = []
     pending_indices: dict[str, list[int]] = {}
+    pending_record_count = 0
     for sample in samples:
         missing = [i for i in range(n) if i not in existing_lookup.get(sample.id, set())]
         pending_indices[sample.id] = missing
+        pending_record_count += len(missing)
         if not missing:
             continue
         prompt = _to_chat_prompt(task_module.build_prompt(sample))
@@ -253,57 +318,72 @@ def _run_single_task(
                 num_generations=len(missing),
             )
         )
+    _info(
+        f"[{task_name}] existing_records={len(existing_records)} pending_samples={len(pending_inputs)} "
+        f"pending_records={pending_record_count}"
+    )
 
     samples_by_id = {sample.id: sample for sample in samples}
     new_records: list[GenerationRecord] = []
 
     if pending_inputs:
+        _info(f"[{task_name}] starting vLLM generation")
         generated_outputs = backend.generate(pending_inputs, gen_cfg)
-        for output in generated_outputs:
-            sample = samples_by_id[output.sample_id]
-            missing = pending_indices[output.sample_id]
-            generations = list(output.generations)
-            if len(generations) < len(missing):
-                generations.extend([""] * (len(missing) - len(generations)))
+        score_bar = _make_progress_bar(pending_record_count, f"[{task_name}] scoring")
+        try:
+            for output in generated_outputs:
+                sample = samples_by_id[output.sample_id]
+                missing = pending_indices[output.sample_id]
+                generations = list(output.generations)
+                if len(generations) < len(missing):
+                    generations.extend([""] * (len(missing) - len(generations)))
 
-            rows_to_write: list[dict[str, Any]] = []
-            for local_idx, gen_idx in enumerate(missing):
-                generation_text = generations[local_idx]
-                error = output.error
-                score = 0.0
-                parsed = None
-                meta: dict[str, Any] = {}
-                is_pass = False
+                rows_to_write: list[dict[str, Any]] = []
+                for local_idx, gen_idx in enumerate(missing):
+                    generation_text = generations[local_idx]
+                    error = output.error
+                    score = 0.0
+                    parsed = None
+                    meta: dict[str, Any] = {}
+                    is_pass = False
 
-                if error is None:
-                    try:
-                        scored = metrics_module.score_generation(sample, generation_text)
-                        if "score" not in scored:
-                            raise ValueError("score_generation must return key 'score'.")
-                        score = float(scored["score"])
-                        parsed = scored.get("parsed")
-                        task_meta = scored.get("meta", {})
-                        meta = task_meta if isinstance(task_meta, dict) else {"value": task_meta}
-                        is_pass = bool(scored.get("is_pass", False))
-                    except Exception as exc:  # noqa: BLE001
-                        error = f"score_generation error: {type(exc).__name__}: {exc}"
+                    if error is None:
+                        try:
+                            scored = metrics_module.score_generation(sample, generation_text)
+                            if "score" not in scored:
+                                raise ValueError("score_generation must return key 'score'.")
+                            score = float(scored["score"])
+                            parsed = scored.get("parsed")
+                            task_meta = scored.get("meta", {})
+                            meta = task_meta if isinstance(task_meta, dict) else {"value": task_meta}
+                            is_pass = bool(scored.get("is_pass", False))
+                        except Exception as exc:  # noqa: BLE001
+                            error = f"score_generation error: {type(exc).__name__}: {exc}"
 
-                record = GenerationRecord(
-                    sample_id=sample.id,
-                    gen_idx=gen_idx,
-                    prompt=output.prompt,
-                    generation=generation_text,
-                    score=score,
-                    is_pass=is_pass,
-                    parsed=parsed,
-                    gold=sample.gold,
-                    error=error,
-                    meta=meta,
-                )
-                new_records.append(record)
-                rows_to_write.append(_record_to_json(record))
+                    record = GenerationRecord(
+                        sample_id=sample.id,
+                        gen_idx=gen_idx,
+                        prompt=output.prompt,
+                        generation=generation_text,
+                        score=score,
+                        is_pass=is_pass,
+                        parsed=parsed,
+                        gold=sample.gold,
+                        error=error,
+                        meta=meta,
+                    )
+                    new_records.append(record)
+                    rows_to_write.append(_record_to_json(record))
+                    if score_bar is not None:
+                        score_bar.update(1)
 
-            append_jsonl(predictions_path, rows_to_write)
+                append_jsonl(predictions_path, rows_to_write)
+        finally:
+            if score_bar is not None:
+                score_bar.close()
+        _info(f"[{task_name}] generation finished: new_records={len(new_records)}")
+    else:
+        _info(f"[{task_name}] no pending generations; skip inference")
 
     all_records = existing_records + new_records
     grouped_records = _group_records_by_sample(all_records)
@@ -319,6 +399,7 @@ def _run_single_task(
         warnings = [str(warnings)]
 
     metrics = aggregate_result
+    primary_metric, primary_score = _resolve_primary_metric(metrics_module, metrics)
 
     summary = {
         "task": task_name,
@@ -328,8 +409,16 @@ def _run_single_task(
         "new_records": len(new_records),
         "total_records": len(all_records),
         "metrics": metrics,
+        "primary_metric": primary_metric,
+        "primary_score": primary_score,
         "warnings": warnings,
     }
+    _info(
+        f"[{task_name}] aggregate done: total_records={len(all_records)} "
+        f"metrics=[{_metric_keys_preview(metrics)}]"
+    )
+    if warnings:
+        _info(f"[{task_name}] warnings={warnings}")
 
     task_run_config = dict(run_config_common)
     task_run_config.update(
@@ -338,7 +427,7 @@ def _run_single_task(
             "task_dir": str(task_dir),
             "generation_config": gen_cfg,
             "metric_options": {**metric_options, "n": n},
-            "resume": resume,
+            "overwrite": overwrite,
         }
     )
 
@@ -358,7 +447,7 @@ def run_evaluation(
     bootstrap_resamples: int = 1000,
     bootstrap_seed: int = 42,
     bootstrap_confidence: float = 0.95,
-    resume: bool = False,
+    overwrite: bool = False,
     run_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
     backend: VLLMBackend | None = None,
@@ -375,6 +464,15 @@ def run_evaluation(
     this_run_id = run_id or default_run_id_for_model(model)
     run_root = out_dir / this_run_id
     ensure_dir(run_root)
+    _info(f"benchmark_root={task_root}")
+    _info(f"discovered_tasks={len(available)} selected={selected}")
+    _info(
+        f"model={model} dp_size={int(dp_size)} tp_size={int(tensor_parallel_size)} "
+        f"output_dir={out_dir} run_id={this_run_id}"
+    )
+    if model_kwargs:
+        _info(f"vllm_model_kwargs={model_kwargs}")
+    _info(f"run_output_dir={run_root}")
 
     created_backend = False
     if backend is None:
@@ -400,6 +498,7 @@ def run_evaluation(
         }
         summaries: dict[str, Any] = {}
         for task_name in selected:
+            _info(f"===== start task: {task_name} =====")
             bundle = load_task(task_name, task_root)
             task_spec = tasks_map[task_name]
             task_output_dir = run_root / task_name
@@ -412,19 +511,29 @@ def run_evaluation(
                 task_output_dir=task_output_dir,
                 gen_overrides=gen_overrides or {},
                 metric_options=metric_options,
-                resume=resume,
+                overwrite=overwrite,
                 run_config_common=run_config_common,
             )
             summaries[task_name] = summary
+            _info(f"===== finish task: {task_name} =====")
+
+        primary_scores: dict[str, dict[str, Any]] = {}
+        for task_name, task_summary in summaries.items():
+            primary_scores[task_name] = {
+                "metric": task_summary.get("primary_metric"),
+                "score": task_summary.get("primary_score"),
+            }
 
         run_summary = {
             "run_id": this_run_id,
             "tasks": selected,
             "model": model,
             "results": summaries,
+            "primary_scores": primary_scores,
             "summary": _aggregate_run_metrics(summaries),
         }
         write_json(run_root / "run_summary.json", run_summary)
+        _info(f"run_summary_path={run_root / 'run_summary.json'}")
         return run_summary
     finally:
         if created_backend:
@@ -448,6 +557,7 @@ def inspect_prompts(
 
     selected = _parse_tasks_arg(tasks, available)
     limit = max(1, int(inspect_limit))
+    _info(f"inspect mode: model={model} tasks={selected} limit={limit}")
 
     if prompt_renderer is None:
         tokenizer = load_chat_tokenizer(model, model_kwargs)
@@ -471,6 +581,7 @@ def inspect_prompts(
                 }
             )
         task_results[task_name] = rows
+        _info(f"[inspect:{task_name}] samples={len(samples)} shown={len(rows)}")
 
     return {
         "model": model,

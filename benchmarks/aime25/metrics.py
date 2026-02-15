@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from aethereval.metrics_utils import (
+from aethereval.metrics.common import (
     mean,
     mean_stderr,
     pass_at_k,
     resolve_pass_k_values,
     to_records,
 )
-from aethereval.types import Sample
+from aethereval.core.types import Sample
 
 try:
     from math_verify.errors import TimeoutException
@@ -20,6 +20,9 @@ except ImportError as exc:  # pragma: no cover
     raise RuntimeError(
         "math-verify is required for AIME metrics. Install with `pip install math-verify`."
     ) from exc
+
+
+PRIMARY_METRIC = "accuracy"
 
 
 _GOLD_EXTRACTION_TARGET = (LatexExtractionConfig(),)

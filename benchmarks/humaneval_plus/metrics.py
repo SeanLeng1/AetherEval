@@ -6,8 +6,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from aethereval.metrics_utils import mean, mean_stderr, pass_at_k, resolve_pass_k_values, to_records
-from aethereval.types import Sample
+from aethereval.metrics.common import mean, mean_stderr, pass_at_k, resolve_pass_k_values, to_records
+from aethereval.core.types import Sample
 
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -15,6 +15,9 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 from eval_runtime import PASS, trusted_exec, untrusted_check
+
+
+PRIMARY_METRIC = "pass@1"
 
 
 _CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)

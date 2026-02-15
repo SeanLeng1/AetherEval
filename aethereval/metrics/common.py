@@ -6,7 +6,7 @@ from collections import defaultdict
 from functools import lru_cache
 from typing import Any
 
-from .types import GenerationRecord, Sample
+from ..core.types import GenerationRecord, Sample
 
 
 def to_records(raw_records: list[dict[str, Any]]) -> list[GenerationRecord]:
@@ -84,6 +84,29 @@ def resolve_pass_k_values(raw: Any, n: int) -> list[int]:
     return [k for k in cleaned if k <= n]
 
 
+def _normalize_instruction_flags(
+    raw_values: Any,
+    expected_count: int | None,
+    fallback: float,
+) -> list[float]:
+    values: list[float] = []
+    if isinstance(raw_values, list):
+        values = [float(bool(x)) for x in raw_values]
+
+    if expected_count is not None and expected_count > 0:
+        if not values:
+            return [fallback for _ in range(expected_count)]
+        if len(values) < expected_count:
+            return values + [fallback for _ in range(expected_count - len(values))]
+        if len(values) > expected_count:
+            return values[:expected_count]
+        return values
+
+    if values:
+        return values
+    return [fallback]
+
+
 def aggregate_instruction_following_results(
     sample_results: list[dict[str, Any]],
 ) -> dict[str, float]:
@@ -101,6 +124,7 @@ def aggregate_instruction_following_results(
 
     prompt_level_strict_values: list[float] = []
     prompt_level_loose_values: list[float] = []
+    # These values are instruction-level (micro) aggregates.
     inst_level_strict_values: list[float] = []
     inst_level_loose_values: list[float] = []
 
@@ -109,10 +133,16 @@ def aggregate_instruction_following_results(
         if not records:
             continue
 
+        sample_meta = item.get("meta", {}) if isinstance(item.get("meta", {}), dict) else {}
+        raw_instruction_ids = sample_meta.get("instruction_id_list")
+        expected_instruction_count = len(raw_instruction_ids) if isinstance(raw_instruction_ids, list) else None
+        if expected_instruction_count == 0:
+            expected_instruction_count = None
+
         sample_prompt_strict_values: list[float] = []
         sample_prompt_loose_values: list[float] = []
-        sample_inst_strict_values: list[float] = []
-        sample_inst_loose_values: list[float] = []
+        sample_inst_strict_lists: list[list[float]] = []
+        sample_inst_loose_lists: list[list[float]] = []
 
         for record in records:
             parsed = record.parsed if isinstance(record.parsed, dict) else {}
@@ -122,28 +152,45 @@ def aggregate_instruction_following_results(
             sample_prompt_strict_values.append(prompt_strict)
             sample_prompt_loose_values.append(prompt_loose)
 
-            strict_list = parsed.get("inst_level_strict_acc", [])
-            if isinstance(strict_list, list):
-                if strict_list:
-                    sample_inst_strict_values.append(mean([float(bool(x)) for x in strict_list]))
-                else:
-                    sample_inst_strict_values.append(prompt_strict)
-            else:
-                sample_inst_strict_values.append(prompt_strict)
-
-            loose_list = parsed.get("inst_level_loose_acc", [])
-            if isinstance(loose_list, list):
-                if loose_list:
-                    sample_inst_loose_values.append(mean([float(bool(x)) for x in loose_list]))
-                else:
-                    sample_inst_loose_values.append(prompt_loose)
-            else:
-                sample_inst_loose_values.append(prompt_loose)
+            sample_inst_strict_lists.append(
+                _normalize_instruction_flags(
+                    parsed.get("inst_level_strict_acc"),
+                    expected_instruction_count,
+                    prompt_strict,
+                )
+            )
+            sample_inst_loose_lists.append(
+                _normalize_instruction_flags(
+                    parsed.get("inst_level_loose_acc"),
+                    expected_instruction_count,
+                    prompt_loose,
+                )
+            )
 
         prompt_level_strict_values.append(mean(sample_prompt_strict_values))
         prompt_level_loose_values.append(mean(sample_prompt_loose_values))
-        inst_level_strict_values.append(mean(sample_inst_strict_values))
-        inst_level_loose_values.append(mean(sample_inst_loose_values))
+
+        max_inst_count = max((len(values) for values in sample_inst_strict_lists), default=0)
+        for inst_idx in range(max_inst_count):
+            strict_across_records: list[float] = []
+            loose_across_records: list[float] = []
+            for rec_idx in range(len(sample_inst_strict_lists)):
+                strict_values = sample_inst_strict_lists[rec_idx]
+                loose_values = sample_inst_loose_lists[rec_idx]
+
+                strict_across_records.append(
+                    strict_values[inst_idx]
+                    if inst_idx < len(strict_values)
+                    else sample_prompt_strict_values[rec_idx]
+                )
+                loose_across_records.append(
+                    loose_values[inst_idx]
+                    if inst_idx < len(loose_values)
+                    else sample_prompt_loose_values[rec_idx]
+                )
+
+            inst_level_strict_values.append(mean(strict_across_records))
+            inst_level_loose_values.append(mean(loose_across_records))
 
     return {
         "prompt_level_strict_acc": mean(prompt_level_strict_values),
@@ -161,10 +208,6 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
-def _normalize_text(value: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
-
-
 def _normalize_choice(value: str, valid_set: set[str]) -> str | None:
     text = value.strip().upper()
     text = text.replace("(", "").replace(")", "")
@@ -178,7 +221,8 @@ def _normalize_choice(value: str, valid_set: set[str]) -> str | None:
 @lru_cache(maxsize=32)
 def _choice_patterns(valid_letters: str) -> list[tuple[str, re.Pattern[str]]]:
     char_class = "".join(re.escape(letter) for letter in valid_letters)
-    choice_re = rf"\(?[{char_class}]\)?"
+    # Match standalone choice letters only (avoid picking letters inside words like "because").
+    choice_re = rf"(?<![A-Za-z0-9])\(?[{char_class}]\)?(?![A-Za-z0-9])"
     return [
         (
             "final_answer",
@@ -220,6 +264,7 @@ def extract_choice(
     choices: dict[str, str],
     valid_letters: list[str],
 ) -> tuple[str | None, str]:
+    del choices
     valid_set = set(valid_letters)
     patterns = _choice_patterns("".join(valid_letters))
 
@@ -235,23 +280,6 @@ def extract_choice(
         candidates.sort()
         _, _, choice, method = candidates[0]
         return choice, method
-
-    normalized_generation = _normalize_text(text)
-    if not normalized_generation:
-        return None, "none"
-
-    hits: list[tuple[int, str]] = []
-    for letter in valid_letters:
-        option_text = _normalize_text(str(choices.get(letter, "")))
-        if len(option_text) < 8:
-            continue
-        if option_text in normalized_generation:
-            hits.append((len(option_text), letter))
-
-    matched_letters = {letter for _, letter in hits}
-    if len(matched_letters) == 1:
-        best = max(hits)
-        return best[1], "option_text"
 
     return None, "none"
 
