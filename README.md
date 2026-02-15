@@ -1,6 +1,6 @@
 # AetherEval
 
-A lightweight, generative-only LLM eval framework.
+A lightweight, generative-only LLM eval framework (For my Own Use :) ).
 
 ## Design
 

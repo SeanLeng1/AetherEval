@@ -187,7 +187,7 @@ class VLLMBackend:
             import vllm
         except ImportError as exc:
             raise RuntimeError(
-                "vllm is not installed. Install dependencies first (see requirements.txt)."
+                "vllm is not installed. Install dependencies first (`pip install -e .`)."
             ) from exc
         self._vllm = vllm
         return vllm
@@ -209,7 +209,7 @@ class VLLMBackend:
             import ray
         except ImportError as exc:
             raise RuntimeError(
-                "ray is not installed. Install dependencies first (see requirements.txt)."
+                "ray is not installed. Install dependencies first (`pip install -e .`)."
             ) from exc
 
         if not ray.is_initialized():

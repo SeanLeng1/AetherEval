@@ -26,7 +26,7 @@ RUN apt-get update && \
 
 # Install libxml2
 RUN apt-get update && \
-    apt-get install -y libxml2 aria2 && \
+    apt-get install -y libxml2 aria2 git-lfs && \
     apt-get clean
 
 # Uninstall nv-pytorch fork
@@ -56,12 +56,11 @@ RUN ABI_FLAG=$(python -c "import torch; print('TRUE' if torch._C._GLIBCXX_USE_CX
     wget -nv -P /opt/tiger "${URL}" && \
     pip install --no-cache-dir "/opt/tiger/$(basename ${URL})"
 
-# Install AetherRL
-ARG AetherRL_REF=b532dd59a71004d88f8152788d79cec617c8eff6
-RUN git clone https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
+# Install AetherEval (always latest main)
+RUN git clone --branch main --single-branch https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
     cd /opt/AetherEval && \
-    git checkout "${OLME_REF}" && git lfs install && git lfs pull \
-    pip install --no-cache-dir -e /opt/olmes
+    git lfs install && git lfs pull && \
+    pip install --no-cache-dir -e /opt/AetherEval
 
 # Install DeepEP
 # the dependency of IBGDA
