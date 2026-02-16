@@ -176,6 +176,7 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("primary_scores", first)
             self.assertEqual(first["primary_scores"]["toy"]["metric"], "accuracy_first")
             self.assertAlmostEqual(float(first["primary_scores"]["toy"]["score"]), 1.0, places=6)
+            self.assertAlmostEqual(float(first["primary_score_aggregate"]), 1.0, places=6)
             predictions_path = out / "run1" / "toy" / "predictions.jsonl"
             with predictions_path.open("r", encoding="utf-8") as f:
                 first_row = json.loads(f.readline())
@@ -337,6 +338,7 @@ class RunnerTests(unittest.TestCase):
                 1.0,
                 places=6,
             )
+            self.assertAlmostEqual(float(second["primary_score_aggregate"]), 1.0, places=6)
 
 
 if __name__ == "__main__":

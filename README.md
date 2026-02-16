@@ -158,6 +158,7 @@ outputs/<run_id>/
 
 - `results`: all per-task summaries
 - `primary_scores`: each task's primary metric name/value
+- `primary_score_aggregate`: mean of task `primary_score` values (direct average across tasks)
 - `summary.metrics`: average of same metric names across tasks
 
 ## Package Structure

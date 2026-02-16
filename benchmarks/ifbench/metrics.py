@@ -7,7 +7,7 @@ from aethereval.core.types import Sample
 from benchmarks.ifbench.ifbench_lib import evaluation_lib
 
 
-PRIMARY_METRIC = "prompt_level_strict_acc"
+PRIMARY_METRIC = "prompt_level_loose_acc"
 
 
 def _build_input_example(sample: Sample) -> evaluation_lib.InputExample:
@@ -52,8 +52,8 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
         "inst_level_loose_acc": [bool(x) for x in loose_out.follow_instruction_list],
     }
     return {
-        "score": prompt_level_strict_acc,
-        "is_pass": bool(prompt_level_strict_acc),
+        "score": prompt_level_loose_acc,
+        "is_pass": bool(prompt_level_loose_acc),
         "parsed": parsed,
     }
 

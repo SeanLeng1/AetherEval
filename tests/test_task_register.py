@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,18 @@ from aethereval.core.task_register import (
 
 
 class TaskRegisterTests(unittest.TestCase):
+    def _read_primary_metric(self, metrics_path: Path) -> str:
+        tree = ast.parse(metrics_path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "PRIMARY_METRIC":
+                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                        return node.value.value
+                    raise AssertionError(f"{metrics_path} PRIMARY_METRIC must be a string literal")
+        raise AssertionError(f"{metrics_path} does not define PRIMARY_METRIC")
+
     def test_ifeval_task_discoverable(self) -> None:
         tasks = list_tasks()
         self.assertIn("ifeval", tasks)
@@ -86,6 +99,14 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["ifeval"]["n"], 1)
         self.assertEqual(defaults["aime24"]["n"], 16)
         self.assertIn("max_new_tokens", defaults["livecodebench"])
+
+    def test_instruction_following_primary_metrics(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        ifeval_metric = self._read_primary_metric(repo_root / "benchmarks" / "ifeval" / "metrics.py")
+        ifbench_metric = self._read_primary_metric(repo_root / "benchmarks" / "ifbench" / "metrics.py")
+
+        self.assertEqual(ifeval_metric, "prompt_level_strict_acc")
+        self.assertEqual(ifbench_metric, "prompt_level_loose_acc")
 
 
 if __name__ == "__main__":

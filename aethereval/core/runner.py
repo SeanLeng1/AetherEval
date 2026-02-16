@@ -280,6 +280,17 @@ def _aggregate_run_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[st
     }
 
 
+def _aggregate_primary_scores(task_summaries: dict[str, dict[str, Any]]) -> float | None:
+    values: list[float] = []
+    for summary in task_summaries.values():
+        value = summary.get("primary_score")
+        if isinstance(value, (int, float)):
+            values.append(float(value))
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def _load_existing_task_summaries(
     *,
     run_root: Path,
@@ -685,6 +696,7 @@ def run_evaluation(
             "model": model,
             "results": all_task_summaries,
             "primary_scores": all_primary_scores,
+            "primary_score_aggregate": _aggregate_primary_scores(all_task_summaries),
             "summary": _aggregate_run_metrics(all_task_summaries),
         }
         write_json(run_root / "run_summary.json", run_summary)
