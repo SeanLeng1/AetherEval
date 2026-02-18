@@ -7,7 +7,7 @@ from aethereval.core.types import Sample
 from benchmarks.ifeval.ifeval_lib import evaluation_lib
 
 
-PRIMARY_METRIC = "prompt_level_strict_acc"
+PRIMARY_METRIC = "prompt_level_loose_acc"
 
 
 def _build_input_example(sample: Sample) -> evaluation_lib.InputExample:

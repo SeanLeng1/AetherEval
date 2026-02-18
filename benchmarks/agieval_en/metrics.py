@@ -9,6 +9,7 @@ from aethereval.metrics.common import aggregate_mcq_results
 
 PRIMARY_METRIC = "accuracy"
 
+# Generation-only answer parsing: this task does not use MCQ loglikelihood scoring.
 _OLMO_3_REGEXES = [
     r"(?i)therefore,?\s*the\s*answer\s*is:?\s*\(?($ANS$)\b",
     r"(?i)so\s+the\s+answer\s+is\s+($ANS$)\.?",

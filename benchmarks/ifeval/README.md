@@ -28,6 +28,7 @@ benchmarks/ifeval/
 - Implemented in `metrics.py`
 - Uses vendored Google evaluation logic in `ifeval_lib/evaluation_lib.py`
 - Uses local `ifeval_lib/.nltk_data` first; if missing, falls back to system NLTK paths.
+- `PRIMARY_METRIC`: `prompt_level_loose_acc`
 - Reports:
   - `prompt_level_strict_acc`
   - `prompt_level_strict_acc_stderr`

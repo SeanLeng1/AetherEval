@@ -535,41 +535,143 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["accuracy_sat_en"], 1.0, places=6)
         self.assertAlmostEqual(result["accuracy_logiqa_en"], 0.0, places=6)
 
+    def test_bbh_metrics(self) -> None:
+        bundle = load_task("bbh")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="bbh_1",
+            gold="(B)",
+            meta={"subset": "date_understanding"},
+            data={
+                "subset": "date_understanding",
+                "input": "If today is Monday, what day comes after Tuesday?",
+                "target": "Let's think step by step. So the answer is (B).",
+                "answer": "(B)",
+                "description": "Infer the date from context.",
+            },
+        )
+
+        prompt = bundle.task_module.build_prompt(sample)
+        self.assertIn("Question:", prompt)
+        self.assertIn("Answer: Let's think step by step.", prompt)
+
+        scored = metrics_module.score_generation(
+            sample,
+            "We reason it out. So the answer is B.",
+        )
+        self.assertEqual(scored["score"], 1.0)
+        self.assertEqual(scored["parsed"]["prediction"], "(B)")
+
+        # Some BBH rows in MC-tagged subsets contain free-form text answers.
+        sample_free_form = Sample(
+            id="bbh_2",
+            gold="dearth, wind, & fire",
+            meta={"subset": "ruin_names"},
+            data={
+                "subset": "ruin_names",
+                "input": "Dummy",
+                "target": "dearth, wind, & fire",
+                "answer": "dearth, wind, & fire",
+                "description": "Dummy",
+            },
+        )
+        scored_free_form = metrics_module.score_generation(
+            sample_free_form,
+            "dearth, wind, & fire",
+        )
+        self.assertEqual(scored_free_form["score"], 1.0)
+
+        sample_results = [
+            {
+                "sample_id": "bbh_1",
+                "meta": {"subset": "date_understanding"},
+                "records": [
+                    {"sample_id": "bbh_1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {"prediction_norm": "b"}},
+                    {"sample_id": "bbh_1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction_norm": ""}},
+                ],
+            },
+            {
+                "sample_id": "bbh_2",
+                "meta": {"subset": "boolean_expressions"},
+                "records": [
+                    {"sample_id": "bbh_2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {"prediction_norm": "false"}},
+                    {"sample_id": "bbh_2", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction_norm": ""}},
+                ],
+            },
+        ]
+        result = metrics_module.aggregate(sample_results, {"n": 2})
+        self.assertAlmostEqual(result["exact_match"], 0.25, places=6)
+        self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
+        self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
+        self.assertAlmostEqual(result["pass@2"], 0.5, places=6)
+        self.assertAlmostEqual(result["exact_match_date_understanding"], 0.5, places=6)
+        self.assertAlmostEqual(result["exact_match_boolean_expressions"], 0.0, places=6)
+
     def test_zebralogic_metrics(self) -> None:
         bundle = load_task("zebralogic")
         metrics_module = bundle.metrics_module
 
         sample = Sample(
             id="z1",
-            gold="6",
+            gold={"House 1": {"Name": "Alice"}},
             meta={},
-            data={"question": "Dummy"},
+            data={"total_cells": 1},
         )
-        scored = metrics_module.score_generation(sample, "ANSWER: 6")
+        scored = metrics_module.score_generation(
+            sample,
+            (
+                '{"reasoning":"dummy","solution":{"House 1":{"Name":"Alice"}}}'
+            ),
+        )
         self.assertEqual(scored["score"], 1.0)
-        self.assertEqual(scored["parsed"]["prediction_norm"], "6")
+        self.assertAlmostEqual(scored["parsed"]["cell_accuracy"], 1.0, places=6)
+        self.assertEqual(scored["parsed"]["correct_cells"], 1)
 
         sample_results = [
             {
                 "sample_id": "z1",
                 "records": [
-                    {"sample_id": "z1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {"prediction": "6"}},
-                    {"sample_id": "z1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction": "5"}},
+                    {
+                        "sample_id": "z1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {"parsed": 1.0, "cell_accuracy": 1.0},
+                    },
+                    {
+                        "sample_id": "z1",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"parsed": 1.0, "cell_accuracy": 0.0},
+                    },
                 ],
             },
             {
                 "sample_id": "z2",
                 "records": [
-                    {"sample_id": "z2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {"prediction": "1"}},
-                    {"sample_id": "z2", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction": "2"}},
+                    {
+                        "sample_id": "z2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"parsed": 1.0, "cell_accuracy": 0.0},
+                    },
+                    {
+                        "sample_id": "z2",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"parsed": 1.0, "cell_accuracy": 0.0},
+                    },
                 ],
             },
         ]
         result = metrics_module.aggregate(sample_results, {"n": 2})
-        self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
-        self.assertAlmostEqual(result["accuracy@2"], 0.25, places=6)
-        self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
-        self.assertAlmostEqual(result["pass@2"], 0.5, places=6)
+        self.assertAlmostEqual(result["puzzle_accuracy"], 0.5, places=6)
+        self.assertAlmostEqual(result["cell_accuracy"], 0.5, places=6)
+        self.assertAlmostEqual(result["parsed"], 1.0, places=6)
 
     def test_livecodebench_score_generation(self) -> None:
         bundle = load_task("livecodebench")
@@ -713,6 +815,12 @@ class MetricsTests(unittest.TestCase):
                 "plus_input": [[-1, 1], [10, -3]],
                 "atol": 0.0,
             },
+        )
+
+        prompt = bundle.task_module.build_prompt(sample)
+        self.assertEqual(
+            prompt,
+            sample.data["prompt"] + "Here is the completed function:\n\n```python\n",
         )
 
         scored = metrics_module.score_generation(

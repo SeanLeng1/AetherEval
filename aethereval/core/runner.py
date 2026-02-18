@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
@@ -44,34 +41,6 @@ def _make_progress_bar(total: int, desc: str) -> Any:
     except Exception:  # noqa: BLE001
         return None
     return tqdm(total=total, desc=desc, unit="gen", dynamic_ncols=True)
-
-
-_WORKER_METRICS_CACHE: dict[str, Any] = {}
-
-
-def _load_metrics_module_for_worker(metrics_module_path: str) -> Any:
-    module = _WORKER_METRICS_CACHE.get(metrics_module_path)
-    if module is not None:
-        return module
-
-    module_name = f"aethereval_worker_metrics_{abs(hash(metrics_module_path))}"
-    spec = importlib.util.spec_from_file_location(module_name, metrics_module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load metrics module from {metrics_module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    _WORKER_METRICS_CACHE[metrics_module_path] = module
-    return module
-
-
-def _score_generation_process_worker(
-    metrics_module_path: str,
-    sample: Sample,
-    generation_text: str,
-) -> dict[str, Any]:
-    module = _load_metrics_module_for_worker(metrics_module_path)
-    return module.score_generation(sample, generation_text)
 
 
 def _resolve_primary_metric(
@@ -335,7 +304,6 @@ def _run_single_task(
     task_output_dir: Path,
     gen_overrides: dict[str, Any],
     metric_options: dict[str, Any],
-    score_workers: int,
     overwrite: bool,
     run_config_common: dict[str, Any],
 ) -> dict[str, Any]:
@@ -410,18 +378,6 @@ def _run_single_task(
         _info(f"[{task_name}] starting vLLM generation")
         generated_outputs = backend.generate(pending_inputs, gen_cfg)
         score_bar = _make_progress_bar(pending_record_count, f"[{task_name}] scoring")
-        task_score_workers = max(1, int(score_workers))
-        metrics_module_path = getattr(metrics_module, "__file__", None)
-        score_executor: ProcessPoolExecutor | None = None
-
-        if task_score_workers > 1 and pending_record_count > 1:
-            if isinstance(metrics_module_path, str) and metrics_module_path:
-                score_executor = ProcessPoolExecutor(max_workers=task_score_workers)
-            else:
-                _info(
-                    f"[{task_name}] process scoring requested but metrics module has no __file__; "
-                    "fallback to serial scoring."
-                )
 
         try:
             for output in generated_outputs:
@@ -435,45 +391,19 @@ def _run_single_task(
                 score_error_by_local_idx: dict[int, str] = {}
 
                 if output.error is None:
-                    if score_executor is not None and len(missing) > 1:
-                        assert isinstance(metrics_module_path, str) and metrics_module_path
-                        future_to_local_idx = {}
-                        for local_idx in range(len(missing)):
-                            future = score_executor.submit(
-                                _score_generation_process_worker,
-                                metrics_module_path,
+                    for local_idx in range(len(missing)):
+                        try:
+                            scored = metrics_module.score_generation(
                                 sample,
                                 generations[local_idx],
                             )
-                            future_to_local_idx[future] = local_idx
-
-                        for future in as_completed(future_to_local_idx):
-                            local_idx = future_to_local_idx[future]
-                            try:
-                                scored = future.result()
-                                if not isinstance(scored, dict):
-                                    raise TypeError(
-                                        "score_generation must return a dict."
-                                    )
-                                scored_by_local_idx[local_idx] = scored
-                            except Exception as exc:  # noqa: BLE001
-                                score_error_by_local_idx[local_idx] = (
-                                    f"score_generation error: {type(exc).__name__}: {exc}"
-                                )
-                    else:
-                        for local_idx in range(len(missing)):
-                            try:
-                                scored = metrics_module.score_generation(
-                                    sample,
-                                    generations[local_idx],
-                                )
-                                if not isinstance(scored, dict):
-                                    raise TypeError("score_generation must return a dict.")
-                                scored_by_local_idx[local_idx] = scored
-                            except Exception as exc:  # noqa: BLE001
-                                score_error_by_local_idx[local_idx] = (
-                                    f"score_generation error: {type(exc).__name__}: {exc}"
-                                )
+                            if not isinstance(scored, dict):
+                                raise TypeError("score_generation must return a dict.")
+                            scored_by_local_idx[local_idx] = scored
+                        except Exception as exc:  # noqa: BLE001
+                            score_error_by_local_idx[local_idx] = (
+                                f"score_generation error: {type(exc).__name__}: {exc}"
+                            )
 
                 rows_to_write: list[dict[str, Any]] = []
                 for local_idx, gen_idx in enumerate(missing):
@@ -524,8 +454,6 @@ def _run_single_task(
 
                 append_jsonl(predictions_path, rows_to_write)
         finally:
-            if score_executor is not None:
-                score_executor.shutdown(wait=True, cancel_futures=False)
             if score_bar is not None:
                 score_bar.close()
         _info(f"[{task_name}] generation finished: new_records={len(new_records)}")
@@ -594,7 +522,6 @@ def run_evaluation(
     bootstrap_resamples: int = 1000,
     bootstrap_seed: int = 42,
     bootstrap_confidence: float = 0.95,
-    score_workers: int = 1,
     overwrite: bool = False,
     run_id: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
@@ -608,8 +535,6 @@ def run_evaluation(
         raise RuntimeError(f"No tasks found in {task_root}")
 
     selected = _parse_tasks_arg(tasks, available)
-    if int(score_workers) < 1:
-        raise ValueError(f"score_workers must be >= 1, got {score_workers}")
     out_dir = Path(output_dir)
     this_run_id = run_id or default_run_id_for_model(model)
     run_root = out_dir / this_run_id
@@ -618,7 +543,7 @@ def run_evaluation(
     _info(f"discovered_tasks={len(available)} selected={selected}")
     _info(
         f"model={model} dp_size={int(dp_size)} tp_size={int(tensor_parallel_size)} "
-        f"score_workers={int(score_workers)} output_dir={out_dir} run_id={this_run_id}"
+        f"output_dir={out_dir} run_id={this_run_id}"
     )
     if model_kwargs:
         _info(f"vllm_model_kwargs={model_kwargs}")
@@ -639,7 +564,6 @@ def run_evaluation(
             "model": model,
             "dp_size": int(dp_size),
             "tp_size": int(tensor_parallel_size),
-            "score_workers": int(score_workers),
             "model_kwargs": model_kwargs or {},
         }
         metric_options = {
@@ -662,7 +586,6 @@ def run_evaluation(
                 task_output_dir=task_output_dir,
                 gen_overrides=gen_overrides or {},
                 metric_options=metric_options,
-                score_workers=int(score_workers),
                 overwrite=overwrite,
                 run_config_common=run_config_common,
             )

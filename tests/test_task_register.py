@@ -34,6 +34,7 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("aime25", tasks)
         self.assertIn("mmlu_pro", tasks)
         self.assertIn("agieval_en", tasks)
+        self.assertIn("bbh", tasks)
         self.assertIn("ifbench", tasks)
         self.assertIn("humaneval_plus", tasks)
         self.assertIn("zebralogic", tasks)
@@ -96,7 +97,9 @@ class TaskRegisterTests(unittest.TestCase):
         defaults = list_task_default_gens()
         self.assertIn("ifeval", defaults)
         self.assertIn("gpqa_diamond", defaults)
+        self.assertIn("bbh", defaults)
         self.assertEqual(defaults["ifeval"]["n"], 1)
+        self.assertEqual(defaults["bbh"]["n"], 1)
         self.assertEqual(defaults["aime24"]["n"], 16)
         self.assertIn("max_new_tokens", defaults["livecodebench"])
 
@@ -105,7 +108,7 @@ class TaskRegisterTests(unittest.TestCase):
         ifeval_metric = self._read_primary_metric(repo_root / "benchmarks" / "ifeval" / "metrics.py")
         ifbench_metric = self._read_primary_metric(repo_root / "benchmarks" / "ifbench" / "metrics.py")
 
-        self.assertEqual(ifeval_metric, "prompt_level_strict_acc")
+        self.assertEqual(ifeval_metric, "prompt_level_loose_acc")
         self.assertEqual(ifbench_metric, "prompt_level_loose_acc")
 
 

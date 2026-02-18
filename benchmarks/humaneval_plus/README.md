@@ -22,7 +22,8 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 ## Prompting
 
 - Implemented in `task.py`
-- Instruction asks model to output executable Python code only.
+- Aligns with OLMES CodexHumanEval(+): uses native EvalPlus `prompt` and appends `Here is the completed function:\n\n```python\n` as the answer prefix.
+- Does not append extra format constraints or `contract` hints in the prompt body.
 - Core still applies chat template (framework default).
 
 ## Metrics

@@ -94,13 +94,6 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 
     dp_size = int(_pick(arg_dp_size, _cfg_get(cfg, "dp_size", "runtime"), 1))
     tp_size = int(_pick(arg_tp_size, _cfg_get(cfg, "tp_size", "runtime"), 1))
-    score_workers = int(
-        _pick(
-            getattr(args, "score_workers", None),
-            _cfg_get(cfg, "score_workers", "runtime"),
-            1,
-        )
-    )
 
     gen_overrides = {
         "n": _pick(args.n, _cfg_get(cfg, "n", "generation")),
@@ -167,7 +160,6 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "overwrite": overwrite,
         "dp_size": dp_size,
         "tp_size": tp_size,
-        "score_workers": score_workers,
         "gen_overrides": gen_overrides,
         "bootstrap_resamples": bootstrap_resamples,
         "bootstrap_seed": bootstrap_seed,

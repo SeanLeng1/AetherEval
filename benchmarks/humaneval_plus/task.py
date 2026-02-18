@@ -22,6 +22,9 @@ _REQUIRED_KEYS = {
 }
 
 
+_ANSWER_PREFIX = "Here is the completed function:\n\n```python\n"
+
+
 def _ensure_list(value: Any, key: str, sample_id: str) -> list[Any]:
     if isinstance(value, list):
         return value
@@ -77,19 +80,6 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
 
 def build_prompt(sample: Sample) -> str:
+    # Align with OLMES CodexHumanEval(+): keep the native prompt and append answer_prefix.
     prompt = str(sample.data["prompt"])
-    contract = str(sample.data.get("contract", "")).strip()
-    if contract:
-        return (
-            "Complete the Python function below. "
-            "Return only executable Python code (no explanation).\n\n"
-            "# Function signature and docstring\n"
-            f"{prompt}\n"
-            "# Input contract hints (optional assertions)\n"
-            f"{contract}\n"
-        )
-    return (
-        "Complete the Python function below. "
-        "Return only executable Python code (no explanation).\n\n"
-        f"{prompt}\n"
-    )
+    return prompt + _ANSWER_PREFIX

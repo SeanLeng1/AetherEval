@@ -37,6 +37,7 @@ benchmarks/agieval_en/
 ## Metrics
 
 - Implemented in `metrics.py`
+- Generation-text extraction only (regex parsing of model output); no choice loglikelihood scoring.
 - Extraction follows OLMo3-style regex priority:
   - exact `Therefore, the answer is (X)`
   - template fallbacks (`so the answer is ...`, `answer: ...`, etc.)
