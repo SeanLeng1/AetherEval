@@ -1,6 +1,6 @@
-# Start from the NVIDIA official image (ubuntu-24.04 + cuda-13.0 + python-3.12)
-# https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-08.html
-FROM nvcr.io/nvidia/pytorch:25.08-py3
+# Start from the NVIDIA official image (ubuntu-24.04 + cuda-12.9 + python-3.12)
+# https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-06.html
+FROM nvcr.io/nvidia/pytorch:25.06-py3
 
 # Define environments
 ENV MAX_JOBS=32
@@ -38,12 +38,11 @@ RUN pip uninstall -y torch torchvision torchaudio \
 # Fix cv2
 RUN rm -rf /usr/local/lib/python3.11/dist-packages/cv2
 
-# Install torch (2.10.0 cuda 13.0)
-RUN pip install --no-cache-dir torch==2.10.0 --index-url https://download.pytorch.org/whl/cu130
-
+# Install torch (2.9.1 cuda 12.9)
+RUN pip install --no-cache-dir torch==2.9.1 --index-url https://download.pytorch.org/whl/cu129
 
 # Install vllm
-RUN pip install --no-cache-dir "vllm==0.16.0" && pip install torch-memory-saver --no-cache-dir
+RUN pip install --no-cache-dir "vllm==0.15.1" && pip install torch-memory-saver --no-cache-dir
 
 # Fix packages
 RUN pip install --no-cache-dir tensordict torchdata "transformers[hf_xet]==4.57.6" accelerate datasets peft hf-transfer \
