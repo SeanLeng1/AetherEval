@@ -23,20 +23,20 @@ Each row includes: `id`, `subset`, `input`, `target`, `answer`, `description`.
 ## Prompting
 
 - Implemented in `task.py`
-- Aligns with OLMES BBH CoT query format:
+- Uses a zero-shot CoT query format:
   - `Question: <input>`
   - `Answer: Let's think step by step.`
 - Prepends subset description when available.
-- Uses zero-shot CoT (OLMES query style) rather than OLMES few-shot source wiring.
+- Uses zero-shot CoT without few-shot exemplars.
 
 ## Metrics
 
 - Implemented in `metrics.py`
 - Uses generation-text extraction only (no likelihood scoring)
-- Uses OLMES-style per-subset answer regex rules
+- Uses per-subset answer regex rules
 - Includes fallback handling for a small number of BBH rows where MC subsets
   provide free-form gold text instead of `(A)/(B)/...`.
-- Core metric is exact match with OLMES-like normalization:
+- Core metric is exact match with normalization:
   - `ignore_case=True`
   - `ignore_punctuation=True` for all subsets except `dyck_languages`
 

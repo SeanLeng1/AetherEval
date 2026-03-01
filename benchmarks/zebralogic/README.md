@@ -13,7 +13,7 @@ benchmarks/zebralogic/
 
 ## Data
 
-- Task format follows OLMES ZebraLogic (`grid_mode`): each row contains
+- Task format follows ZebraLogic (`grid_mode`): each row contains
   `id`, `size`, `puzzle`, and full `solution` table (`header` + `rows`).
 - `prepare_data.py` load order:
   1. `allenai/ZebraLogicBench-private/grid_mode` (preferred, gated)
@@ -24,7 +24,7 @@ benchmarks/zebralogic/
 ## Prompting
 
 - Implemented in `task.py`
-- Prompt is OLMES-style ZebraLogic grid prompt with:
+- Prompt is a ZebraLogic grid prompt with:
   - one worked example,
   - the target puzzle,
   - explicit instruction to return JSON in schema:

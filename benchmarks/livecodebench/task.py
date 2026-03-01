@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import base64
 import json
@@ -30,6 +29,9 @@ _FORMATTING_WITHOUT_STARTER_CODE = (
     "(do not directly test on the sample inputs). Enclose your code within delimiters "
     "as follows. Ensure that when the python program runs, it reads the inputs, runs "
     "the algorithm and writes output to STDOUT."
+)
+_REASONING_PREFIX = (
+    "Provide CONCISE reasoning on how to arrive at the answer."
 )
 
 
@@ -153,19 +155,25 @@ def build_prompt(sample: Sample) -> list[dict[str, str]]:
     question = str(sample.data["question_content"])
     starter_code = str(sample.data.get("starter_code", ""))
 
-    user_prompt = f"### Question:\n{question}\n\n"
-
+    format_instruction: str
     if starter_code:
-        user_prompt += (
-            f"### Format: {_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
-            f"```python\n{starter_code}\n```\n"
+        format_instruction = (
+            f"{_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
+            f"```python\n{starter_code}\n```"
         )
     else:
-        user_prompt += (
-            f"### Format: {_FORMATTING_WITHOUT_STARTER_CODE}\n"
-            "```python\n# YOUR CODE HERE\n```\n"
+        format_instruction = (
+            f"{_FORMATTING_WITHOUT_STARTER_CODE}\n"
+            "```python\n# YOUR CODE HERE\n```"
         )
-    user_prompt += "\n### Answer: (use the provided format with backticks)\n\n"
+
+    user_prompt = (
+        f"### Question:\n{question}\n\n"
+        "### Format:\n"
+        f"{_REASONING_PREFIX}\n"
+        f"{format_instruction}\n\n"
+        "### Answer: (use the provided format with backticks)\n\n"
+    )
 
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},

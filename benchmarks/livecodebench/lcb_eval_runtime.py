@@ -1,10 +1,10 @@
-from __future__ import annotations
 
 import ast
 import faulthandler
 import json
 import multiprocessing
 import platform
+from queue import Empty
 import signal
 import sys
 import time
@@ -81,8 +81,14 @@ class TimeoutException(Exception):
 
 def timeout_handler(signum: int, frame: Any) -> None:
     del signum, frame
-    print("timeout occured: alarm went off")
-    raise TimeoutException
+    raise TimeoutException("alarm went off")
+
+
+_GLOBAL_TIMEOUT_GRACE_SEC = 5
+_MAX_GLOBAL_TIMEOUT_SEC = 600
+_TERMINATE_GRACE_SEC = 1.0
+_KILL_GRACE_SEC = 1.0
+_RESULT_QUEUE_WAIT_SEC = 0.25
 
 
 class Capturing(list):
@@ -565,13 +571,72 @@ def _temp_run(
     sample: dict[str, Any],
     generation: str,
     debug: bool,
-    result: Any,
-    metadata_list: Any,
+    result_queue: Any,
     timeout: int,
 ) -> None:
-    res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
-    result.append(res)
-    metadata_list.append(metadata)
+    try:
+        res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
+        result_queue.put((res, metadata))
+    except BaseException as exc:
+        # Preserve worker crashes as runtime errors instead of turning them into
+        # a synthetic global-timeout result.
+        try:
+            result_queue.put(
+                (
+                    [-4],
+                    {
+                        "error_code": -4,
+                        "error_message": f"Worker Error: {type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+        except Exception:
+            pass
+    finally:
+        try:
+            result_queue.cancel_join_thread()
+        except Exception:
+            pass
+        try:
+            result_queue.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(result_queue, "join_thread"):
+                result_queue.join_thread()
+        except Exception:
+            pass
+
+
+def _num_inputs_for_sample(sample: dict[str, Any]) -> int:
+    try:
+        payload = json.loads(sample["input_output"])
+        inputs = payload.get("inputs", [])
+        if isinstance(inputs, list) and inputs:
+            return len(inputs)
+    except Exception:
+        pass
+    return 1
+
+
+def _global_timeout_for_sample(sample: dict[str, Any], timeout: int) -> tuple[int, int]:
+    num_inputs = _num_inputs_for_sample(sample)
+    timeout = max(1, int(timeout))
+    estimated = (timeout + 1) * num_inputs + _GLOBAL_TIMEOUT_GRACE_SEC
+    return min(_MAX_GLOBAL_TIMEOUT_SEC, estimated), num_inputs
+
+
+def _terminate_process(process: multiprocessing.Process) -> None:
+    if not process.is_alive():
+        process.join(timeout=0.01)
+        return
+
+    process.terminate()
+    process.join(timeout=_TERMINATE_GRACE_SEC)
+
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=_KILL_GRACE_SEC)
 
 
 def check_correctness(
@@ -580,33 +645,52 @@ def check_correctness(
     timeout: int,
     debug: bool = False,
 ) -> tuple[list[int | bool], dict[str, Any]]:
-    manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
+    timeout = max(1, int(timeout))
+    global_timeout_sec, num_inputs = _global_timeout_for_sample(sample, timeout)
+    result_queue = multiprocessing.Queue(maxsize=1)
+
     p = multiprocessing.Process(
         target=_temp_run,
-        args=(sample, generation, debug, result, metadata_list, timeout),
+        args=(sample, generation, debug, result_queue, timeout),
     )
     p.start()
-    p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
-    if p.is_alive():
-        p.kill()
+    p.join(timeout=global_timeout_sec)
+    _terminate_process(p)
 
-    if not result:
-        in_outs = json.loads(sample["input_output"])
-        result = [[-1 for _ in range(len(in_outs["inputs"]))]]
-        if not metadata_list:
-            metadata_list = [
-                {
-                    "error_code": -1,
-                    "error_message": "Global Timeout",
-                }
-            ]
+    payload: tuple[list[int | bool], dict[str, Any]] | None = None
+    try:
+        payload = result_queue.get(timeout=_RESULT_QUEUE_WAIT_SEC)
+    except Empty:
+        payload = None
+    except Exception:
+        payload = None
+    finally:
+        try:
+            result_queue.cancel_join_thread()
+        except Exception:
+            pass
+        try:
+            result_queue.close()
+        except Exception:
+            pass
+
+    if payload is None:
         if debug:
             print("global timeout")
+        return (
+            [-1 for _ in range(num_inputs)],
+            {
+                "error_code": -1,
+                "error_message": "Global Timeout",
+                "timeout_sec": global_timeout_sec,
+                "num_tests": num_inputs,
+            },
+        )
 
-    metadata = metadata_list[0] if metadata_list else {"error_code": -1, "error_message": "Global Timeout"}
-    return list(result[0]), dict(metadata)
+    result, metadata = payload
+    statuses = list(result) if isinstance(result, list) else [-4]
+    metadata_dict = metadata if isinstance(metadata, dict) else {"error_code": -4, "error_message": "Invalid metadata"}
+    return statuses, metadata_dict
 
 
 def _normalize_status(value: Any) -> int | bool:

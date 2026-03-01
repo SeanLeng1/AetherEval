@@ -22,18 +22,20 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 ## Prompting
 
 - Implemented in `task.py`
-- Aligns with OLMES CodexHumanEval(+): uses native EvalPlus `prompt` and appends `Here is the completed function:\n\n```python\n` as the answer prefix.
-- Does not append extra format constraints or `contract` hints in the prompt body.
-- Core still applies chat template (framework default).
+- Uses chat-style prompt with explicit sections:
+  - system instruction for Python code completion
+  - user sections: `### Question`, `### Format`, `### Answer`
+- `### Format` asks for short reasoning plus completed function inside a fenced Python block.
+- The framework applies the model chat template.
 
 ## Metrics
 
 - Implemented in `metrics.py`
-- Directly uses EvalPlus runtime (`evalplus.gen.util.trusted_exec` and `evalplus.eval.untrusted_check`).
 - For each generation:
-  - run base tests
-  - run plus tests only if base passes
-- `score` / `is_pass` is based on HumanEval+ criterion (base + plus pass).
+  - extract the final code candidate (prefer answer block / fenced code)
+  - execute `prompt + continuation`
+  - run `test + check(entry_point)` inside a local sandboxed subprocess with timeout
+- `score` / `is_pass` is pass/fail of that unit-test execution.
 
 Reported metrics include:
 - `accuracy` (alias of `accuracy_plus`)

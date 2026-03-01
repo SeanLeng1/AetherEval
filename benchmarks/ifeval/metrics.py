@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from typing import Any
 
@@ -52,8 +51,8 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
         "inst_level_loose_acc": [bool(x) for x in loose_out.follow_instruction_list],
     }
     return {
-        "score": prompt_level_strict_acc,
-        "is_pass": bool(prompt_level_strict_acc),
+        "score": prompt_level_loose_acc,
+        "is_pass": bool(prompt_level_loose_acc),
         "parsed": parsed,
     }
 

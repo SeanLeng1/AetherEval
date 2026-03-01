@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import json
 from collections import defaultdict
@@ -12,30 +11,30 @@ PRIMARY_METRIC = "puzzle_accuracy"
 
 
 def extract_last_complete_json(text: str) -> dict[str, Any] | None:
-    stack: list[int] = []
-    last_json_start: int | None = None
-    last_json_str: str | None = None
+    decoder = json.JSONDecoder()
+    best_obj: dict[str, Any] | None = None
+    best_end = -1
+    best_start = -1
 
-    for i, char in enumerate(text):
-        if char == "{":
-            if not stack:
-                last_json_start = i
-            stack.append(i)
-        elif char == "}":
-            if not stack:
-                continue
-            stack.pop()
-            if not stack and last_json_start is not None:
-                last_json_str = text[last_json_start : i + 1]
-                last_json_start = None
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            obj, consumed = decoder.raw_decode(text[start:])
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
 
-    if not last_json_str:
-        return None
+        end = start + int(consumed)
+        # "last complete JSON object": prefer the one that ends latest.
+        # If multiple objects share the same end, keep the outermost one.
+        if end > best_end or (end == best_end and (best_start < 0 or start < best_start)):
+            best_obj = obj
+            best_end = end
+            best_start = start
 
-    try:
-        return json.loads(last_json_str)
-    except json.JSONDecodeError:
-        return None
+    return best_obj
 
 
 def _normalize_cell(value: Any) -> str:

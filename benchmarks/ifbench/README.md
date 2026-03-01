@@ -32,7 +32,7 @@ benchmarks/ifbench/
 - Uses vendored official IFBench evaluation code in `ifbench_lib/`
 - Uses local `ifbench_lib/.nltk_data` first; if missing, falls back to system NLTK paths.
 - Strict/loose scoring is kept consistent with `run_eval.py` + `evaluation_lib.py`
-- `PRIMARY_METRIC`: `prompt_level_loose_acc` (aligned with IFBench paper default reporting)
+- `PRIMARY_METRIC`: `prompt_level_loose_acc`
 - Reported metrics:
   - `prompt_level_strict_acc`
   - `prompt_level_strict_acc_stderr`

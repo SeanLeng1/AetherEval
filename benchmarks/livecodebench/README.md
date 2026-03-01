@@ -29,16 +29,19 @@ Why `v6`:
 ## Prompting
 
 - Implemented in `task.py`
-- Uses official-style LiveCodeBench code generation instruction:
+- Uses a chat prompt with:
+  - system: expert Python programmer instruction
+  - user sections: `### Question`, `### Format`, `### Answer`
+  - `### Format` includes concise reasoning instruction (plain text)
   - with starter code: complete the provided stub
   - without starter code: read from `stdin`, write to `stdout`
-- Framework chat template is applied by AetherEval core.
+- The framework applies the model chat template.
 
 ## Metrics
 
 - Implemented in `metrics.py`
 - Runtime executor is benchmark-local in `lcb_eval_runtime.py` (call-based + stdio execution).
-- Code extraction follows official-style fenced-code parsing (uses last fenced block; no raw-text fallback).
+- Code extraction uses fenced-code parsing (last fenced block; no raw-text fallback).
 - Per generation score:
   - `1.0` if all tests pass
   - `0.0` otherwise

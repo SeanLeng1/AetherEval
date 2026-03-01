@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import copy
 import unittest
@@ -673,6 +672,25 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["cell_accuracy"], 0.5, places=6)
         self.assertAlmostEqual(result["parsed"], 1.0, places=6)
 
+    def test_zebralogic_score_generation_json_with_braces_in_string(self) -> None:
+        bundle = load_task("zebralogic")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="z_braces",
+            gold={"House 1": {"Name": "Alice"}},
+            meta={},
+            data={"total_cells": 1},
+        )
+        generation = (
+            "Some notes before the answer.\n"
+            '{"reasoning":"Use clue {A} then {B}.","solution":{"House 1":{"Name":"Alice"}}}\n'
+        )
+
+        scored = metrics_module.score_generation(sample, generation)
+        self.assertEqual(scored["score"], 1.0)
+        self.assertAlmostEqual(scored["parsed"]["cell_accuracy"], 1.0, places=6)
+
     def test_livecodebench_score_generation(self) -> None:
         bundle = load_task("livecodebench")
         metrics_module = bundle.metrics_module
@@ -776,6 +794,10 @@ class MetricsTests(unittest.TestCase):
         )
         self.assertIn("### Question:", prompt_no_starter[1]["content"])
         self.assertIn("### Format:", prompt_no_starter[1]["content"])
+        self.assertIn(
+            "Provide CONCISE reasoning on how to arrive at the answer.",
+            prompt_no_starter[1]["content"],
+        )
         self.assertIn("Read the inputs from stdin solve the problem", prompt_no_starter[1]["content"])
         self.assertIn("### Answer: (use the provided format with backticks)", prompt_no_starter[1]["content"])
 
@@ -796,6 +818,10 @@ class MetricsTests(unittest.TestCase):
             "You will use the following starter code to write the solution to the problem",
             prompt_with_starter[1]["content"],
         )
+        self.assertIn(
+            "Provide CONCISE reasoning on how to arrive at the answer.",
+            prompt_with_starter[1]["content"],
+        )
         self.assertIn("class Solution:", prompt_with_starter[1]["content"])
 
     def test_humaneval_plus_score_generation(self) -> None:
@@ -810,6 +836,11 @@ class MetricsTests(unittest.TestCase):
                 "task_id": "HumanEval/test_add",
                 "prompt": "def add(a, b):\n    \"\"\"Return sum of two numbers.\"\"\"\n",
                 "entry_point": "add",
+                "test": (
+                    "def check(candidate):\n"
+                    "    assert candidate(1, 2) == 3\n"
+                    "    assert candidate(3, 4) == 7\n"
+                ),
                 "canonical_solution": "    return a + b\n",
                 "base_input": [[1, 2], [3, 4]],
                 "plus_input": [[-1, 1], [10, -3]],
@@ -818,14 +849,84 @@ class MetricsTests(unittest.TestCase):
         )
 
         prompt = bundle.task_module.build_prompt(sample)
-        self.assertEqual(
-            prompt,
-            sample.data["prompt"] + "Here is the completed function:\n\n```python\n",
-        )
+        self.assertIsInstance(prompt, list)
+        self.assertEqual(prompt[0]["role"], "system")
+        self.assertEqual(prompt[1]["role"], "user")
+        self.assertIn("### Question:", prompt[1]["content"])
+        self.assertIn("### Format:", prompt[1]["content"])
+        self.assertIn("Provide a SHORT reasoning on how to solve the task", prompt[1]["content"])
+        self.assertIn("# YOUR CODE HERE", prompt[1]["content"])
+        self.assertIn("### Answer: (use the provided format with backticks)", prompt[1]["content"])
+        self.assertIn(sample.data["prompt"], prompt[1]["content"])
 
         scored = metrics_module.score_generation(
             sample,
             "```python\ndef add(a, b):\n    return a + b\n```",
+        )
+        self.assertEqual(scored["score"], 1.0)
+        self.assertTrue(scored["parsed"]["base_pass"])
+        self.assertTrue(scored["parsed"]["plus_pass"])
+
+        # Regression guard: if generation includes a full function with typing annotations,
+        # evaluator must still execute with the original prompt imports.
+        sample_with_import = Sample(
+            id="HumanEval/test_import",
+            gold=None,
+            meta={"entry_point": "first_item"},
+            data={
+                "task_id": "HumanEval/test_import",
+                "prompt": (
+                    "from typing import List\n\n"
+                    "def first_item(items: List[int]) -> int:\n"
+                    "    \"\"\"Return the first item.\"\"\"\n"
+                ),
+                "entry_point": "first_item",
+                "test": (
+                    "def check(candidate):\n"
+                    "    assert candidate([1, 2, 3]) == 1\n"
+                    "    assert candidate([9, 8, 7]) == 9\n"
+                ),
+                "canonical_solution": "    return items[0]\n",
+                "base_input": [[[1, 2, 3]]],
+                "plus_input": [[[9, 8, 7]]],
+                "atol": 0.0,
+            },
+        )
+        scored_full = metrics_module.score_generation(
+            sample_with_import,
+            "```python\ndef first_item(items: List[int]) -> int:\n    return items[0]\n```",
+        )
+        self.assertEqual(scored_full["score"], 1.0)
+        self.assertTrue(scored_full["parsed"]["base_pass"])
+        self.assertTrue(scored_full["parsed"]["plus_pass"])
+
+    def test_humaneval_plus_score_generation_preserves_first_line_indentation(self) -> None:
+        bundle = load_task("humaneval_plus")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="HumanEval/test_indent",
+            gold=None,
+            meta={"entry_point": "add"},
+            data={
+                "task_id": "HumanEval/test_indent",
+                "prompt": "def add(a, b):\n    \"\"\"Return sum of two numbers.\"\"\"\n",
+                "entry_point": "add",
+                "test": (
+                    "def check(candidate):\n"
+                    "    assert candidate(1, 2) == 3\n"
+                    "    assert candidate(3, 4) == 7\n"
+                ),
+                "canonical_solution": "    return a + b\n",
+                "base_input": [[1, 2], [3, 4]],
+                "plus_input": [[-1, 1], [10, -3]],
+                "atol": 0.0,
+            },
+        )
+
+        scored = metrics_module.score_generation(
+            sample,
+            "```python\n    return a + b\n```",
         )
         self.assertEqual(scored["score"], 1.0)
         self.assertTrue(scored["parsed"]["base_pass"])
@@ -895,6 +996,11 @@ class MetricsTests(unittest.TestCase):
                 "task_id": "HumanEval/mutation_guard",
                 "prompt": "def find_closest_elements(numbers):\n",
                 "entry_point": "find_closest_elements",
+                "test": (
+                    "def check(candidate):\n"
+                    "    assert candidate([3.0, 1.0, 2.0]) == (1.0, 2.0)\n"
+                    "    assert candidate([5.0, 4.0, 6.0]) == (4.0, 5.0)\n"
+                ),
                 "canonical_solution": (
                     "    numbers.sort()\n"
                     "    return (numbers[0], numbers[1])\n"

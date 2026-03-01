@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ _REQUIRED_KEYS = {
     "task_id",
     "prompt",
     "entry_point",
+    "test",
     "canonical_solution",
     "base_input",
     "plus_input",
@@ -22,7 +22,18 @@ _REQUIRED_KEYS = {
 }
 
 
-_ANSWER_PREFIX = "Here is the completed function:\n\n```python\n"
+_SYSTEM_PROMPT = (
+    "You are an expert Python programmer. "
+    "You will be given a function specification and must return a correct completed "
+    "Python function that passes all tests."
+)
+_FORMAT_INSTRUCTION = (
+    "Provide a SHORT reasoning on how to solve the task, then return the completed "
+    "function enclosed in a Python code block as:\n"
+    "```python\n"
+    "# YOUR CODE HERE\n"
+    "```"
+)
 
 
 def _ensure_list(value: Any, key: str, sample_id: str) -> list[Any]:
@@ -49,6 +60,7 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
         prompt = str(row["prompt"])
         entry_point = str(row["entry_point"]).strip()
+        test = str(row["test"])
         canonical_solution = str(row["canonical_solution"])
         contract = str(row.get("contract", ""))
         base_input = _ensure_list(row["base_input"], "base_input", task_id)
@@ -68,6 +80,7 @@ def load_samples(task_dir: Path) -> list[Sample]:
                     "prompt": prompt,
                     "contract": contract,
                     "entry_point": entry_point,
+                    "test": test,
                     "canonical_solution": canonical_solution,
                     "base_input": base_input,
                     "plus_input": plus_input,
@@ -79,7 +92,15 @@ def load_samples(task_dir: Path) -> list[Sample]:
     return samples
 
 
-def build_prompt(sample: Sample) -> str:
-    # Align with OLMES CodexHumanEval(+): keep the native prompt and append answer_prefix.
+def build_prompt(sample: Sample) -> list[dict[str, str]]:
     prompt = str(sample.data["prompt"])
-    return prompt + _ANSWER_PREFIX
+    user_prompt = (
+        f"### Question:\n{prompt}\n\n"
+        "### Format:\n"
+        f"{_FORMAT_INSTRUCTION}\n\n"
+        "### Answer: (use the provided format with backticks)\n\n"
+    )
+    return [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]

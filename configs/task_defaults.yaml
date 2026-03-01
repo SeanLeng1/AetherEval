@@ -29,9 +29,9 @@ gpqa_diamond:
   top_p: 0.7
 
 humaneval_plus:
-  n: 16
+  n: 10
   max_new_tokens: 4096
-  temperature: 0.2
+  temperature: 0.6
   top_p: 0.95
 
 ifbench:
@@ -47,9 +47,9 @@ ifeval:
   top_p: 1.0
 
 livecodebench:
-  n: 16
+  n: 10
   max_new_tokens: 4096
-  temperature: 0.2
+  temperature: 0.6
   top_p: 0.95
 
 mmlu_pro:
