@@ -23,7 +23,7 @@ aime25:
   top_p: 0.7
 
 gpqa_diamond:
-  n: 16
+  n: 32
   max_new_tokens: 4096
   temperature: 1.0
   top_p: 0.7
