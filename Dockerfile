@@ -11,11 +11,11 @@ ENV PIP_ROOT_USER_ACTION=ignore
 ENV HF_HUB_ENABLE_HF_TRANSFER="1"
 ENV PIP_CONSTRAINT=""
 
-ARG PIP_INDEX=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+ARG PIP_INDEX=https://pypi.org/simple
 
-# Change pip source
+# Configure pip source (official PyPI by default)
 RUN pip config set global.index-url "${PIP_INDEX}" && \
-    pip config set global.extra-index-url "${PIP_INDEX}" && \
+    pip config unset global.extra-index-url || true && \
     pip config set global.no-cache-dir "true" && \
     python -m pip install --upgrade pip
 

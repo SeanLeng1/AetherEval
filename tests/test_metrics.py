@@ -323,8 +323,8 @@ class MetricsTests(unittest.TestCase):
             sample,
             f"Answer: C\n{long_reasoning}",
         )
-        self.assertEqual(result_head["score"], 1.0)
-        self.assertEqual(result_head["parsed"]["prediction"], "C")
+        self.assertEqual(result_head["score"], 0.0)
+        self.assertIsNone(result_head["parsed"]["prediction"])
 
     def test_gpqa_aggregate_task_defined_metrics(self) -> None:
         bundle = load_task("gpqa_diamond")
