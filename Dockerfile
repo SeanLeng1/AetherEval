@@ -10,6 +10,7 @@ ENV NODE_OPTIONS=""
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV HF_HUB_ENABLE_HF_TRANSFER="1"
 ENV PIP_CONSTRAINT=""
+ENV CPATH=""
 
 ARG PIP_INDEX=https://pypi.org/simple
 
@@ -89,5 +90,5 @@ ENV GDRCOPY_INCLUDE=/workspace/gdrcopy/include
 
 
 # Reset pip config
-RUN pip config unset global.index-url && \
-    pip config unset global.extra-index-url
+RUN pip config unset global.index-url || true && \
+    pip config unset global.extra-index-url || true
