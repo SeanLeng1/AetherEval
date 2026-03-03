@@ -292,6 +292,40 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result4["score"], 0.0)
         self.assertIsNone(result4["parsed"]["prediction"])
 
+    def test_gpqa_score_generation_parsing_long_output_window(self) -> None:
+        bundle = load_task("gpqa_diamond")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="g2",
+            gold="C",
+            meta={"domain": "Physics"},
+            data={
+                "question": "Dummy question",
+                "choices": {
+                    "A": "alpha option",
+                    "B": "beta option",
+                    "C": "gamma option",
+                    "D": "delta option",
+                },
+            },
+        )
+
+        long_reasoning = "because " * 20000
+        result_tail = metrics_module.score_generation(
+            sample,
+            f"{long_reasoning}\nFinal answer: (C).",
+        )
+        self.assertEqual(result_tail["score"], 1.0)
+        self.assertEqual(result_tail["parsed"]["prediction"], "C")
+
+        result_head = metrics_module.score_generation(
+            sample,
+            f"Answer: C\n{long_reasoning}",
+        )
+        self.assertEqual(result_head["score"], 1.0)
+        self.assertEqual(result_head["parsed"]["prediction"], "C")
+
     def test_gpqa_aggregate_task_defined_metrics(self) -> None:
         bundle = load_task("gpqa_diamond")
         metrics_module = bundle.metrics_module

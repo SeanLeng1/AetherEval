@@ -208,6 +208,24 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
+_MCQ_PARSE_WINDOW_CHARS = 20_000
+_MCQ_PARSE_HEAD_CHARS = 2_000
+
+
+def _prepare_mcq_parse_text(text: str) -> str:
+    if len(text) <= _MCQ_PARSE_WINDOW_CHARS:
+        return text
+
+    head_chars = min(_MCQ_PARSE_HEAD_CHARS, _MCQ_PARSE_WINDOW_CHARS)
+    tail_chars = _MCQ_PARSE_WINDOW_CHARS - head_chars
+    if tail_chars <= 0:
+        return text[-_MCQ_PARSE_WINDOW_CHARS:]
+
+    head = text[:head_chars]
+    tail = text[-tail_chars:]
+    return f"{head}\n...\n{tail}"
+
+
 def _normalize_choice(value: str, valid_set: set[str]) -> str | None:
     text = value.strip().upper()
     text = text.replace("(", "").replace(")", "")
@@ -267,18 +285,20 @@ def extract_choice(
     del choices
     valid_set = set(valid_letters)
     patterns = _choice_patterns("".join(valid_letters))
+    parse_text = _prepare_mcq_parse_text(text)
 
-    candidates: list[tuple[int, int, str, str]] = []
+    best: tuple[int, int, str, str] | None = None
     for priority, (method, pattern) in enumerate(patterns):
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(parse_text):
             choice = _normalize_choice(match.group("choice"), valid_set)
             if choice is None:
                 continue
-            candidates.append((priority, -match.end(), choice, method))
+            candidate = (priority, -match.end(), choice, method)
+            if best is None or candidate < best:
+                best = candidate
 
-    if candidates:
-        candidates.sort()
-        _, _, choice, method = candidates[0]
+    if best is not None:
+        _, _, choice, method = best
         return choice, method
 
     return None, "none"

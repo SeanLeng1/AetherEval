@@ -227,6 +227,40 @@ def _call_task_aggregate(
     return result
 
 
+def _score_generation_safe(
+    *,
+    metrics_module: Any,
+    sample: Sample,
+    generation: str,
+) -> tuple[float, bool, Any, dict[str, Any], str | None]:
+    try:
+        scored = metrics_module.score_generation(sample, generation)
+        if not isinstance(scored, dict):
+            raise TypeError("score_generation must return a dict.")
+    except Exception as exc:  # noqa: BLE001
+        return 0.0, False, None, {}, f"score_generation error: {type(exc).__name__}: {exc}"
+
+    if "score" not in scored:
+        return (
+            0.0,
+            False,
+            None,
+            {},
+            "score_generation error: ValueError: score_generation must return key 'score'.",
+        )
+
+    try:
+        score = float(scored["score"])
+    except Exception as exc:  # noqa: BLE001
+        return 0.0, False, None, {}, f"score_generation error: {type(exc).__name__}: {exc}"
+
+    parsed = scored.get("parsed")
+    task_meta = scored.get("meta", {})
+    meta = task_meta if isinstance(task_meta, dict) else {"value": task_meta}
+    is_pass = bool(scored.get("is_pass", False))
+    return score, is_pass, parsed, meta, None
+
+
 def _aggregate_run_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[str, Any]:
     grouped: dict[str, list[float]] = defaultdict(list)
     for summary in task_summaries.values():
@@ -309,6 +343,7 @@ def _run_single_task(
     _info(f"[{task_name}] loading task from {task_dir}")
     samples_raw = task_module.load_samples(task_dir)
     samples = [_to_sample(item) for item in samples_raw]
+    samples_by_id = {sample.id: sample for sample in samples}
     sample_id_set = set()
     for sample in samples:
         if sample.id in sample_id_set:
@@ -344,6 +379,47 @@ def _run_single_task(
             dedup[(record.sample_id, record.gen_idx)] = record
         existing_records = list(dedup.values())
 
+    if existing_records:
+        _info(f"[{task_name}] resume: rescoring existing records ({len(existing_records)})")
+        rescore_bar = _make_progress_bar(len(existing_records), f"[{task_name}] rescoring")
+        rescored_existing: list[GenerationRecord] = []
+        try:
+            for record in existing_records:
+                sample = samples_by_id[record.sample_id]
+                score, is_pass, parsed, meta, error = _score_generation_safe(
+                    metrics_module=metrics_module,
+                    sample=sample,
+                    generation=record.generation,
+                )
+                rescored_existing.append(
+                    GenerationRecord(
+                        sample_id=record.sample_id,
+                        gen_idx=record.gen_idx,
+                        prompt=record.prompt,
+                        generation=record.generation,
+                        score=score,
+                        is_pass=is_pass,
+                        parsed=parsed,
+                        gold=sample.gold,
+                        error=error,
+                        meta=meta,
+                    )
+                )
+                if rescore_bar is not None:
+                    rescore_bar.update(1)
+        finally:
+            if rescore_bar is not None:
+                rescore_bar.close()
+
+        existing_records = rescored_existing
+        _info(f"[{task_name}] resume rescoring finished")
+        if predictions_path.exists():
+            predictions_path.unlink()
+        append_jsonl(predictions_path, (_record_to_json(record) for record in existing_records))
+    elif predictions_path.exists():
+        # If resume file has no reusable rows under current settings, rebuild it from pending outputs only.
+        predictions_path.unlink()
+
     existing_lookup: dict[str, set[int]] = defaultdict(set)
     for record in existing_records:
         existing_lookup[record.sample_id].add(record.gen_idx)
@@ -370,7 +446,6 @@ def _run_single_task(
         f"pending_records={pending_record_count}"
     )
 
-    samples_by_id = {sample.id: sample for sample in samples}
     new_records: list[GenerationRecord] = []
 
     if pending_inputs:
@@ -386,24 +461,6 @@ def _run_single_task(
                 if len(generations) < len(missing):
                     generations.extend([""] * (len(missing) - len(generations)))
 
-                scored_by_local_idx: dict[int, dict[str, Any]] = {}
-                score_error_by_local_idx: dict[int, str] = {}
-
-                if output.error is None:
-                    for local_idx in range(len(missing)):
-                        try:
-                            scored = metrics_module.score_generation(
-                                sample,
-                                generations[local_idx],
-                            )
-                            if not isinstance(scored, dict):
-                                raise TypeError("score_generation must return a dict.")
-                            scored_by_local_idx[local_idx] = scored
-                        except Exception as exc:  # noqa: BLE001
-                            score_error_by_local_idx[local_idx] = (
-                                f"score_generation error: {type(exc).__name__}: {exc}"
-                            )
-
                 rows_to_write: list[dict[str, Any]] = []
                 for local_idx, gen_idx in enumerate(missing):
                     generation_text = generations[local_idx]
@@ -414,25 +471,11 @@ def _run_single_task(
                     is_pass = False
 
                     if error is None:
-                        if local_idx in score_error_by_local_idx:
-                            error = score_error_by_local_idx[local_idx]
-                        else:
-                            scored = scored_by_local_idx.get(local_idx, {})
-                            if "score" not in scored:
-                                error = "score_generation error: ValueError: score_generation must return key 'score'."
-                            else:
-                                try:
-                                    score = float(scored["score"])
-                                except Exception as exc:  # noqa: BLE001
-                                    error = f"score_generation error: {type(exc).__name__}: {exc}"
-                                parsed = scored.get("parsed")
-                                task_meta = scored.get("meta", {})
-                                meta = (
-                                    task_meta
-                                    if isinstance(task_meta, dict)
-                                    else {"value": task_meta}
-                                )
-                                is_pass = bool(scored.get("is_pass", False))
+                        score, is_pass, parsed, meta, error = _score_generation_safe(
+                            metrics_module=metrics_module,
+                            sample=sample,
+                            generation=generation_text,
+                        )
 
                     record = GenerationRecord(
                         sample_id=sample.id,

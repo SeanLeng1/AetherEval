@@ -196,6 +196,50 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary2["new_records"], 0)
             self.assertEqual(summary2["existing_records"], 2)
 
+    def test_resume_rescores_existing_predictions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="run_rescore",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+            )
+
+            (root / "toy" / "metrics.py").write_text(
+                "from __future__ import annotations\n"
+                "def score_generation(sample, generation):\n"
+                "    return {'score': 0.0}\n"
+                "def aggregate(sample_results, metric_options=None):\n"
+                "    first_scores = [float(item['scores'][0]) if item.get('scores') else 0.0 for item in sample_results]\n"
+                "    return {'accuracy_first': sum(first_scores)/len(first_scores) if first_scores else 0.0}\n",
+                encoding="utf-8",
+            )
+
+            resumed = run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="run_rescore",
+                backend=NeverCalledBackend(),
+                benchmarks_dir=root,
+            )
+            summary = resumed["results"]["toy"]
+            self.assertEqual(summary["existing_records"], 2)
+            self.assertEqual(summary["new_records"], 0)
+            self.assertAlmostEqual(summary["metrics"]["accuracy_first"], 0.0, places=6)
+
+            predictions_path = out / "run_rescore" / "toy" / "predictions.jsonl"
+            with predictions_path.open("r", encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(float(row["score"]) == 0.0 for row in rows))
+
     def test_generation_overrides_take_precedence_over_task_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"
