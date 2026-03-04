@@ -7,6 +7,7 @@ from aethereval.metrics.common import aggregate_mcq_results
 
 
 PRIMARY_METRIC = "accuracy"
+_AGIEVAL_PARSE_TAIL_CHARS = 1_000
 
 # Generation-only answer parsing: this task does not use MCQ loglikelihood scoring.
 _OLMO_3_REGEXES = [
@@ -32,6 +33,12 @@ def _normalize_prediction(raw: str, valid_letters: set[str]) -> str | None:
     return head if head in valid_letters else None
 
 
+def _prepare_agieval_parse_text(text: str) -> str:
+    if len(text) <= _AGIEVAL_PARSE_TAIL_CHARS:
+        return text
+    return text[-_AGIEVAL_PARSE_TAIL_CHARS:]
+
+
 def _extract_olmo3_style_answer(generation: str, letters: list[str]) -> tuple[str | None, str, float]:
     if not letters:
         return None, "none", 0.0
@@ -39,13 +46,14 @@ def _extract_olmo3_style_answer(generation: str, letters: list[str]) -> tuple[st
     class_part = "".join(re.escape(letter) for letter in letters)
     answer_format_regex = rf"Therefore, the answer is \(([{class_part}])\)"
     answer_regex = rf"\(?([{class_part}])\)?"
+    parse_text = _prepare_agieval_parse_text(generation)
 
     answer_string = ""
     method = "none"
     answer_format_correct = 0.0
 
     # Match the exact target format first.
-    exact_matches = re.findall(answer_format_regex, generation)
+    exact_matches = re.findall(answer_format_regex, parse_text)
     if exact_matches:
         answer_string = exact_matches[-1]
         answer_format_correct = 1.0
@@ -55,7 +63,7 @@ def _extract_olmo3_style_answer(generation: str, letters: list[str]) -> tuple[st
     if answer_string == "":
         for idx, template in enumerate(_OLMO_3_REGEXES):
             regex = template.replace("$ANS$", answer_regex)
-            matches = list(re.finditer(regex, generation))
+            matches = list(re.finditer(regex, parse_text))
             if not matches:
                 continue
             match = matches[-1]
@@ -71,7 +79,7 @@ def _extract_olmo3_style_answer(generation: str, letters: list[str]) -> tuple[st
 
     # Final raw fallback on answer regex.
     if answer_string == "":
-        raw_matches = re.findall(answer_regex, generation)
+        raw_matches = re.findall(answer_regex, parse_text)
         if raw_matches:
             answer_string = raw_matches[-1]
             answer_format_correct = 0.2

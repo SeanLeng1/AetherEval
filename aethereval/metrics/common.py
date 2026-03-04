@@ -208,7 +208,7 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
-_MCQ_PARSE_TAIL_CHARS = 2_000
+_MCQ_PARSE_TAIL_CHARS = 1_000
 
 
 def _prepare_mcq_parse_text(text: str) -> str:

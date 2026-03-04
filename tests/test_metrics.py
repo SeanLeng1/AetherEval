@@ -568,6 +568,40 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["accuracy_sat_en"], 1.0, places=6)
         self.assertAlmostEqual(result["accuracy_logiqa_en"], 0.0, places=6)
 
+    def test_agieval_score_generation_parsing_long_output_window(self) -> None:
+        bundle = load_task("agieval_en")
+        metrics_module = bundle.metrics_module
+
+        sample = Sample(
+            id="a2",
+            gold="D",
+            meta={"subset": "sat-en"},
+            data={
+                "question": "Dummy",
+                "choices": {
+                    "A": "opt a",
+                    "B": "opt b",
+                    "C": "opt c",
+                    "D": "opt d",
+                },
+            },
+        )
+
+        long_reasoning = "because " * 20000
+        result_tail = metrics_module.score_generation(
+            sample,
+            f"{long_reasoning}\nTherefore, the answer is (D).",
+        )
+        self.assertEqual(result_tail["score"], 1.0)
+        self.assertEqual(result_tail["parsed"]["prediction"], "D")
+
+        result_head = metrics_module.score_generation(
+            sample,
+            f"Therefore, the answer is (D).\n{long_reasoning}",
+        )
+        self.assertEqual(result_head["score"], 0.0)
+        self.assertIsNone(result_head["parsed"]["prediction"])
+
     def test_bbh_metrics(self) -> None:
         bundle = load_task("bbh")
         metrics_module = bundle.metrics_module
