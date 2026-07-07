@@ -57,8 +57,10 @@ RUN ABI_FLAG=$(python -c "import torch; print('TRUE' if torch._C._GLIBCXX_USE_CX
     wget -nv -P /opt/tiger "${URL}" && \
     pip install --no-cache-dir "/opt/tiger/$(basename ${URL})"
 
-# Install AetherEval (always latest main)
-RUN git clone --branch main --single-branch https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
+ARG AETHEREVAL_BRANCH=experimental
+
+# Install AetherEval
+RUN git clone --branch ${AETHEREVAL_BRANCH} --single-branch https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
     cd /opt/AetherEval && \
     git lfs install && git lfs pull && \
     pip install --no-cache-dir -e /opt/AetherEval

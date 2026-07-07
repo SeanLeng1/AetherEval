@@ -13,7 +13,7 @@ def _info(message: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AetherEval: lightweight generative-only vLLM eval framework."
+        description="AetherEval: lightweight generative-only LLM eval framework."
     )
     parser.add_argument("--list-tasks", action="store_true", help="List discovered tasks and exit.")
     parser.add_argument(
@@ -23,7 +23,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=str, default=None, help="YAML config file path.")
     parser.add_argument("--tasks", type=str, default=None, help="Task names: all or comma-separated.")
-    parser.add_argument("--model", type=str, default=None, help="Model name/path for vLLM.")
+    parser.add_argument("--model", type=str, default=None, help="Model name/path.")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=("vllm", "sglang"),
+        default=None,
+        help="Inference backend.",
+    )
     parser.add_argument(
         "--inspect",
         action=argparse.BooleanOptionalAction,
@@ -75,12 +82,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--gpu-memory-utilization", type=float, default=None, help="vLLM model kwarg.")
     parser.add_argument("--max-model-len", type=int, default=None, help="vLLM model kwarg.")
-    parser.add_argument("--dtype", type=str, default=None, help="vLLM model kwarg.")
+    parser.add_argument("--mem-fraction-static", type=float, default=None, help="SGLang Engine kwarg.")
+    parser.add_argument("--context-length", type=int, default=None, help="SGLang Engine kwarg.")
+    parser.add_argument(
+        "--sglang-generation-batch-size",
+        type=int,
+        default=None,
+        help="AetherEval SGLang generation batch size for progress updates.",
+    )
+    parser.add_argument("--dtype", type=str, default=None, help="Backend model kwarg.")
     parser.add_argument(
         "--vllm-arg",
         action="append",
         default=None,
         help="Extra vLLM model kwargs (repeatable), format: key=value",
+    )
+    parser.add_argument(
+        "--sglang-arg",
+        action="append",
+        default=None,
+        help="Extra SGLang Engine kwargs (repeatable), format: key=value",
     )
 
     parser.add_argument(
@@ -113,7 +134,7 @@ def main() -> None:
 
     _info(f"config={args.config if args.config else '(none)'}")
     _info(
-        f"model={resolved['model']} tasks={resolved['tasks']} "
+        f"model={resolved['model']} backend={resolved['backend']} tasks={resolved['tasks']} "
         f"dp_size={resolved['dp_size']} tp_size={resolved['tp_size']} "
         f"overwrite={resolved['overwrite']}"
     )
@@ -126,14 +147,14 @@ def main() -> None:
     }
     if explicit_gen_overrides:
         _info(f"generation_overrides={explicit_gen_overrides}")
-    if resolved["model_kwargs"]:
-        _info(f"vllm_model_kwargs={resolved['model_kwargs']}")
+    if resolved["backend_kwargs"]:
+        _info(f"backend_model_kwargs={resolved['backend_kwargs']}")
 
     if resolved["inspect"]:
         inspected = inspect_prompts(
             model=resolved["model"],
             tasks=resolved["tasks"],
-            model_kwargs=resolved["model_kwargs"],
+            model_kwargs=resolved["backend_kwargs"],
         )
         for task_name in inspected["tasks"]:
             print(f"=== {task_name} ===")
@@ -160,7 +181,8 @@ def main() -> None:
         bootstrap_confidence=resolved["bootstrap_confidence"],
         overwrite=resolved["overwrite"],
         run_id=resolved["run_id"],
-        model_kwargs=resolved["model_kwargs"],
+        backend_name=resolved["backend"],
+        backend_kwargs=resolved["backend_kwargs"],
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

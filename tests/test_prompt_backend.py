@@ -2,7 +2,7 @@
 import unittest
 import warnings
 
-import aethereval.core.vllm_backend as vllm_backend
+import aethereval.backends.prompt as prompt_backend
 
 
 class _TokenizerWithTemplate:
@@ -24,13 +24,13 @@ class _TokenizerBrokenTemplate:
         raise ValueError("no chat template configured")
 
 
-class VLLMBackendPromptTests(unittest.TestCase):
+class BackendPromptTests(unittest.TestCase):
     def setUp(self) -> None:
-        vllm_backend._CHAT_TEMPLATE_FALLBACK_WARNED = False
+        prompt_backend._CHAT_TEMPLATE_FALLBACK_WARNED = False
 
     def test_string_prompt_is_wrapped_to_chat_and_uses_template(self) -> None:
         tokenizer = _TokenizerWithTemplate()
-        out = vllm_backend._prompt_to_text("hello", tokenizer)
+        out = prompt_backend._prompt_to_text("hello", tokenizer)
         self.assertEqual(out, "templated_prompt")
         self.assertEqual(tokenizer.calls, 1)
         self.assertEqual(
@@ -41,7 +41,7 @@ class VLLMBackendPromptTests(unittest.TestCase):
     def test_missing_chat_template_falls_back_with_warning(self) -> None:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            out = vllm_backend._prompt_to_text(
+            out = prompt_backend._prompt_to_text(
                 [{"role": "user", "content": "hello"}],
                 tokenizer=object(),
             )
@@ -52,7 +52,7 @@ class VLLMBackendPromptTests(unittest.TestCase):
     def test_broken_chat_template_falls_back_with_warning(self) -> None:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            out = vllm_backend._prompt_to_text(
+            out = prompt_backend._prompt_to_text(
                 [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
                 tokenizer=_TokenizerBrokenTemplate(),
             )
@@ -63,8 +63,8 @@ class VLLMBackendPromptTests(unittest.TestCase):
     def test_fallback_warning_only_emitted_once(self) -> None:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            first = vllm_backend._prompt_to_text([{"role": "user", "content": "a"}], tokenizer=object())
-            second = vllm_backend._prompt_to_text([{"role": "user", "content": "b"}], tokenizer=object())
+            first = prompt_backend._prompt_to_text([{"role": "user", "content": "a"}], tokenizer=object())
+            second = prompt_backend._prompt_to_text([{"role": "user", "content": "b"}], tokenizer=object())
         self.assertEqual(first, "user: a")
         self.assertEqual(second, "user: b")
         self.assertEqual(len(caught), 1)

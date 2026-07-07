@@ -57,7 +57,6 @@ def _write_toy_benchmark(root: Path) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     (task_dir / "task.py").write_text(
-        "from __future__ import annotations\n"
         "import json\n"
         "from pathlib import Path\n"
         "from aethereval.core.types import Sample\n"
@@ -82,7 +81,6 @@ def _write_toy_benchmark(root: Path) -> None:
     )
 
     (task_dir / "metrics.py").write_text(
-        "from __future__ import annotations\n"
         "def score_generation(sample, generation):\n"
         "    pred = generation.strip().lower()\n"
         "    gold = str(sample.gold).strip().lower()\n"
@@ -108,7 +106,6 @@ def _write_toy2_benchmark(root: Path) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     (task_dir / "task.py").write_text(
-        "from __future__ import annotations\n"
         "import json\n"
         "from pathlib import Path\n"
         "from aethereval.core.types import Sample\n"
@@ -133,7 +130,6 @@ def _write_toy2_benchmark(root: Path) -> None:
     )
 
     (task_dir / "metrics.py").write_text(
-        "from __future__ import annotations\n"
         "def score_generation(sample, generation):\n"
         "    pred = generation.strip().lower()\n"
         "    gold = str(sample.gold).strip().lower()\n"
@@ -212,7 +208,6 @@ class RunnerTests(unittest.TestCase):
             )
 
             (root / "toy" / "metrics.py").write_text(
-                "from __future__ import annotations\n"
                 "def score_generation(sample, generation):\n"
                 "    return {'score': 0.0}\n"
                 "def aggregate(sample_results, metric_options=None):\n"

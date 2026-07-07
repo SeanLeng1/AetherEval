@@ -5,11 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aethereval"
 version = "0.1.0"
-description = "Minimal generative-only LLM evaluation framework with offline vLLM backend."
+description = "Minimal generative-only LLM evaluation framework with offline vLLM and SGLang backends."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "vllm",
   "ray",
   "tqdm",
   "PyYAML",
@@ -21,6 +20,11 @@ dependencies = [
   "absl-py",
   "math-verify",
 ]
+
+[project.optional-dependencies]
+vllm = ["vllm"]
+sglang = ["sglang"]
+all-backends = ["vllm", "sglang"]
 
 [project.scripts]
 aethereval = "aethereval.cli:main"

@@ -3,6 +3,8 @@ import ast
 from pathlib import Path
 from typing import Any
 
+SUPPORTED_BACKENDS = {"vllm", "sglang"}
+
 
 def _cfg_get(cfg: dict[str, Any], key: str, section: str | None = None) -> Any:
     if section:
@@ -32,22 +34,30 @@ def _parse_scalar(value: str) -> Any:
         return text
 
 
-def _parse_vllm_args(values: Any) -> dict[str, Any]:
+def _parse_key_value_args(values: Any, flag_name: str) -> dict[str, Any]:
     if not values:
         return {}
     if not isinstance(values, (list, tuple)):
-        raise ValueError("--vllm-arg must be used as repeated key=value entries")
+        raise ValueError(f"{flag_name} must be used as repeated key=value entries")
 
     parsed: dict[str, Any] = {}
     for raw in values:
         if "=" not in raw:
-            raise ValueError(f"Invalid --vllm-arg '{raw}', expected key=value")
+            raise ValueError(f"Invalid {flag_name} '{raw}', expected key=value")
         key, value = raw.split("=", 1)
         key = key.strip()
         if not key:
-            raise ValueError(f"Invalid --vllm-arg '{raw}', empty key")
+            raise ValueError(f"Invalid {flag_name} '{raw}', empty key")
         parsed[key] = _parse_scalar(value)
     return parsed
+
+
+def _parse_vllm_args(values: Any) -> dict[str, Any]:
+    return _parse_key_value_args(values, "--vllm-arg")
+
+
+def _parse_sglang_args(values: Any) -> dict[str, Any]:
+    return _parse_key_value_args(values, "--sglang-arg")
 
 
 def load_yaml_config(path: str | None) -> dict[str, Any]:
@@ -76,6 +86,18 @@ def load_yaml_config(path: str | None) -> dict[str, Any]:
 
 def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     model = _pick(args.model, _cfg_get(cfg, "model", "run"))
+    backend = str(
+        _pick(
+            getattr(args, "backend", None),
+            _cfg_get(cfg, "backend", "runtime"),
+            "vllm",
+        )
+    ).lower()
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"Unsupported backend '{backend}'. Supported backends: "
+            f"{', '.join(sorted(SUPPORTED_BACKENDS))}"
+        )
 
     tasks_raw = _pick(args.tasks, _cfg_get(cfg, "tasks", "run"), "all")
     if isinstance(tasks_raw, (list, tuple)):
@@ -86,7 +108,9 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     output_dir = _pick(args.output_dir, _cfg_get(cfg, "output_dir", "run"), "outputs")
     run_id = _pick(args.run_id, _cfg_get(cfg, "run_id", "run"))
     overwrite = bool(_pick(args.overwrite, _cfg_get(cfg, "overwrite", "run"), False))
-    inspect = bool(_pick(getattr(args, "inspect", None), _cfg_get(cfg, "inspect", "run"), False))
+    inspect = bool(
+        _pick(getattr(args, "inspect", None), _cfg_get(cfg, "inspect", "run"), False)
+    )
 
     arg_dp_size = getattr(args, "dp_size", None)
     arg_tp_size = getattr(args, "tp_size", None)
@@ -129,7 +153,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         )
     )
 
-    model_kwargs = {
+    vllm_kwargs = {
         "gpu_memory_utilization": _pick(
             args.gpu_memory_utilization,
             _cfg_get(cfg, "gpu_memory_utilization", "vllm"),
@@ -144,14 +168,42 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     if cfg_extra_model_kwargs is not None and not isinstance(cfg_extra_model_kwargs, dict):
         raise ValueError("vllm.extra_model_kwargs must be a mapping/object")
     if isinstance(cfg_extra_model_kwargs, dict):
-        model_kwargs.update(cfg_extra_model_kwargs)
+        vllm_kwargs.update(cfg_extra_model_kwargs)
 
     cli_extra = _parse_vllm_args(getattr(args, "vllm_arg", None))
-    model_kwargs.update(cli_extra)
-    model_kwargs = {k: v for k, v in model_kwargs.items() if v is not None}
+    vllm_kwargs.update(cli_extra)
+    vllm_kwargs = {k: v for k, v in vllm_kwargs.items() if v is not None}
+
+    sglang_kwargs = {
+        "mem_fraction_static": _pick(
+            getattr(args, "mem_fraction_static", None),
+            _cfg_get(cfg, "mem_fraction_static", "sglang"),
+        ),
+        "context_length": _pick(
+            getattr(args, "context_length", None),
+            _cfg_get(cfg, "context_length", "sglang"),
+        ),
+        "generation_batch_size": _pick(
+            getattr(args, "sglang_generation_batch_size", None),
+            _cfg_get(cfg, "generation_batch_size", "sglang"),
+        ),
+        "dtype": _pick(args.dtype, _cfg_get(cfg, "dtype", "sglang")),
+    }
+    cfg_sglang_extra = _cfg_get(cfg, "extra_model_kwargs", "sglang")
+    if cfg_sglang_extra is not None and not isinstance(cfg_sglang_extra, dict):
+        raise ValueError("sglang.extra_model_kwargs must be a mapping/object")
+    if isinstance(cfg_sglang_extra, dict):
+        sglang_kwargs.update(cfg_sglang_extra)
+
+    sglang_cli_extra = _parse_sglang_args(getattr(args, "sglang_arg", None))
+    sglang_kwargs.update(sglang_cli_extra)
+    sglang_kwargs = {k: v for k, v in sglang_kwargs.items() if v is not None}
+
+    backend_kwargs = vllm_kwargs if backend == "vllm" else sglang_kwargs
 
     return {
         "model": model,
+        "backend": backend,
         "tasks": tasks,
         "inspect": inspect,
         "output_dir": output_dir,
@@ -163,5 +215,8 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "bootstrap_resamples": bootstrap_resamples,
         "bootstrap_seed": bootstrap_seed,
         "bootstrap_confidence": bootstrap_confidence,
-        "model_kwargs": model_kwargs,
+        "backend_kwargs": backend_kwargs,
+        "model_kwargs": backend_kwargs,
+        "vllm_kwargs": vllm_kwargs,
+        "sglang_kwargs": sglang_kwargs,
     }

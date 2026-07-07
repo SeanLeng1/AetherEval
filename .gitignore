@@ -19,3 +19,4 @@ outputs/
 wandb/
 tensorboard/
 logs/
+notes.txt

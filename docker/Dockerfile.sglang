@@ -1,0 +1,117 @@
+FROM lmsysorg/sglang:v0.5.13.post1-cu129
+
+ARG CUDA_VERSION=12.9
+
+RUN apt update
+
+# Install systemctl
+RUN apt-get update && \
+    apt-get install -y -o Dpkg::Options::="--force-confdef" systemd && \
+    apt-get clean
+
+# Install libxml2
+RUN apt-get update && \
+    apt-get install -y libxml2 aria2 git-lfs && \
+    apt-get clean
+
+# Uninstall nv-pytorch fork
+RUN pip uninstall -y torch torchvision torchaudio \
+    pytorch-quantization pytorch-triton torch-tensorrt \
+    transformer_engine flash_attn apex \
+    xgboost opencv grpcio
+
+RUN apt install -y nvtop rsync dnsutils
+
+# =========================
+# Install cuDNN (network repo)
+# =========================
+RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi) && \
+    CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH}/cuda-keyring_1.1-1_all.deb && \
+    sed -i '/developer\.download\.nvidia\.com\/compute\/cuda\/repos/d' /etc/apt/sources.list.d/* && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    apt-get update && \
+    apt-get -y --allow-downgrades --allow-change-held-packages install \
+    cudnn9-cuda-${CUDA_VERSION_MAJOR} \
+    libcudnn9-cuda-${CUDA_VERSION_MAJOR} \
+    libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR} \
+    libcudnn9-headers-cuda-${CUDA_VERSION_MAJOR} && \
+    rm -f cuda-keyring_1.1-1_all.deb && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG PIP_NO_CACHE_DIR=1
+
+
+RUN pip install pybind11 nvidia-mathdx packaging
+
+RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
+
+RUN pip install --no-build-isolation transformer_engine[pytorch] --no-cache-dir
+
+RUN pip install --no-cache-dir pytest-asyncio codetiming tensordict mathruler qwen_vl_utils accelerate datasets peft hf-transfer \
+    ray[default] hydra-core pylatexenc wandb dill liger-kernel==0.7.0 blobfile xgrammar \
+    pytest py-spy pre-commit ruff more_itertools tensorboard gcsfs math-verify cachetools mooncake-transfer-engine cupy-cuda12x
+
+RUN pip install -v --no-build-isolation flash_attn==2.7.4.post1
+
+# FA-3
+# RUN git clone https://github.com/Dao-AILab/flash-attention.git
+# RUN cd flash-attention/hopper && python setup.py install
+
+RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
+    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
+    apt-get update && apt-get install -y libxcb-cursor0 && \
+    apt-get install -y ./nsight-systems-${NSIGHT_VERSION}.deb && \
+    rm -rf /usr/local/cuda/bin/nsys && \
+    ln -s /opt/nvidia/nsight-systems/2025.6.1/nsys  /usr/local/cuda/bin/nsys && \
+    rm -rf /usr/local/cuda/bin/nsys-ui && \
+    ln -s /opt/nvidia/nsight-systems/2025.6.1/nsys-ui /usr/local/cuda/bin/nsys-ui && \
+    rm nsight-systems-${NSIGHT_VERSION}.deb
+
+# sglang image has already installed DeepEP
+RUN pip install --no-cache-dir --no-deps trl==0.27.0 nvtx matplotlib rich liger_kernel
+
+RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu129
+
+RUN pip install qwen-vl-utils==0.0.14
+
+# RUN pip uninstall "flash-attn-4" && pip install "flash-attn-4[cu12]"
+
+RUN pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git
+
+# Pin to the commit verl's CI uses; PyPI releases (<=0.4.1) lack LinearForLastLayer / freeze_moe_router / make_value_model.
+RUN pip install --no-deps --no-build-isolation --no-cache-dir \
+    git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4
+
+# Pin to the commit verl's CI uses; core_v0.17.0 lacks helpers the new Megatron-Bridge needs (e.g. get_hybrid_total_layer_count).
+RUN pip install --no-deps --no-build-isolation --no-cache-dir \
+    git+https://github.com/NVIDIA/Megatron-LM.git@b2a8ec7
+
+ARG AETHEREVAL_BRANCH=experimental
+
+# Install AetherEval
+RUN git clone --branch ${AETHEREVAL_BRANCH} --single-branch https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
+    cd /opt/AetherEval && \
+    git lfs install && git lfs pull && \
+    pip install --no-cache-dir -e /opt/AetherEval
+
+# BFCL-v3 (GDPO Table 1) for benchmarks/bfcl. v3 data ships in bfcl-eval==2025.6.8 (later
+# releases moved to v4); --no-deps keeps the sglang/torch stack intact and
+# benchmarks/bfcl/_compat.py stubs bfcl's unused optional API SDKs. The light runtime deps
+# bfcl actually needs (CLI + scoring) are installed explicitly.
+RUN pip install --no-cache-dir --no-deps "bfcl-eval==2025.6.8" && \
+    pip install --no-cache-dir typer tabulate python-dotenv overrides
+
+
+RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
+    CUDNN_PKG=libcudnn9-cuda-${CUDA_VERSION_MAJOR} && \
+    CUDNN_VERSION=$(dpkg-query -W -f='${Version}' "${CUDNN_PKG}" 2>/dev/null | sed 's/-[0-9]*$//') && \
+    if [ -z "${CUDNN_VERSION}" ]; then \
+        CUDNN_HDR=$(find /usr/include -name cudnn_version.h | head -1) && \
+        CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
+    fi && \
+    pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
+
+# Fix numpy version for cupy
+RUN pip install numpy==2.2.0
+RUN pip install uvicorn==0.40.0 starlette==0.50.0

@@ -13,8 +13,9 @@ from .io import (
 )
 from .task_register import BENCHMARKS_DIR, discover_tasks, load_task
 from .types import GenerationInput, GenerationRecord, PromptType, Sample
-from .vllm_backend import (
-    VLLMBackend,
+from aethereval.backends import (
+    GenerationBackend,
+    create_backend,
     load_chat_tokenizer,
     render_prompt_with_chat_template,
 )
@@ -333,7 +334,7 @@ def _run_single_task(
     task_module: Any,
     metrics_module: Any,
     task_dir: Path,
-    backend: VLLMBackend,
+    backend: GenerationBackend,
     task_output_dir: Path,
     gen_overrides: dict[str, Any],
     metric_options: dict[str, Any],
@@ -449,7 +450,8 @@ def _run_single_task(
     new_records: list[GenerationRecord] = []
 
     if pending_inputs:
-        _info(f"[{task_name}] starting vLLM generation")
+        backend_label = getattr(backend, "name", "backend")
+        _info(f"[{task_name}] starting {backend_label} generation")
         generated_outputs = backend.generate(pending_inputs, gen_cfg)
         score_bar = _make_progress_bar(pending_record_count, f"[{task_name}] scoring")
 
@@ -566,10 +568,13 @@ def run_evaluation(
     bootstrap_confidence: float = 0.95,
     overwrite: bool = False,
     run_id: str | None = None,
+    backend_name: str = "vllm",
+    backend_kwargs: dict[str, Any] | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    backend: VLLMBackend | None = None,
+    backend: GenerationBackend | None = None,
     benchmarks_dir: Path | None = None,
 ) -> dict[str, Any]:
+    effective_model_kwargs = backend_kwargs if backend_kwargs is not None else model_kwargs
     task_root = benchmarks_dir or BENCHMARKS_DIR
     tasks_map = discover_tasks(task_root)
     available = sorted(tasks_map.keys())
@@ -584,29 +589,32 @@ def run_evaluation(
     _info(f"benchmark_root={task_root}")
     _info(f"discovered_tasks={len(available)} selected={selected}")
     _info(
-        f"model={model} dp_size={int(dp_size)} tp_size={int(tensor_parallel_size)} "
-        f"output_dir={out_dir} run_id={this_run_id}"
+        f"model={model} backend={backend_name} dp_size={int(dp_size)} "
+        f"tp_size={int(tensor_parallel_size)} output_dir={out_dir} run_id={this_run_id}"
     )
-    if model_kwargs:
-        _info(f"vllm_model_kwargs={model_kwargs}")
+    if effective_model_kwargs:
+        _info(f"backend_model_kwargs={effective_model_kwargs}")
     _info(f"run_output_dir={run_root}")
 
     created_backend = False
     if backend is None:
-        backend = VLLMBackend(
+        backend = create_backend(
+            backend_name=backend_name,
             model=model,
             dp_size=dp_size,
             tensor_parallel_size=tensor_parallel_size,
-            model_kwargs=model_kwargs,
+            model_kwargs=effective_model_kwargs,
         )
         created_backend = True
+    backend_label = getattr(backend, "name", backend_name)
 
     try:
         run_config_common = {
             "model": model,
+            "backend": backend_label,
             "dp_size": int(dp_size),
             "tp_size": int(tensor_parallel_size),
-            "model_kwargs": model_kwargs or {},
+            "model_kwargs": effective_model_kwargs or {},
         }
         metric_options = {
             "bootstrap_resamples": int(bootstrap_resamples),
@@ -659,6 +667,7 @@ def run_evaluation(
             "selected_tasks": selected,
             "tasks": sorted(all_task_summaries.keys()),
             "model": model,
+            "backend": backend_label,
             "results": all_task_summaries,
             "primary_scores": all_primary_scores,
             "primary_score_aggregate": _aggregate_primary_scores(all_task_summaries),

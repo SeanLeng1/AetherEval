@@ -30,6 +30,7 @@ class ConfigTests(unittest.TestCase):
             cfg = load_yaml_config(str(cfg_path))
             args = argparse.Namespace(
                 model=None,
+                backend=None,
                 tasks=None,
                 inspect=None,
                 output_dir=None,
@@ -49,11 +50,16 @@ class ConfigTests(unittest.TestCase):
                 bootstrap_confidence=None,
                 gpu_memory_utilization=None,
                 max_model_len=None,
+                mem_fraction_static=None,
+                context_length=None,
+                sglang_generation_batch_size=None,
                 dtype=None,
                 vllm_arg=None,
+                sglang_arg=None,
             )
             resolved = resolve_run_arguments(args, cfg)
             self.assertEqual(resolved["model"], "test/model")
+            self.assertEqual(resolved["backend"], "vllm")
             self.assertEqual(resolved["tasks"], "ifeval")
             self.assertFalse(resolved["inspect"])
             self.assertEqual(resolved["dp_size"], 2)
@@ -61,6 +67,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolved["gen_overrides"]["max_new_tokens"], 123)
             self.assertEqual(resolved["bootstrap_resamples"], 250)
             self.assertEqual(resolved["model_kwargs"]["max_model_len"], 4096)
+            self.assertEqual(resolved["backend_kwargs"]["max_model_len"], 4096)
 
     def test_cli_overrides_yaml(self) -> None:
         cfg = {
@@ -72,6 +79,7 @@ class ConfigTests(unittest.TestCase):
         }
         args = argparse.Namespace(
             model="cli/model",
+            backend=None,
             tasks="ifeval",
             inspect=True,
             output_dir=None,
@@ -91,8 +99,12 @@ class ConfigTests(unittest.TestCase):
             bootstrap_confidence=0.9,
             gpu_memory_utilization=None,
             max_model_len=None,
+            mem_fraction_static=None,
+            context_length=None,
+            sglang_generation_batch_size=None,
             dtype=None,
             vllm_arg=["trust_remote_code=true", "max_num_seqs=64"],
+            sglang_arg=None,
         )
         resolved = resolve_run_arguments(args, cfg)
         self.assertEqual(resolved["model"], "cli/model")
@@ -104,6 +116,56 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(resolved["bootstrap_confidence"], 0.9)
         self.assertEqual(resolved["model_kwargs"]["trust_remote_code"], True)
         self.assertEqual(resolved["model_kwargs"]["max_num_seqs"], 64)
+
+    def test_sglang_backend_config(self) -> None:
+        cfg = {
+            "run": {"model": "cfg/model", "tasks": ["ifeval"]},
+            "runtime": {"backend": "sglang", "dp_size": 1, "tp_size": 1},
+            "sglang": {
+                "mem_fraction_static": 0.75,
+                "context_length": 8192,
+                "generation_batch_size": 64,
+                "dtype": "bfloat16",
+                "extra_model_kwargs": {"trust_remote_code": True},
+            },
+        }
+        args = argparse.Namespace(
+            model=None,
+            backend=None,
+            tasks=None,
+            inspect=None,
+            output_dir=None,
+            run_id=None,
+            overwrite=None,
+            dp_size=None,
+            tp_size=None,
+            n=None,
+            max_new_tokens=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            min_p=None,
+            seed=None,
+            bootstrap_resamples=None,
+            bootstrap_seed=None,
+            bootstrap_confidence=None,
+            gpu_memory_utilization=None,
+            max_model_len=None,
+            mem_fraction_static=None,
+            context_length=None,
+            sglang_generation_batch_size=None,
+            dtype=None,
+            vllm_arg=None,
+            sglang_arg=["chunked_prefill_size=4096"],
+        )
+        resolved = resolve_run_arguments(args, cfg)
+        self.assertEqual(resolved["backend"], "sglang")
+        self.assertEqual(resolved["backend_kwargs"]["mem_fraction_static"], 0.75)
+        self.assertEqual(resolved["backend_kwargs"]["context_length"], 8192)
+        self.assertEqual(resolved["backend_kwargs"]["generation_batch_size"], 64)
+        self.assertEqual(resolved["backend_kwargs"]["dtype"], "bfloat16")
+        self.assertEqual(resolved["backend_kwargs"]["trust_remote_code"], True)
+        self.assertEqual(resolved["backend_kwargs"]["chunked_prefill_size"], 4096)
 
 
 if __name__ == "__main__":

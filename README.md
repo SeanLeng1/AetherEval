@@ -6,8 +6,9 @@ A lightweight, generative-only LLM evaluation framework.
 
 - Benchmark root is fixed to `./benchmarks`.
 - Task discovery is automatic: any `benchmarks/<task>/task.py + metrics.py` is picked up.
-- Backend is offline vLLM only (`dp_size=1` single process, `dp_size>1` Ray data parallel).
-- Generation uses vLLM's built-in tqdm progress bar.
+- Backends are offline vLLM and SGLang.
+- vLLM supports `dp_size=1` single process and `dp_size>1` Ray data parallel.
+- SGLang supports `dp_size=1` single process and `dp_size>1` Ray data parallel.
 - Scoring (`score_generation`) has a framework tqdm progress bar.
 - Task owns prompt/data/metric logic; core only orchestrates loading, generation, scoring, resume, and output writing.
 - Supports `n` sampling; metrics are fully task-defined.
@@ -37,6 +38,7 @@ CLI and run YAML still override these defaults.
 
 ```bash
 aethereval \
+  --backend vllm \
   --model Qwen/Qwen3-0.6B-Base \
   --tasks <task_name> \
   --output-dir outputs \
@@ -50,6 +52,28 @@ If `--run-id` is not provided, the default is:
 
 If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
 Use `--overwrite` to discard old predictions and rerun from scratch.
+
+To use SGLang:
+
+```bash
+aethereval \
+  --backend sglang \
+  --model Qwen/Qwen3-0.6B-Base \
+  --tasks <task_name> \
+  --output-dir outputs \
+  --dp-size 1 \
+  --tp-size 1 \
+  --context-length 16384 \
+  --sglang-generation-batch-size 128 \
+  --mem-fraction-static 0.8
+```
+
+Backend-specific kwargs can be passed with repeatable key/value flags:
+
+```bash
+aethereval --backend vllm --vllm-arg trust_remote_code=true ...
+aethereval --backend sglang --sglang-arg trust_remote_code=true ...
+```
 
 ## Run With YAML
 
@@ -95,7 +119,7 @@ Prompt handling:
 
 - Framework defaults to chat-format generation.
 - If `build_prompt` returns `str`, it is auto-wrapped to `[{"role":"user","content": ...}]`.
-- vLLM uses tokenizer `apply_chat_template`; if unavailable, it falls back to plain `role: content` text and prints a warning.
+- Offline backends render prompts with tokenizer `apply_chat_template`; if unavailable, the framework falls back to plain `role: content` text and prints a warning.
 
 `metrics.py` must define:
 
@@ -167,12 +191,19 @@ outputs/<run_id>/
 aethereval/
   cli.py
   config.py
+  backends/
+    base.py
+    factory.py
+    prompt.py
+    sglang/
+      backend.py
+    vllm/
+      backend.py
   core/
     io.py
     types.py
     task_defaults.py
     task_register.py
-    vllm_backend.py
     runner.py
   metrics/
     common.py

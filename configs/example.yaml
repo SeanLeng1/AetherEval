@@ -7,6 +7,7 @@ run:
   overwrite: false
 
 runtime:
+  backend: "vllm"  # vllm | sglang
   dp_size: 1
   tp_size: 1
 
@@ -31,3 +32,11 @@ vllm:
   extra_model_kwargs:
     trust_remote_code: true
     max_num_seqs: 512
+
+sglang:
+  mem_fraction_static: 0.8
+  context_length: 16384
+  generation_batch_size: 128
+  dtype: "bfloat16"
+  extra_model_kwargs:
+    trust_remote_code: true
