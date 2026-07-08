@@ -16,6 +16,12 @@ class _FakeEngine:
         return [{"text": f"out:{idx}:{prompt}"} for idx, prompt in enumerate(prompts)]
 
 
+class _ShortEngine(_FakeEngine):
+    def generate(self, prompts, sampling_params):  # noqa: ANN001
+        del prompts, sampling_params
+        return []
+
+
 class SGLangBackendTests(unittest.TestCase):
     def test_engine_args_do_not_include_aethereval_dp_size(self) -> None:
         backend = sglang_backend.SGLangBackend.__new__(sglang_backend.SGLangBackend)
@@ -59,7 +65,9 @@ class SGLangBackendTests(unittest.TestCase):
 
         split = sglang_backend._split_payloads(payloads, num_workers=2)
 
-        self.assertEqual([[item["idx"] for item in worker] for worker in split], [[0, 2, 4], [1, 3]])
+        self.assertEqual(
+            [[item["idx"] for item in worker] for worker in split], [[0, 2, 4], [1, 3]]
+        )
 
     def test_run_generation_expands_n_and_regroups_outputs(self) -> None:
         engine = _FakeEngine()
@@ -87,13 +95,39 @@ class SGLangBackendTests(unittest.TestCase):
             show_progress=False,
         )
 
-        self.assertEqual(engine.prompt_batches, [["user: hello", "user: hello"], ["user: world", "user: world"]])
-        self.assertEqual(engine.sampling_params, {"max_new_tokens": 8, "temperature": 0.7, "top_p": 1.0})
+        self.assertEqual(
+            engine.prompt_batches,
+            [["user: hello", "user: hello"], ["user: world", "user: world"]],
+        )
+        self.assertEqual(
+            engine.sampling_params,
+            {"max_new_tokens": 8, "temperature": 0.7, "top_p": 1.0},
+        )
         self.assertEqual(outputs[0]["sample_id"], "a")
         self.assertEqual(len(outputs[0]["generations"]), 2)
         self.assertTrue(outputs[0]["generations"][0].startswith("out:0:"))
         self.assertEqual(outputs[1]["sample_id"], "b")
         self.assertEqual(len(outputs[1]["generations"]), 2)
+
+    def test_run_generation_raises_on_output_count_mismatch(self) -> None:
+        payloads = [
+            {
+                "idx": 0,
+                "sample_id": "a",
+                "prompt": [{"role": "user", "content": "hello"}],
+                "num_generations": 1,
+            },
+        ]
+
+        with self.assertRaises(RuntimeError):
+            sglang_backend._run_generation(
+                engine=_ShortEngine(),
+                tokenizer=object(),
+                payloads=payloads,
+                gen_cfg={"n": 1, "max_new_tokens": 8, "temperature": 0.0, "top_p": 1.0},
+                batch_size=1,
+                show_progress=False,
+            )
 
 
 if __name__ == "__main__":

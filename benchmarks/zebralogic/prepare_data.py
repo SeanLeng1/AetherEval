@@ -1,11 +1,13 @@
-
 import json
 from pathlib import Path
 from typing import Any
 
 
 DATASET_CANDIDATES = [
-    ("allenai/ZebraLogicBench-private", "grid_mode"),  # preferred, if gated access is granted
+    (
+        "allenai/ZebraLogicBench-private",
+        "grid_mode",
+    ),  # preferred, if gated access is granted
     ("WildEval/ZebraLogic", "grid_mode"),  # public mirror with solutions
     ("allenai/ZebraLogicBench", "grid_mode"),  # public but often redacted
 ]
@@ -35,10 +37,14 @@ def _load_best_dataset(load_dataset: Any) -> tuple[Any, str, str]:
         try:
             ds = load_dataset(dataset_path, dataset_name, split="test")
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"{dataset_path}/{dataset_name}: {type(exc).__name__}: {exc}")
+            failures.append(
+                f"{dataset_path}/{dataset_name}: {type(exc).__name__}: {exc}"
+            )
             continue
         if not _has_non_redacted_solutions(ds):
-            failures.append(f"{dataset_path}/{dataset_name}: solution is redacted (all ___)")
+            failures.append(
+                f"{dataset_path}/{dataset_name}: solution is redacted (all ___)"
+            )
             continue
         return ds, dataset_path, dataset_name
 

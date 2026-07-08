@@ -1,4 +1,3 @@
-
 import argparse
 import tempfile
 import unittest
@@ -22,6 +21,9 @@ class ConfigTests(unittest.TestCase):
                 "  max_new_tokens: 123\n"
                 "metrics:\n"
                 "  bootstrap_resamples: 250\n"
+                "  rm_model_path: /models/rm\n"
+                "  cm_model_path: /models/cm\n"
+                "  rm_batch_size: 2\n"
                 "vllm:\n"
                 "  max_model_len: 4096\n",
                 encoding="utf-8",
@@ -66,6 +68,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolved["tp_size"], 1)
             self.assertEqual(resolved["gen_overrides"]["max_new_tokens"], 123)
             self.assertEqual(resolved["bootstrap_resamples"], 250)
+            self.assertEqual(resolved["metric_options"]["rm_model_path"], "/models/rm")
+            self.assertEqual(resolved["metric_options"]["cm_model_path"], "/models/cm")
+            self.assertEqual(resolved["metric_options"]["rm_batch_size"], 2)
             self.assertEqual(resolved["model_kwargs"]["max_model_len"], 4096)
             self.assertEqual(resolved["backend_kwargs"]["max_model_len"], 4096)
 
@@ -103,6 +108,13 @@ class ConfigTests(unittest.TestCase):
             context_length=None,
             sglang_generation_batch_size=None,
             dtype=None,
+            rm_model_path="/cli/rm",
+            cm_model_path=None,
+            rm_batch_size=None,
+            rm_max_length=None,
+            rm_device=None,
+            rm_dtype=None,
+            rm_trust_remote_code=None,
             vllm_arg=["trust_remote_code=true", "max_num_seqs=64"],
             sglang_arg=None,
         )
@@ -114,6 +126,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(resolved["gen_overrides"]["max_new_tokens"], 256)
         self.assertEqual(resolved["bootstrap_resamples"], 123)
         self.assertEqual(resolved["bootstrap_confidence"], 0.9)
+        self.assertEqual(resolved["metric_options"]["rm_model_path"], "/cli/rm")
         self.assertEqual(resolved["model_kwargs"]["trust_remote_code"], True)
         self.assertEqual(resolved["model_kwargs"]["max_num_seqs"], 64)
 

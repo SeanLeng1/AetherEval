@@ -1,4 +1,3 @@
-
 import unittest
 
 from aethereval.metrics.bootstrap import bootstrap_mean

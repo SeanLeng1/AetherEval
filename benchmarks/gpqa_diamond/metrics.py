@@ -1,4 +1,3 @@
-
 from typing import Any
 
 from aethereval.metrics.common import aggregate_mcq_results, score_generation_mcq

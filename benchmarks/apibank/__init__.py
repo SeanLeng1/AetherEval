@@ -1,1 +1,1 @@
-"""API-Bank (GD2PO) external benchmark extension for AetherEval."""
+"""API-Bank native benchmark for AetherEval."""

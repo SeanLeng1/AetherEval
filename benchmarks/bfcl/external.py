@@ -10,7 +10,7 @@ checkers. So it is wrapped here as an *external benchmark* with a small, explici
 ``run`` registers the ToolRL/GDPO handler, drives ``bfcl_eval`` generate + evaluate
 in-process (sglang backend by default), parses the BFCL leaderboard into the GDPO Table 1
 metrics, and writes an AetherEval-style ``summary.json``. Any future external benchmark
-(API-Bank, etc.) can follow the same ``ExternalRunSpec``/``ExternalResult``/``run`` shape.
+can follow the same ``ExternalRunSpec``/``ExternalResult``/``run`` shape.
 """
 
 import csv
@@ -37,14 +37,14 @@ _FMT_PATTERNS = [
 
 @dataclass
 class ExternalRunSpec:
-    model: str                              # registry name = HF id, or any name with model_path
-    output_dir: Path                        # AetherEval run dir; result/ + score/ go under it
-    model_path: str | None = None           # local checkpoint dir (None => load `model` from HF)
+    model: str  # registry name = HF id, or any name with model_path
+    output_dir: Path  # AetherEval run dir; result/ + score/ go under it
+    model_path: str | None = None  # local checkpoint dir (None => load `model` from HF)
     categories: list[str] = field(default_factory=lambda: ["all"])
-    backend: str = "sglang"                 # tmux0 container ships sglang
+    backend: str = "sglang"  # tmux0 container ships sglang
     num_gpus: int = 1
     gpu_memory_utilization: float = 0.9
-    temperature: float = 0.001              # near-greedy, BFCL tool-calling default
+    temperature: float = 0.001  # near-greedy, BFCL tool-calling default
     allow_overwrite: bool = True
     run_generation: bool = True
     run_evaluation: bool = True
@@ -72,7 +72,7 @@ def _gen_args(spec: ExternalRunSpec, result_dir: Path) -> SimpleNamespace:
         backend=spec.backend,
         skip_server_setup=False,
         local_model_path=spec.model_path,
-        result_dir=result_dir,            # absolute -> PROJECT_ROOT / abs == abs
+        result_dir=result_dir,  # absolute -> PROJECT_ROOT / abs == abs
         allow_overwrite=spec.allow_overwrite,
         run_ids=False,
         enable_lora=False,
@@ -82,23 +82,27 @@ def _gen_args(spec: ExternalRunSpec, result_dir: Path) -> SimpleNamespace:
 
 
 def run(spec: ExternalRunSpec) -> ExternalResult:
-    from bfcl_eval._llm_response_generation import main as generation_main
-    from bfcl_eval.eval_checker.eval_runner import main as evaluation_main
-
-    register_rlla_model(spec.model)
-
     out = Path(spec.output_dir).resolve()
     result_dir = out / "result"
     score_dir = out / "score"
     result_dir.mkdir(parents=True, exist_ok=True)
     score_dir.mkdir(parents=True, exist_ok=True)
 
+    if spec.run_generation or spec.run_evaluation:
+        register_rlla_model(spec.model)
+
     if spec.run_generation:
+        from bfcl_eval._llm_response_generation import main as generation_main
+
         generation_main(_gen_args(spec, result_dir))
 
     if spec.run_evaluation:
+        from bfcl_eval.eval_checker.eval_runner import main as evaluation_main
+
         # 4 positional args work on BFCL v3 (no partial_eval) and v4 (defaulted).
-        evaluation_main([spec.model], list(spec.categories), str(result_dir), str(score_dir))
+        evaluation_main(
+            [spec.model], list(spec.categories), str(result_dir), str(score_dir)
+        )
 
     metrics = parse_scores(score_dir, spec.model)
     fmt = compute_format_rate(result_dir, spec.model)
@@ -148,19 +152,20 @@ def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
 def _read_category_jsons(score_dir: Path, model: str) -> dict[str, float]:
     """Fallback: aggregate per-category ``*_score.json`` (first line = {accuracy,...})."""
     model_dir = score_dir / model.replace("/", "_")
+    score_files = list(model_dir.rglob("*_score.json")) if model_dir.exists() else []
+    if not score_files:
+        return {}
+
     from bfcl_eval.constants.category_mapping import TEST_COLLECTION_MAPPING
 
     per_cat: dict[str, float] = {}
-    for jf in model_dir.rglob("*_score.json"):
+    for jf in score_files:
         cat = jf.stem.split("_score")[0]
         cat = cat.split("_", 2)[-1] if cat.startswith("BFCL") else cat
-        try:
-            with open(jf) as f:
-                head = json.loads(f.readline())
-            if isinstance(head, dict) and "accuracy" in head:
-                per_cat[cat] = float(head["accuracy"]) * 100.0
-        except Exception:
-            continue
+        with open(jf) as f:
+            head = json.loads(f.readline())
+        if isinstance(head, dict) and "accuracy" in head:
+            per_cat[cat] = float(head["accuracy"]) * 100.0
 
     out: dict[str, float] = {}
     for coll in _COLLECTIONS:
@@ -177,7 +182,9 @@ def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
     if not metrics:
         metrics = _read_category_jsons(score_dir, model)
     overalls = [
-        metrics[f"{c}_overall_acc"] for c in _COLLECTIONS if f"{c}_overall_acc" in metrics
+        metrics[f"{c}_overall_acc"]
+        for c in _COLLECTIONS
+        if f"{c}_overall_acc" in metrics
     ]
     if overalls:
         metrics["avg_acc"] = sum(overalls) / len(overalls)

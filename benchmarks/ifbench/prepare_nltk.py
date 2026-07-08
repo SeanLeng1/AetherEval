@@ -1,4 +1,3 @@
-
 import os
 from pathlib import Path
 
@@ -38,9 +37,18 @@ def main() -> None:
 
     removed_zip_files: list[str] = []
     cleanup_pairs = [
-        (nltk_data_dir / "tokenizers" / "punkt.zip", nltk_data_dir / "tokenizers" / "punkt"),
-        (nltk_data_dir / "tokenizers" / "punkt_tab.zip", nltk_data_dir / "tokenizers" / "punkt_tab"),
-        (nltk_data_dir / "corpora" / "stopwords.zip", nltk_data_dir / "corpora" / "stopwords"),
+        (
+            nltk_data_dir / "tokenizers" / "punkt.zip",
+            nltk_data_dir / "tokenizers" / "punkt",
+        ),
+        (
+            nltk_data_dir / "tokenizers" / "punkt_tab.zip",
+            nltk_data_dir / "tokenizers" / "punkt_tab",
+        ),
+        (
+            nltk_data_dir / "corpora" / "stopwords.zip",
+            nltk_data_dir / "corpora" / "stopwords",
+        ),
         (
             nltk_data_dir / "taggers" / "averaged_perceptron_tagger_eng.zip",
             nltk_data_dir / "taggers" / "averaged_perceptron_tagger_eng",

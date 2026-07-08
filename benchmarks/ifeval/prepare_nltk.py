@@ -1,4 +1,3 @@
-
 import os
 from pathlib import Path
 
@@ -36,8 +35,14 @@ def main() -> None:
 
     removed_zip_files: list[str] = []
     cleanup_pairs = [
-        (nltk_data_dir / "tokenizers" / "punkt.zip", nltk_data_dir / "tokenizers" / "punkt"),
-        (nltk_data_dir / "tokenizers" / "punkt_tab.zip", nltk_data_dir / "tokenizers" / "punkt_tab"),
+        (
+            nltk_data_dir / "tokenizers" / "punkt.zip",
+            nltk_data_dir / "tokenizers" / "punkt",
+        ),
+        (
+            nltk_data_dir / "tokenizers" / "punkt_tab.zip",
+            nltk_data_dir / "tokenizers" / "punkt_tab",
+        ),
     ]
     for zip_path, extracted_dir in cleanup_pairs:
         if zip_path.exists() and extracted_dir.exists():

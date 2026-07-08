@@ -1,4 +1,3 @@
-
 import json
 import tempfile
 import unittest
@@ -13,7 +12,9 @@ class FakeBackend:
         self.calls = 0
         self.last_gen_cfg: dict | None = None
 
-    def generate(self, inputs: list[GenerationInput], gen_cfg: dict) -> list[GenerationOutput]:
+    def generate(
+        self, inputs: list[GenerationInput], gen_cfg: dict
+    ) -> list[GenerationOutput]:
         self.calls += 1
         self.last_gen_cfg = dict(gen_cfg)
         outputs: list[GenerationOutput] = []
@@ -39,8 +40,24 @@ class FakeBackend:
 
 
 class NeverCalledBackend(FakeBackend):
-    def generate(self, inputs: list[GenerationInput], gen_cfg: dict) -> list[GenerationOutput]:
+    def generate(
+        self, inputs: list[GenerationInput], gen_cfg: dict
+    ) -> list[GenerationOutput]:
         raise AssertionError("generate should not be called during full resume")
+
+
+class ShortGenerationBackend(FakeBackend):
+    def generate(
+        self, inputs: list[GenerationInput], gen_cfg: dict
+    ) -> list[GenerationOutput]:
+        item = inputs[0]
+        return [
+            GenerationOutput(
+                sample_id=item.sample_id,
+                prompt=item.prompt,
+                generations=[],
+            )
+        ]
 
 
 def _write_toy_benchmark(root: Path) -> None:
@@ -141,6 +158,60 @@ def _write_toy2_benchmark(root: Path) -> None:
     )
 
 
+def _write_batch_benchmark(root: Path) -> None:
+    task_dir = root / "batch_toy"
+    data_dir = task_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = [
+        {"id": "1", "question": "batch one"},
+        {"id": "2", "question": "batch two"},
+    ]
+    with (data_dir / "eval.jsonl").open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    (task_dir / "task.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from aethereval.core.types import Sample\n"
+        "TASK_NAME='batch_toy'\n"
+        "DATA_FILE='data/eval.jsonl'\n"
+        "DEFAULT_GEN={'n': 1, 'max_new_tokens': 16, 'temperature': 0.0, 'top_p': 1.0}\n"
+        "def load_samples(task_dir: Path):\n"
+        "    rows = []\n"
+        "    with (task_dir / DATA_FILE).open('r', encoding='utf-8') as f:\n"
+        "        for line in f:\n"
+        "            line = line.strip()\n"
+        "            if line:\n"
+        "                rows.append(json.loads(line))\n"
+        "    return [Sample(id=str(row['id']), data={'question': row['question']}) for row in rows]\n"
+        "def build_prompt(sample: Sample):\n"
+        "    return sample.data['question']\n",
+        encoding="utf-8",
+    )
+
+    (task_dir / "metrics.py").write_text(
+        "def score_generation(sample, generation):\n"
+        "    raise AssertionError('single-generation scorer should not be called')\n"
+        "def score_generations_batch(samples, generation_outputs, metric_options=None):\n"
+        "    offset = float((metric_options or {}).get('batch_offset', 0.0))\n"
+        "    results = []\n"
+        "    for sample, output in zip(samples, generation_outputs):\n"
+        "        if sample.id != output.sample_id:\n"
+        "            raise ValueError('sample/output mismatch')\n"
+        "        results.append([\n"
+        "            {'score': len(text) + offset, 'is_pass': True, 'meta': {'batch': True}}\n"
+        "            for text in output.generations\n"
+        "        ])\n"
+        "    return results\n"
+        "def aggregate(sample_results, metric_options=None):\n"
+        "    first_scores = [float(item['scores'][0]) for item in sample_results]\n"
+        "    return {'batch_mean': sum(first_scores)/len(first_scores)}\n",
+        encoding="utf-8",
+    )
+
+
 class RunnerTests(unittest.TestCase):
     def test_end_to_end_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,8 +241,12 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertIn("primary_scores", first)
             self.assertEqual(first["primary_scores"]["toy"]["metric"], "accuracy_first")
-            self.assertAlmostEqual(float(first["primary_scores"]["toy"]["score"]), 1.0, places=6)
-            self.assertAlmostEqual(float(first["primary_score_aggregate"]), 1.0, places=6)
+            self.assertAlmostEqual(
+                float(first["primary_scores"]["toy"]["score"]), 1.0, places=6
+            )
+            self.assertAlmostEqual(
+                float(first["primary_score_aggregate"]), 1.0, places=6
+            )
             predictions_path = out / "run1" / "toy" / "predictions.jsonl"
             with predictions_path.open("r", encoding="utf-8") as f:
                 first_row = json.loads(f.readline())
@@ -191,6 +266,30 @@ class RunnerTests(unittest.TestCase):
             summary2 = second["results"]["toy"]
             self.assertEqual(summary2["new_records"], 0)
             self.assertEqual(summary2["existing_records"], 2)
+
+    def test_batch_metric_hook_scores_generations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_batch_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            result = run_evaluation(
+                model="fake-model",
+                tasks="batch_toy",
+                output_dir=out,
+                run_id="batch_run",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+                metric_options={"batch_offset": 1.0},
+            )
+
+            summary = result["results"]["batch_toy"]
+            self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0, places=6)
+            predictions_path = out / "batch_run" / "batch_toy" / "predictions.jsonl"
+            with predictions_path.open("r", encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row["meta"]["batch"] is True for row in rows))
 
     def test_resume_rescores_existing_predictions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -320,6 +419,22 @@ class RunnerTests(unittest.TestCase):
                     benchmarks_dir=root,
                 )
 
+    def test_backend_generation_count_mismatch_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+
+            out = Path(tmp) / "outputs"
+            with self.assertRaises(ValueError):
+                run_evaluation(
+                    model="fake-model",
+                    tasks="toy",
+                    output_dir=out,
+                    run_id="run_short",
+                    backend=ShortGenerationBackend(),
+                    benchmarks_dir=root,
+                )
+
     def test_inspect_prompts_without_inference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"
@@ -376,7 +491,9 @@ class RunnerTests(unittest.TestCase):
                 1.0,
                 places=6,
             )
-            self.assertAlmostEqual(float(second["primary_score_aggregate"]), 1.0, places=6)
+            self.assertAlmostEqual(
+                float(second["primary_score_aggregate"]), 1.0, places=6
+            )
 
 
 if __name__ == "__main__":

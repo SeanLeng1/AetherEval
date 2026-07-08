@@ -1,4 +1,3 @@
-
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -38,14 +37,11 @@ def _load_task_default_overrides() -> dict[str, dict[str, Any]]:
     return parsed
 
 
-def resolve_task_default_gen(task_name: str, fallback_default_gen: dict[str, Any]) -> dict[str, Any]:
+def resolve_task_default_gen(
+    task_name: str, fallback_default_gen: dict[str, Any]
+) -> dict[str, Any]:
     merged = dict(fallback_default_gen or {})
     override = _load_task_default_overrides().get(task_name)
     if override:
         merged.update(override)
     return merged
-
-
-def list_task_default_overrides() -> dict[str, dict[str, Any]]:
-    data = _load_task_default_overrides()
-    return {name: dict(values) for name, values in data.items()}

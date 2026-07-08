@@ -1,4 +1,3 @@
-
 import ast
 import faulthandler
 import json
@@ -17,10 +16,8 @@ from typing import Any
 from unittest.mock import mock_open, patch
 
 
-try:
+if hasattr(sys, "set_int_max_str_digits"):
     sys.set_int_max_str_digits(50000)
-except Exception:
-    pass
 
 
 IMPORT_STRING = (
@@ -143,7 +140,9 @@ def clean_if_name(code: str) -> str:
         if isinstance(last_block, ast.If):
             condition = last_block.test
             if ast.unparse(condition).strip() == "__name__ == '__main__'":
-                code = ast.unparse(astree.body[:-1]) + "\n" + ast.unparse(last_block.body)  # type: ignore[arg-type]
+                code = (
+                    ast.unparse(astree.body[:-1]) + "\n" + ast.unparse(last_block.body)
+                )  # type: ignore[arg-type]
     except Exception:
         pass
     return code
@@ -261,7 +260,9 @@ def grade_call_based(
     if method is None:
         return None
 
-    all_inputs = [[json.loads(line) for line in inputs.split("\n")] for inputs in all_inputs]
+    all_inputs = [
+        [json.loads(line) for line in inputs.split("\n")] for inputs in all_inputs
+    ]
     all_outputs = [json.loads(output) for output in all_outputs]
 
     total_execution = 0.0
@@ -400,7 +401,9 @@ def grade_stdio(
             if stripped_prediction_line == stripped_gt_out_line:
                 continue
 
-            success, decimal_prediction_line = convert_line_to_decimals(stripped_prediction_line)
+            success, decimal_prediction_line = convert_line_to_decimals(
+                stripped_prediction_line
+            )
             if not success:
                 all_results.append(-2)
                 return all_results, wa_send_args
@@ -433,10 +436,7 @@ def run_test(
     if debug:
         print(f"start = {datetime.now().time()}")
 
-    try:
-        in_outs = json.loads(sample["input_output"])
-    except ValueError as e:
-        raise e
+    in_outs = json.loads(sample["input_output"])
 
     if in_outs.get("fn_name") is None:
         which_type = CodeType.STANDARD_INPUT
@@ -499,8 +499,12 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     if maximum_memory_bytes is not None:
         import resource
 
-        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        resource.setrlimit(
+            resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes)
+        )
+        resource.setrlimit(
+            resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes)
+        )
         if not platform.uname().system == "Darwin":
             resource.setrlimit(
                 resource.RLIMIT_STACK,
@@ -689,7 +693,11 @@ def check_correctness(
 
     result, metadata = payload
     statuses = list(result) if isinstance(result, list) else [-4]
-    metadata_dict = metadata if isinstance(metadata, dict) else {"error_code": -4, "error_message": "Invalid metadata"}
+    metadata_dict = (
+        metadata
+        if isinstance(metadata, dict)
+        else {"error_code": -4, "error_message": "Invalid metadata"}
+    )
     return statuses, metadata_dict
 
 
@@ -727,7 +735,9 @@ def evaluate_candidate(
     }
 
     try:
-        statuses, metadata = check_correctness(payload, code, timeout=int(timeout), debug=False)
+        statuses, metadata = check_correctness(
+            payload, code, timeout=int(timeout), debug=False
+        )
     except Exception as exc:  # noqa: BLE001
         return [-5], f"{type(exc).__name__}: {exc}"
 

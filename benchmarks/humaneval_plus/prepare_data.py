@@ -1,4 +1,3 @@
-
 import gzip
 import json
 from pathlib import Path
@@ -45,10 +44,7 @@ def main() -> None:
         for line in rows:
             f.write(line + "\n")
 
-    print(
-        f"wrote {out_path} rows={len(rows)} "
-        f"source_version={HUMANEVAL_PLUS_VERSION}"
-    )
+    print(f"wrote {out_path} rows={len(rows)} source_version={HUMANEVAL_PLUS_VERSION}")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-
 import re
 import string
 from typing import Any
@@ -132,7 +131,9 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     prediction, method = _extract_answer(generation, subset, gold)
 
     ignore_punctuation = subset != "dyck_languages"
-    prediction_norm = _normalize_exact_match(prediction, ignore_punctuation=ignore_punctuation)
+    prediction_norm = _normalize_exact_match(
+        prediction, ignore_punctuation=ignore_punctuation
+    )
     gold_norm = _normalize_exact_match(gold, ignore_punctuation=ignore_punctuation)
 
     score = 1.0 if prediction_norm == gold_norm and bool(gold_norm) else 0.0

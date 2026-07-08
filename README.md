@@ -10,6 +10,8 @@ A lightweight, generative-only LLM evaluation framework.
 - vLLM supports `dp_size=1` single process and `dp_size>1` Ray data parallel.
 - SGLang supports `dp_size=1` single process and `dp_size>1` Ray data parallel.
 - Scoring (`score_generation`) has a framework tqdm progress bar.
+- Metrics may opt into batch scoring with `score_generations_batch`, used for
+  model-based metrics such as reward-model evaluation.
 - Task owns prompt/data/metric logic; core only orchestrates loading, generation, scoring, resume, and output writing.
 - Supports `n` sampling; metrics are fully task-defined.
 
@@ -129,6 +131,70 @@ Prompt handling:
 Recommended:
 
 - `PRIMARY_METRIC: str` (used by runner to surface report metric in `summary.json`)
+- `score_generations_batch(samples, generation_outputs, metric_options) -> list[list[dict]]`
+  for metrics that must score generations in batches. The returned outer list must
+  align with `generation_outputs`; each inner list must align with that output's
+  `generations`.
+
+Shared benchmark implementation code lives in `benchmark_utils/`, outside
+`benchmarks/`, so helper modules are not visually or programmatically mixed with
+task folders.
+
+## Reward-Model Metrics
+
+RM-based native tasks can receive reward model paths through shared metric flags:
+
+```bash
+aethereval \
+  --model /path/to/policy \
+  --tasks safe_alignment \
+  --output-dir outputs
+```
+
+`safe_alignment` defaults to `Rihong/Qwen2.5-7B-SafeRLHF-RM` and
+`Rihong/Qwen2.5-7B-SafeRLHF-CM`; pass `--rm-model-path` and `--cm-model-path`
+only when overriding with local checkpoints.
+
+Optional RM metric flags include `--rm-batch-size`, `--rm-max-length`,
+`--rm-device`, `--rm-dtype`, and `--rm-trust-remote-code`.
+
+## External Benchmarks
+
+Some benchmarks do not fit the native `task.py`/`metrics.py` contract because they own
+their own generation loop, agent runtime, or reference output layout. These live under
+`benchmarks/<name>/` with an `external.py` API and are not discovered by
+`aethereval --tasks`.
+
+API-Bank is a native task and should be run with `--tasks apibank`.
+
+Current external benchmarks:
+
+- `benchmarks/bfcl` — BFCL-v3 wrapper:
+  `aethereval --external-benchmark bfcl --model <model> --output-dir outputs/bfcl`
+
+External runs use the regular `aethereval` CLI for shared runtime flags
+(`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
+benchmark-specific selectors such as `--categories` for BFCL.
+
+External benchmark modules use the same shape:
+
+- `ExternalRunSpec`
+- `ExternalResult`
+- `run(spec) -> ExternalResult`
+
+They still write an AetherEval-style `summary.json` with `metrics`,
+`primary_metric`, and `primary_score`, but raw outputs follow each reference
+benchmark schema:
+
+```text
+outputs/bfcl/
+  result/
+  score/
+  summary.json
+```
+
+See `benchmarks/apibank/README.md` and `benchmarks/bfcl/README.md` for exact metrics,
+runtime requirements, and output details.
 
 ## Bootstrap
 
@@ -208,6 +274,15 @@ aethereval/
   metrics/
     common.py
     bootstrap.py
+benchmarks/
+  <task>/
+    README.md
+    data/*.jsonl
+    task.py
+    metrics.py
+benchmark_utils/
+  aime.py
+  instruction_following.py
 configs/
   example.yaml
   task_defaults.yaml

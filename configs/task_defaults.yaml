@@ -22,6 +22,36 @@ aime25:
   temperature: 1.0
   top_p: 0.7
 
+amc23:
+  n: 16
+  max_new_tokens: 4096
+  temperature: 1.0
+  top_p: 0.7
+
+math500:
+  n: 16
+  max_new_tokens: 4096
+  temperature: 1.0
+  top_p: 0.7
+
+minerva:
+  n: 16
+  max_new_tokens: 4096
+  temperature: 1.0
+  top_p: 0.7
+
+olympiad_bench:
+  n: 16
+  max_new_tokens: 4096
+  temperature: 1.0
+  top_p: 0.7
+
+safe_alignment:
+  n: 1
+  max_new_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+
 gpqa_diamond:
   n: 32
   max_new_tokens: 4096
@@ -59,6 +89,12 @@ mmlu_pro:
   top_p: 1.0
 
 zebralogic:
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.0
+  top_p: 1.0
+
+apibank:
   n: 1
   max_new_tokens: 4096
   temperature: 0.0

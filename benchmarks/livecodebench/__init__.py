@@ -1,2 +1,1 @@
 """LiveCodeBench benchmark package."""
-

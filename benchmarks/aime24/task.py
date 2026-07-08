@@ -1,48 +1,16 @@
-
 from pathlib import Path
 
-from aethereval.core.io import read_jsonl
 from aethereval.core.types import Sample
+from benchmark_utils.aime import build_aime_prompt, load_aime_samples
 
 
 TASK_NAME = "aime24"
 DATA_FILE = "data/eval.jsonl"
 
-_MATH_PROMPT_TEMPLATE = (
-    "{Question}\n\n"
-    "Please think step by step, and put your final answer within \\boxed{{}}."
-)
-
 
 def load_samples(task_dir: Path) -> list[Sample]:
-    rows = read_jsonl(task_dir / DATA_FILE)
-    samples: list[Sample] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            raise ValueError("AIME row must be a JSON object")
-        sample_id = str(row["id"])
-        problem = str(row["problem"]).strip()
-        answer = str(row["answer"]).strip()
-        if not problem:
-            raise ValueError(f"Empty problem for sample {sample_id}")
-        if not answer:
-            raise ValueError(f"Empty answer for sample {sample_id}")
-        samples.append(
-            Sample(
-                id=sample_id,
-                gold=answer,
-                meta={
-                    "year": row.get("year"),
-                    "url": row.get("url"),
-                },
-                data={
-                    "problem": problem,
-                    "solution": row.get("solution"),
-                },
-            )
-        )
-    return samples
+    return load_aime_samples(task_dir, DATA_FILE)
 
 
 def build_prompt(sample: Sample) -> str:
-    return _MATH_PROMPT_TEMPLATE.format(Question=str(sample.data["problem"]))
+    return build_aime_prompt(sample)

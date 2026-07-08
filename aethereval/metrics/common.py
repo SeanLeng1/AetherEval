@@ -1,4 +1,3 @@
-
 import math
 import re
 from collections import defaultdict
@@ -12,18 +11,21 @@ from ..core.types import GenerationRecord, Sample
 def to_records(raw_records: list[dict[str, Any]]) -> list[GenerationRecord]:
     records: list[GenerationRecord] = []
     for rec in raw_records:
+        meta = rec["meta"]
+        if not isinstance(meta, dict):
+            raise ValueError("Generation record meta must be a dict")
         records.append(
             GenerationRecord(
                 sample_id=str(rec["sample_id"]),
                 gen_idx=int(rec["gen_idx"]),
-                prompt=rec.get("prompt", ""),
-                generation=rec.get("generation", ""),
-                score=float(rec.get("score", 0.0)),
-                is_pass=bool(rec.get("is_pass", False)),
+                prompt=rec["prompt"],
+                generation=rec["generation"],
+                score=float(rec["score"]),
+                is_pass=bool(rec["is_pass"]),
                 parsed=rec.get("parsed"),
                 gold=rec.get("gold"),
                 error=rec.get("error"),
-                meta=rec.get("meta", {}) if isinstance(rec.get("meta", {}), dict) else {},
+                meta=meta,
             )
         )
     records.sort(key=lambda x: x.gen_idx)
@@ -129,13 +131,17 @@ def aggregate_instruction_following_results(
     inst_level_loose_values: list[float] = []
 
     for item in sample_results:
-        records = to_records(item.get("records", []))
+        records = to_records(item["records"])
         if not records:
             continue
 
-        sample_meta = item.get("meta", {}) if isinstance(item.get("meta", {}), dict) else {}
+        sample_meta = item["meta"]
+        if not isinstance(sample_meta, dict):
+            raise ValueError("sample_results meta must be a dict")
         raw_instruction_ids = sample_meta.get("instruction_id_list")
-        expected_instruction_count = len(raw_instruction_ids) if isinstance(raw_instruction_ids, list) else None
+        expected_instruction_count = (
+            len(raw_instruction_ids) if isinstance(raw_instruction_ids, list) else None
+        )
         if expected_instruction_count == 0:
             expected_instruction_count = None
 
@@ -170,7 +176,9 @@ def aggregate_instruction_following_results(
         prompt_level_strict_values.append(mean(sample_prompt_strict_values))
         prompt_level_loose_values.append(mean(sample_prompt_loose_values))
 
-        max_inst_count = max((len(values) for values in sample_inst_strict_lists), default=0)
+        max_inst_count = max(
+            (len(values) for values in sample_inst_strict_lists), default=0
+        )
         for inst_idx in range(max_inst_count):
             strict_across_records: list[float] = []
             loose_across_records: list[float] = []
@@ -296,13 +304,17 @@ def extract_choice(
 
 
 def score_generation_mcq(sample: Sample, generation: str) -> dict[str, Any]:
-    choices = sample.data.get("choices", {})
+    choices = sample.data["choices"]
     if not isinstance(choices, dict) or not choices:
-        choices = {}
+        raise ValueError(f"choices must be a non-empty dict for sample {sample.id}")
 
-    valid_letters = [k.strip().upper() for k in sorted(choices.keys()) if str(k).strip()]
+    valid_letters = [
+        k.strip().upper() for k in sorted(choices.keys()) if str(k).strip()
+    ]
     if not valid_letters:
-        valid_letters = ["A", "B", "C", "D"]
+        raise ValueError(
+            f"choices must include non-empty labels for sample {sample.id}"
+        )
 
     prediction, method = extract_choice(generation, choices, valid_letters)
     gold = str(sample.gold).strip().upper()
@@ -360,7 +372,7 @@ def aggregate_binary_results(
     parsed_fn = parsed_flag_fn or _default_mcq_parsed_flag
 
     for item in sample_results:
-        records = to_records(item.get("records", []))
+        records = to_records(item["records"])
         if not records:
             continue
 
@@ -371,10 +383,14 @@ def aggregate_binary_results(
         sample_parsed = mean(record_parsed_flags)
         sample_acc_values.append(sample_acc)
         sample_parsed_values.append(sample_parsed)
-        sample_binary_scores.append([1 if score >= 1.0 else 0 for score in record_scores])
+        sample_binary_scores.append(
+            [1 if score >= 1.0 else 0 for score in record_scores]
+        )
 
         if group_key:
-            sample_meta = item.get("meta", {}) if isinstance(item.get("meta", {}), dict) else {}
+            sample_meta = item["meta"]
+            if not isinstance(sample_meta, dict):
+                raise ValueError("sample_results meta must be a dict")
             raw_group = str(sample_meta.get(group_key, "")).strip()
             group_name = _slugify(raw_group)
             if group_name:
@@ -400,7 +416,9 @@ def aggregate_binary_results(
         # only report pass@k when every sample has at least k generations.
         if not all(len(binary_scores) >= k for binary_scores in sample_binary_scores):
             continue
-        pass_metrics[k] = [pass_at_k(binary_scores, k) for binary_scores in sample_binary_scores]
+        pass_metrics[k] = [
+            pass_at_k(binary_scores, k) for binary_scores in sample_binary_scores
+        ]
 
     result: dict[str, float] = {
         "accuracy": mean(sample_acc_values),

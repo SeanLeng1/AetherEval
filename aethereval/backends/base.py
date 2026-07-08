@@ -1,4 +1,3 @@
-
 from typing import Any, Protocol
 
 from aethereval.core.types import GenerationInput, GenerationOutput
@@ -11,8 +10,6 @@ class GenerationBackend(Protocol):
         self,
         inputs: list[GenerationInput],
         gen_cfg: dict[str, Any],
-    ) -> list[GenerationOutput]:
-        ...
+    ) -> list[GenerationOutput]: ...
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...

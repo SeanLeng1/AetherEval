@@ -1,4 +1,3 @@
-
 import contextlib
 import faulthandler
 import io
@@ -11,13 +10,20 @@ import tempfile
 from multiprocessing import Value
 from typing import Any
 
-from aethereval.metrics.common import aggregate_binary_results, mean, mean_stderr, to_records
+from aethereval.metrics.common import (
+    aggregate_binary_results,
+    mean,
+    mean_stderr,
+    to_records,
+)
 from aethereval.core.types import GenerationRecord, Sample
 
 PRIMARY_METRIC = "pass@1"
 
 
-_CODE_BLOCK_RE = re.compile(r"```(?:python)?[ \t]*\n?(.*?)```", re.IGNORECASE | re.DOTALL)
+_CODE_BLOCK_RE = re.compile(
+    r"```(?:python)?[ \t]*\n?(.*?)```", re.IGNORECASE | re.DOTALL
+)
 _ANSWER_BLOCK_RE = re.compile(
     r"here is the completed function:\s*```(?:python)?[ \t]*\n?(.*?)```",
     re.IGNORECASE | re.DOTALL,
@@ -122,10 +128,16 @@ def _reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     if maximum_memory_bytes is not None:
         import resource
 
-        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        resource.setrlimit(
+            resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes)
+        )
+        resource.setrlimit(
+            resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes)
+        )
         if platform.uname().system != "Darwin":
-            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+            resource.setrlimit(
+                resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes)
+            )
 
     faulthandler.disable()
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -163,7 +175,9 @@ def _reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     shutil.chown = None  # type: ignore[assignment]
 
 
-def _unsafe_execute(result: Value, solution: str, test_code: str, timeout_sec: float) -> None:
+def _unsafe_execute(
+    result: Value, solution: str, test_code: str, timeout_sec: float
+) -> None:
     with _create_tempdir():
         import os as _os
         import shutil as _shutil
@@ -207,7 +221,9 @@ def _terminate_process(process: multiprocessing.Process) -> None:
         process.join(timeout=_PROCESS_KILL_GRACE_SEC)
 
 
-def _run_olmes_style_check(solution: str, test_code: str, timeout_sec: float) -> tuple[bool, str]:
+def _run_olmes_style_check(
+    solution: str, test_code: str, timeout_sec: float
+) -> tuple[bool, str]:
     if not test_code.strip():
         return False, "missing_test"
 
@@ -337,7 +353,7 @@ def aggregate(
     )
 
     for item in sample_results:
-        records = to_records(item.get("records", []))
+        records = to_records(item["records"])
         if not records:
             continue
 

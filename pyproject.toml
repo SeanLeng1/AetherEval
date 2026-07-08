@@ -24,10 +24,11 @@ dependencies = [
 [project.optional-dependencies]
 vllm = ["vllm"]
 sglang = ["sglang"]
+reward-model = ["torch", "transformers", "pyarrow"]
 all-backends = ["vllm", "sglang"]
 
 [project.scripts]
 aethereval = "aethereval.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["aethereval*", "benchmarks*"]
+include = ["aethereval*", "benchmark_utils*", "benchmarks*"]

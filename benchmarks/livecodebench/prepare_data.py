@@ -1,4 +1,3 @@
-
 import json
 from pathlib import Path
 from typing import Any
@@ -8,12 +7,10 @@ SOURCE_REPO = "lighteval/code_generation_lite"
 SOURCE_SUBSET = "v6"
 SOURCE_SPLIT = "test"
 
+
 def _to_iso_date(value: Any) -> str:
     if hasattr(value, "isoformat"):
-        try:
-            return str(value.isoformat())
-        except Exception:
-            return str(value)
+        return str(value.isoformat())
     return str(value or "")
 
 

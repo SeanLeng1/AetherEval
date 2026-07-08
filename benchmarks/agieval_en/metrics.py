@@ -1,4 +1,3 @@
-
 import re
 from typing import Any
 
@@ -39,7 +38,9 @@ def _prepare_agieval_parse_text(text: str) -> str:
     return text[-_AGIEVAL_PARSE_TAIL_CHARS:]
 
 
-def _extract_olmo3_style_answer(generation: str, letters: list[str]) -> tuple[str | None, str, float]:
+def _extract_olmo3_style_answer(
+    generation: str, letters: list[str]
+) -> tuple[str | None, str, float]:
     if not letters:
         return None, "none", 0.0
 
@@ -90,14 +91,16 @@ def _extract_olmo3_style_answer(generation: str, letters: list[str]) -> tuple[st
 
 
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
-    choices = sample.data.get("choices", {})
+    choices = sample.data["choices"]
     if not isinstance(choices, dict):
-        choices = {}
+        raise ValueError(f"choices must be a dict for sample {sample.id}")
     letters = [str(k).strip().upper() for k in sorted(choices.keys()) if str(k).strip()]
     if not letters:
-        letters = ["A", "B", "C", "D", "E"]
+        raise ValueError(f"choices must not be empty for sample {sample.id}")
 
-    prediction, method, answer_format_correct = _extract_olmo3_style_answer(generation, letters)
+    prediction, method, answer_format_correct = _extract_olmo3_style_answer(
+        generation, letters
+    )
     gold = str(sample.gold).strip().upper()
     score = 1.0 if prediction == gold else 0.0
 

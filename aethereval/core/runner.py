@@ -1,4 +1,3 @@
-
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -12,7 +11,13 @@ from .io import (
     write_json,
 )
 from .task_register import BENCHMARKS_DIR, discover_tasks, load_task
-from .types import GenerationInput, GenerationRecord, PromptType, Sample
+from .types import (
+    GenerationInput,
+    GenerationOutput,
+    GenerationRecord,
+    PromptType,
+    Sample,
+)
 from aethereval.backends import (
     GenerationBackend,
     create_backend,
@@ -38,7 +43,7 @@ def _make_progress_bar(total: int, desc: str) -> Any:
         return None
     try:
         from tqdm.auto import tqdm
-    except Exception:  # noqa: BLE001
+    except ImportError:
         return None
     return tqdm(total=total, desc=desc, unit="gen", dynamic_ncols=True)
 
@@ -50,13 +55,15 @@ def _resolve_primary_metric(
     declared = getattr(metrics_module, "PRIMARY_METRIC", None)
     if declared is not None:
         if not isinstance(declared, str) or not declared.strip():
-            raise ValueError("metrics.PRIMARY_METRIC must be a non-empty string when provided.")
+            raise ValueError(
+                "metrics.PRIMARY_METRIC must be a non-empty string when provided."
+            )
         if declared not in metrics:
             raise ValueError(
                 f"metrics.PRIMARY_METRIC='{declared}' not found in aggregate output keys: "
                 f"{sorted(metrics.keys())}"
             )
-        value = metrics.get(declared)
+        value = metrics[declared]
         if not isinstance(value, (int, float)):
             raise ValueError(
                 f"metrics.PRIMARY_METRIC='{declared}' must map to numeric value, got {type(value).__name__}."
@@ -85,7 +92,7 @@ def _to_sample(item: Any) -> Sample:
         gold = copied.pop("gold", None)
         meta = copied.pop("meta", {})
         if not isinstance(meta, dict):
-            meta = {"value": meta}
+            raise ValueError(f"Sample '{sample_id}' meta must be a dict")
         return Sample(id=sample_id, gold=gold, meta=meta, data=copied)
     raise TypeError(f"Unsupported sample type: {type(item).__name__}")
 
@@ -101,12 +108,14 @@ def _to_chat_prompt(prompt: PromptType) -> list[dict[str, str]]:
                 raise ValueError(
                     f"Invalid chat message at index {idx}: expected dict, got {type(item).__name__}"
                 )
-            role = str(item.get("role", "user")).strip() or "user"
-            content = str(item.get("content", ""))
+            role = str(item["role"]).strip()
+            content = str(item["content"])
+            if not role:
+                raise ValueError(f"Invalid chat message at index {idx}: empty role")
             messages.append({"role": role, "content": content})
         return messages
 
-    return [{"role": "user", "content": str(prompt)}]
+    raise TypeError(f"Unsupported prompt type: {type(prompt).__name__}")
 
 
 def _parse_tasks_arg(tasks_arg: str, available: list[str]) -> list[str]:
@@ -168,18 +177,21 @@ def _load_existing_records(path: Path) -> list[GenerationRecord]:
     rows = read_jsonl(path)
     records: list[GenerationRecord] = []
     for row in rows:
+        meta = row["meta"]
+        if not isinstance(meta, dict):
+            raise ValueError(f"Existing prediction meta must be a dict in {path}")
         records.append(
             GenerationRecord(
                 sample_id=str(row["sample_id"]),
                 gen_idx=int(row["gen_idx"]),
-                prompt=row.get("prompt", ""),
-                generation=row.get("generation", ""),
-                score=float(row.get("score", 0.0)),
-                is_pass=bool(row.get("is_pass", False)),
-                parsed=row.get("parsed"),
-                gold=row.get("gold"),
-                error=row.get("error"),
-                meta=row.get("meta", {}) if isinstance(row.get("meta", {}), dict) else {},
+                prompt=row["prompt"],
+                generation=row["generation"],
+                score=float(row["score"]),
+                is_pass=bool(row["is_pass"]),
+                parsed=row["parsed"] if "parsed" in row else None,
+                gold=row["gold"] if "gold" in row else None,
+                error=row["error"] if "error" in row else None,
+                meta=meta,
             )
         )
     return records
@@ -228,46 +240,130 @@ def _call_task_aggregate(
     return result
 
 
-def _score_generation_safe(
+def _score_generation(
     *,
     metrics_module: Any,
     sample: Sample,
     generation: str,
-) -> tuple[float, bool, Any, dict[str, Any], str | None]:
-    try:
-        scored = metrics_module.score_generation(sample, generation)
-        if not isinstance(scored, dict):
-            raise TypeError("score_generation must return a dict.")
-    except Exception as exc:  # noqa: BLE001
-        return 0.0, False, None, {}, f"score_generation error: {type(exc).__name__}: {exc}"
+) -> tuple[float, bool, Any, dict[str, Any]]:
+    scored = metrics_module.score_generation(sample, generation)
+    return _normalize_score_generation_result(scored)
 
+
+def _normalize_score_generation_result(
+    scored: Any,
+) -> tuple[float, bool, Any, dict[str, Any]]:
+    if not isinstance(scored, dict):
+        raise TypeError("score_generation result must be a dict.")
     if "score" not in scored:
-        return (
-            0.0,
-            False,
-            None,
-            {},
-            "score_generation error: ValueError: score_generation must return key 'score'.",
-        )
+        raise ValueError("score_generation result must include key 'score'.")
 
-    try:
-        score = float(scored["score"])
-    except Exception as exc:  # noqa: BLE001
-        return 0.0, False, None, {}, f"score_generation error: {type(exc).__name__}: {exc}"
-
+    score = float(scored["score"])
     parsed = scored.get("parsed")
     task_meta = scored.get("meta", {})
-    meta = task_meta if isinstance(task_meta, dict) else {"value": task_meta}
-    is_pass = bool(scored.get("is_pass", False))
-    return score, is_pass, parsed, meta, None
+    if not isinstance(task_meta, dict):
+        raise TypeError("score_generation 'meta' must be a dict when provided.")
+    is_pass = bool(scored["is_pass"]) if "is_pass" in scored else score >= 1.0
+    return score, is_pass, parsed, task_meta
+
+
+def _normalize_batch_score_results(
+    *,
+    raw_results: Any,
+    outputs: list[GenerationOutput],
+) -> dict[str, list[tuple[float, bool, Any, dict[str, Any]]]]:
+    if not isinstance(raw_results, list):
+        raise TypeError("score_generations_batch must return list[list[dict]].")
+    if len(raw_results) != len(outputs):
+        raise ValueError(
+            "score_generations_batch output length mismatch: "
+            f"got {len(raw_results)}, expected {len(outputs)}"
+        )
+
+    normalized: dict[str, list[tuple[float, bool, Any, dict[str, Any]]]] = {}
+    for output, per_generation in zip(outputs, raw_results, strict=True):
+        if output.sample_id in normalized:
+            raise ValueError(
+                f"score_generations_batch received duplicate sample id: {output.sample_id}"
+            )
+        if not isinstance(per_generation, list):
+            raise TypeError(
+                "score_generations_batch must return a list of score dicts for "
+                f"sample {output.sample_id}"
+            )
+        if len(per_generation) != len(output.generations):
+            raise ValueError(
+                "score_generations_batch per-sample length mismatch for "
+                f"sample {output.sample_id}: got {len(per_generation)}, "
+                f"expected {len(output.generations)}"
+            )
+        normalized[output.sample_id] = [
+            _normalize_score_generation_result(item) for item in per_generation
+        ]
+    return normalized
+
+
+def _score_generation_outputs(
+    *,
+    metrics_module: Any,
+    samples_by_id: dict[str, Sample],
+    outputs: list[GenerationOutput],
+    metric_options: dict[str, Any],
+    total_records: int,
+    progress_desc: str,
+) -> dict[str, list[tuple[float, bool, Any, dict[str, Any]]]]:
+    batch_score_fn = getattr(metrics_module, "score_generations_batch", None)
+    if callable(batch_score_fn):
+        samples = [samples_by_id[output.sample_id] for output in outputs]
+        raw_results = batch_score_fn(samples, outputs, metric_options)
+        return _normalize_batch_score_results(raw_results=raw_results, outputs=outputs)
+
+    score_bar = _make_progress_bar(total_records, progress_desc)
+    scored: dict[str, list[tuple[float, bool, Any, dict[str, Any]]]] = {}
+    try:
+        for output in outputs:
+            sample = samples_by_id[output.sample_id]
+            scored[output.sample_id] = []
+            for generation_text in output.generations:
+                scored[output.sample_id].append(
+                    _score_generation(
+                        metrics_module=metrics_module,
+                        sample=sample,
+                        generation=generation_text,
+                    )
+                )
+                if score_bar is not None:
+                    score_bar.update(1)
+    finally:
+        if score_bar is not None:
+            score_bar.close()
+    return scored
+
+
+def _records_to_generation_outputs(
+    records: list[GenerationRecord],
+) -> tuple[list[GenerationOutput], dict[str, list[int]]]:
+    grouped = _group_records_by_sample(records)
+    outputs: list[GenerationOutput] = []
+    gen_indices: dict[str, list[int]] = {}
+    for sample_id, sample_records in grouped.items():
+        outputs.append(
+            GenerationOutput(
+                sample_id=sample_id,
+                prompt=sample_records[0].prompt,
+                generations=[record.generation for record in sample_records],
+            )
+        )
+        gen_indices[sample_id] = [record.gen_idx for record in sample_records]
+    return outputs, gen_indices
 
 
 def _aggregate_run_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[str, Any]:
     grouped: dict[str, list[float]] = defaultdict(list)
     for summary in task_summaries.values():
-        metrics = summary.get("metrics", {})
+        metrics = summary["metrics"]
         if not isinstance(metrics, dict):
-            continue
+            raise ValueError("Task summary metrics must be a dict")
         for key, value in metrics.items():
             if isinstance(value, (int, float)):
                 grouped[key].append(float(value))
@@ -283,10 +379,12 @@ def _aggregate_run_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[st
     }
 
 
-def _aggregate_primary_scores(task_summaries: dict[str, dict[str, Any]]) -> float | None:
+def _aggregate_primary_scores(
+    task_summaries: dict[str, dict[str, Any]],
+) -> float | None:
     values: list[float] = []
     for summary in task_summaries.values():
-        value = summary.get("primary_score")
+        value = summary["primary_score"]
         if isinstance(value, (int, float)):
             values.append(float(value))
     if not values:
@@ -315,16 +413,11 @@ def _load_existing_task_summaries(
         summary_path = task_dir / "summary.json"
         if not summary_path.exists():
             continue
-        try:
-            with summary_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                loaded[task_name] = data
-        except Exception as exc:  # noqa: BLE001
-            _info(
-                f"[{task_name}] failed to load existing summary at {summary_path}: "
-                f"{type(exc).__name__}: {exc}"
-            )
+        with summary_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError(f"Existing summary must be a JSON object: {summary_path}")
+        loaded[task_name] = data
     return loaded
 
 
@@ -369,54 +462,77 @@ def _run_single_task(
 
     existing_records: list[GenerationRecord] = []
     if predictions_path.exists():
-        _info(f"[{task_name}] resume: loading existing predictions from {predictions_path}")
+        _info(
+            f"[{task_name}] resume: loading existing predictions from {predictions_path}"
+        )
         raw_existing = _load_existing_records(predictions_path)
         dedup: dict[tuple[str, int], GenerationRecord] = {}
         for record in raw_existing:
             if record.sample_id not in sample_id_set:
-                continue
+                raise ValueError(
+                    f"[{task_name}] existing prediction references unknown sample id: {record.sample_id}"
+                )
             if record.gen_idx < 0 or record.gen_idx >= n:
-                continue
+                raise ValueError(
+                    f"[{task_name}] existing prediction gen_idx out of range for n={n}: "
+                    f"sample_id={record.sample_id} gen_idx={record.gen_idx}"
+                )
+            if record.error is not None:
+                raise ValueError(
+                    f"[{task_name}] existing prediction contains backend error for "
+                    f"sample_id={record.sample_id} gen_idx={record.gen_idx}: {record.error}"
+                )
             dedup[(record.sample_id, record.gen_idx)] = record
         existing_records = list(dedup.values())
 
     if existing_records:
-        _info(f"[{task_name}] resume: rescoring existing records ({len(existing_records)})")
-        rescore_bar = _make_progress_bar(len(existing_records), f"[{task_name}] rescoring")
+        _info(
+            f"[{task_name}] resume: rescoring existing records ({len(existing_records)})"
+        )
         rescored_existing: list[GenerationRecord] = []
-        try:
-            for record in existing_records:
-                sample = samples_by_id[record.sample_id]
-                score, is_pass, parsed, meta, error = _score_generation_safe(
-                    metrics_module=metrics_module,
-                    sample=sample,
-                    generation=record.generation,
-                )
+        existing_outputs, existing_gen_indices = _records_to_generation_outputs(
+            existing_records
+        )
+        existing_scores = _score_generation_outputs(
+            metrics_module=metrics_module,
+            samples_by_id=samples_by_id,
+            outputs=existing_outputs,
+            metric_options={**metric_options, "n": n},
+            total_records=len(existing_records),
+            progress_desc=f"[{task_name}] rescoring",
+        )
+        existing_records_by_id = _group_records_by_sample(existing_records)
+        for output in existing_outputs:
+            sample = samples_by_id[output.sample_id]
+            original_records = existing_records_by_id[output.sample_id]
+            scores = existing_scores[output.sample_id]
+            gen_indices = existing_gen_indices[output.sample_id]
+            for record, gen_idx, scored in zip(
+                original_records, gen_indices, scores, strict=True
+            ):
+                score, is_pass, parsed, meta = scored
                 rescored_existing.append(
                     GenerationRecord(
                         sample_id=record.sample_id,
-                        gen_idx=record.gen_idx,
+                        gen_idx=gen_idx,
                         prompt=record.prompt,
                         generation=record.generation,
                         score=score,
                         is_pass=is_pass,
                         parsed=parsed,
                         gold=sample.gold,
-                        error=error,
+                        error=record.error,
                         meta=meta,
                     )
                 )
-                if rescore_bar is not None:
-                    rescore_bar.update(1)
-        finally:
-            if rescore_bar is not None:
-                rescore_bar.close()
 
         existing_records = rescored_existing
         _info(f"[{task_name}] resume rescoring finished")
         if predictions_path.exists():
             predictions_path.unlink()
-        append_jsonl(predictions_path, (_record_to_json(record) for record in existing_records))
+        append_jsonl(
+            predictions_path, (_record_to_json(record) for record in existing_records)
+        )
     elif predictions_path.exists():
         # If resume file has no reusable rows under current settings, rebuild it from pending outputs only.
         predictions_path.unlink()
@@ -429,7 +545,9 @@ def _run_single_task(
     pending_indices: dict[str, list[int]] = {}
     pending_record_count = 0
     for sample in samples:
-        missing = [i for i in range(n) if i not in existing_lookup.get(sample.id, set())]
+        missing = [
+            i for i in range(n) if i not in existing_lookup.get(sample.id, set())
+        ]
         pending_indices[sample.id] = missing
         pending_record_count += len(missing)
         if not missing:
@@ -453,53 +571,68 @@ def _run_single_task(
         backend_label = getattr(backend, "name", "backend")
         _info(f"[{task_name}] starting {backend_label} generation")
         generated_outputs = backend.generate(pending_inputs, gen_cfg)
-        score_bar = _make_progress_bar(pending_record_count, f"[{task_name}] scoring")
+        outputs_by_sample: dict[str, Any] = {}
+        for output in generated_outputs:
+            if output.sample_id in outputs_by_sample:
+                raise ValueError(
+                    f"[{task_name}] backend returned duplicate output for sample {output.sample_id}"
+                )
+            outputs_by_sample[output.sample_id] = output
+        expected_output_ids = {item.sample_id for item in pending_inputs}
+        returned_output_ids = set(outputs_by_sample.keys())
+        if returned_output_ids != expected_output_ids:
+            missing_ids = sorted(expected_output_ids - returned_output_ids)
+            extra_ids = sorted(returned_output_ids - expected_output_ids)
+            raise ValueError(
+                f"[{task_name}] backend output sample ids mismatch; "
+                f"missing={missing_ids} extra={extra_ids}"
+            )
+        for output in generated_outputs:
+            missing = pending_indices[output.sample_id]
+            generations = list(output.generations)
+            if output.error is not None:
+                raise RuntimeError(
+                    f"[{task_name}] backend failed for sample {output.sample_id}: {output.error}"
+                )
+            if len(generations) != len(missing):
+                raise ValueError(
+                    f"[{task_name}] backend returned {len(generations)} generations for "
+                    f"sample {output.sample_id}, expected {len(missing)}"
+                )
 
-        try:
-            for output in generated_outputs:
-                sample = samples_by_id[output.sample_id]
-                missing = pending_indices[output.sample_id]
-                generations = list(output.generations)
-                if len(generations) < len(missing):
-                    generations.extend([""] * (len(missing) - len(generations)))
+        generated_scores = _score_generation_outputs(
+            metrics_module=metrics_module,
+            samples_by_id=samples_by_id,
+            outputs=generated_outputs,
+            metric_options={**metric_options, "n": n},
+            total_records=pending_record_count,
+            progress_desc=f"[{task_name}] scoring",
+        )
 
-                rows_to_write: list[dict[str, Any]] = []
-                for local_idx, gen_idx in enumerate(missing):
-                    generation_text = generations[local_idx]
-                    error = output.error
-                    score = 0.0
-                    parsed = None
-                    meta: dict[str, Any] = {}
-                    is_pass = False
+        rows_to_write: list[dict[str, Any]] = []
+        for output in generated_outputs:
+            sample = samples_by_id[output.sample_id]
+            missing = pending_indices[output.sample_id]
+            generations = list(output.generations)
+            scores = generated_scores[output.sample_id]
+            for local_idx, gen_idx in enumerate(missing):
+                score, is_pass, parsed, meta = scores[local_idx]
+                record = GenerationRecord(
+                    sample_id=sample.id,
+                    gen_idx=gen_idx,
+                    prompt=output.prompt,
+                    generation=generations[local_idx],
+                    score=score,
+                    is_pass=is_pass,
+                    parsed=parsed,
+                    gold=sample.gold,
+                    error=None,
+                    meta=meta,
+                )
+                new_records.append(record)
+                rows_to_write.append(_record_to_json(record))
 
-                    if error is None:
-                        score, is_pass, parsed, meta, error = _score_generation_safe(
-                            metrics_module=metrics_module,
-                            sample=sample,
-                            generation=generation_text,
-                        )
-
-                    record = GenerationRecord(
-                        sample_id=sample.id,
-                        gen_idx=gen_idx,
-                        prompt=output.prompt,
-                        generation=generation_text,
-                        score=score,
-                        is_pass=is_pass,
-                        parsed=parsed,
-                        gold=sample.gold,
-                        error=error,
-                        meta=meta,
-                    )
-                    new_records.append(record)
-                    rows_to_write.append(_record_to_json(record))
-                    if score_bar is not None:
-                        score_bar.update(1)
-
-                append_jsonl(predictions_path, rows_to_write)
-        finally:
-            if score_bar is not None:
-                score_bar.close()
+        append_jsonl(predictions_path, rows_to_write)
         _info(f"[{task_name}] generation finished: new_records={len(new_records)}")
     else:
         _info(f"[{task_name}] no pending generations; skip inference")
@@ -566,6 +699,7 @@ def run_evaluation(
     bootstrap_resamples: int = 1000,
     bootstrap_seed: int = 42,
     bootstrap_confidence: float = 0.95,
+    metric_options: dict[str, Any] | None = None,
     overwrite: bool = False,
     run_id: str | None = None,
     backend_name: str = "vllm",
@@ -574,7 +708,9 @@ def run_evaluation(
     backend: GenerationBackend | None = None,
     benchmarks_dir: Path | None = None,
 ) -> dict[str, Any]:
-    effective_model_kwargs = backend_kwargs if backend_kwargs is not None else model_kwargs
+    effective_model_kwargs = (
+        backend_kwargs if backend_kwargs is not None else model_kwargs
+    )
     task_root = benchmarks_dir or BENCHMARKS_DIR
     tasks_map = discover_tasks(task_root)
     available = sorted(tasks_map.keys())
@@ -616,11 +752,13 @@ def run_evaluation(
             "tp_size": int(tensor_parallel_size),
             "model_kwargs": effective_model_kwargs or {},
         }
-        metric_options = {
+        resolved_metric_options = {
             "bootstrap_resamples": int(bootstrap_resamples),
             "bootstrap_seed": int(bootstrap_seed),
             "bootstrap_confidence": float(bootstrap_confidence),
         }
+        if metric_options:
+            resolved_metric_options.update(metric_options)
         summaries: dict[str, Any] = {}
         for task_name in selected:
             _info(f"===== start task: {task_name} =====")
@@ -635,7 +773,7 @@ def run_evaluation(
                 backend=backend,
                 task_output_dir=task_output_dir,
                 gen_overrides=gen_overrides or {},
-                metric_options=metric_options,
+                metric_options=resolved_metric_options,
                 overwrite=overwrite,
                 run_config_common=run_config_common,
             )
@@ -656,8 +794,8 @@ def run_evaluation(
         all_task_summaries = {**existing_summaries, **summaries}
         all_primary_scores = {
             task_name: {
-                "metric": task_summary.get("primary_metric"),
-                "score": task_summary.get("primary_score"),
+                "metric": task_summary["primary_metric"],
+                "score": task_summary["primary_score"],
             }
             for task_name, task_summary in all_task_summaries.items()
         }

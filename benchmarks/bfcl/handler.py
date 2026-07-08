@@ -40,11 +40,29 @@ def _iter_json_objects(text):
                 start = None
 
 
+def _parse_line_calls(text):
+    calls = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            call = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(call, dict) or "name" not in call:
+            continue
+        if str(call["name"]).strip().lower() == "none":
+            continue
+        calls.append(call)
+    return calls
+
+
 def _extract_calls(result, lenient: bool = False):
     """Tool-call extraction -> list of ``{"name":..., "parameters":...}``.
 
-    Faithful (default): only the ``<tool_call>...</tool_call>`` block, matching ToolRL's
-    handler and the GDPO Table 1 methodology (format adherence is part of the score).
+    Faithful (default): only line-delimited JSON inside ``<tool_call>...</tool_call>``,
+    matching ToolRL's handler and the GDPO Table 1 methodology.
     ``lenient=True`` (RLLA_BFCL_LENIENT_DECODE=1) additionally recovers calls the
     untrained base emits without tags (``` fences / bare JSON) -> measures raw capability
     rather than the format-penalized paper number; off by default.
@@ -53,10 +71,12 @@ def _extract_calls(result, lenient: bool = False):
         return []
     if "<tool_call>" in result:
         region = result.split("<tool_call>")[-1].split("</tool_call>")[0]
+        return _parse_line_calls(region)
     elif lenient:
         region = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL)
     else:
         return []
+
     calls = []
     for obj in _iter_json_objects(region):
         try:
@@ -69,6 +89,7 @@ def _extract_calls(result, lenient: bool = False):
             continue
         calls.append(d)
     return calls
+
 
 _TOOL_CALL_EXAMPLE = (
     '{"name": "Tool name", "parameters": {"Parameter name": "Parameter content", '
@@ -200,7 +221,9 @@ class RLLAHandler(OSSHandler):
         if self.max_context_length < input_token_count + 2:
             leftover_tokens_count = 1000
         else:
-            leftover_tokens_count = min(4096, self.max_context_length - input_token_count - 2)
+            leftover_tokens_count = min(
+                4096, self.max_context_length - input_token_count - 2
+            )
 
         extra_body = {"repetition_penalty": 1.0, "top_p": 1.0, "top_k": -1}
         if hasattr(self, "stop_token_ids"):
@@ -221,16 +244,18 @@ class RLLAHandler(OSSHandler):
 
     @override
     def decode_ast(self, result, language="Python"):
-        return [
-            {c["name"]: c.get("parameters", c.get("arguments", {}))}
-            for c in _extract_calls(result, _lenient_decode())
-        ]
+        decoded = []
+        for call in _extract_calls(result, _lenient_decode()):
+            if "parameters" not in call:
+                continue
+            decoded.append({call["name"]: call["parameters"]})
+        return decoded
 
     @override
     def decode_execute(self, result):
         calls = []
         for c in _extract_calls(result, _lenient_decode()):
-            args = c.get("parameters", c.get("arguments", {}))
+            args = c.get("parameters", {})
             arg_str = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
             calls.append(f"{c['name']}({arg_str})")
         return calls

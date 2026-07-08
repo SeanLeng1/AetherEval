@@ -1,4 +1,3 @@
-
 import json
 import tempfile
 import unittest
@@ -29,6 +28,11 @@ class IOTests(unittest.TestCase):
                     f.write(json.dumps(row) + "\n")
             loaded = read_jsonl(path)
             self.assertEqual(loaded, rows)
+
+    def test_read_jsonl_missing_file_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                read_jsonl(Path(tmp) / "missing.jsonl")
 
 
 if __name__ == "__main__":

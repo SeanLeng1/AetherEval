@@ -1,4 +1,3 @@
-
 import json
 from collections import defaultdict
 from typing import Any
@@ -21,7 +20,7 @@ def extract_last_complete_json(text: str) -> dict[str, Any] | None:
             continue
         try:
             obj, consumed = decoder.raw_decode(text[start:])
-        except Exception:
+        except json.JSONDecodeError:
             continue
         if not isinstance(obj, dict):
             continue
@@ -29,7 +28,9 @@ def extract_last_complete_json(text: str) -> dict[str, Any] | None:
         end = start + int(consumed)
         # "last complete JSON object": prefer the one that ends latest.
         # If multiple objects share the same end, keep the outermost one.
-        if end > best_end or (end == best_end and (best_start < 0 or start < best_start)):
+        if end > best_end or (
+            end == best_end and (best_start < 0 or start < best_start)
+        ):
             best_obj = obj
             best_end = end
             best_start = start
@@ -68,7 +69,9 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
         }
         return {"score": 0.0, "is_pass": False, "parsed": parsed}
 
-    pred_solution = parsed_obj.get("solution", {}) if isinstance(parsed_obj, dict) else {}
+    pred_solution = (
+        parsed_obj.get("solution", {}) if isinstance(parsed_obj, dict) else {}
+    )
     if not isinstance(pred_solution, dict):
         pred_solution = {}
         extract_method = "json_no_solution"
@@ -126,7 +129,7 @@ def aggregate(
     parsed_by_diff: dict[str, list[float]] = defaultdict(list)
 
     for item in sample_results:
-        records = to_records(item.get("records", []))
+        records = to_records(item["records"])
         if not records:
             continue
 
@@ -140,7 +143,9 @@ def aggregate(
         cell_per_sample.append(sample_cell)
         parsed_per_sample.append(sample_parsed)
 
-        meta = item.get("meta", {})
+        meta = item["meta"]
+        if not isinstance(meta, dict):
+            raise ValueError("sample_results meta must be a dict")
         difficulty = str(meta.get("difficulty", "unknown")).strip() or "unknown"
         puzzle_by_diff[difficulty].append(sample_puzzle)
         cell_by_diff[difficulty].append(sample_cell)

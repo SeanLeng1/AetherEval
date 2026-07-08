@@ -1,4 +1,3 @@
-
 import copy
 import unittest
 
@@ -7,6 +6,29 @@ from aethereval.core.types import Sample
 
 
 class MetricsTests(unittest.TestCase):
+    def _complete_sample_results(
+        self,
+        sample_results: list[dict],
+    ) -> list[dict]:
+        complete = copy.deepcopy(sample_results)
+        for item in complete:
+            item.setdefault("meta", {})
+            for record in item["records"]:
+                record.setdefault("prompt", "")
+                record.setdefault("generation", "")
+                record.setdefault("meta", {})
+        return complete
+
+    def _aggregate(
+        self,
+        metrics_module,
+        sample_results: list[dict],
+        metric_options: dict,
+    ) -> dict:
+        return metrics_module.aggregate(
+            self._complete_sample_results(sample_results), metric_options
+        )
+
     def _assert_instruction_following_micro_aggregation(self, task_name: str) -> None:
         bundle = load_task(task_name)
         metrics_module = bundle.metrics_module
@@ -50,7 +72,7 @@ class MetricsTests(unittest.TestCase):
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {})
+        result = self._aggregate(metrics_module, sample_results, {})
         self.assertAlmostEqual(result["prompt_level_strict_acc"], 0.5, places=6)
         self.assertAlmostEqual(result["prompt_level_loose_acc"], 0.5, places=6)
         # Instruction-level should be micro-averaged over all instruction instances.
@@ -141,7 +163,7 @@ class MetricsTests(unittest.TestCase):
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {})
+        result = self._aggregate(metrics_module, sample_results, {})
 
         self.assertAlmostEqual(result["prompt_level_strict_acc"], 0.5, places=6)
         self.assertAlmostEqual(result["inst_level_strict_acc"], 0.375, places=6)
@@ -241,7 +263,7 @@ class MetricsTests(unittest.TestCase):
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {})
+        result = self._aggregate(metrics_module, sample_results, {})
         self.assertAlmostEqual(result["prompt_level_strict_acc"], 0.5, places=6)
         self.assertAlmostEqual(result["inst_level_strict_acc"], 0.375, places=6)
         self.assertAlmostEqual(result["prompt_level_loose_acc"], 0.75, places=6)
@@ -277,13 +299,17 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(result1["is_pass"])
         self.assertEqual(result1["parsed"]["prediction"], "C")
 
-        result2 = metrics_module.score_generation(sample, "I think the correct option is B.")
+        result2 = metrics_module.score_generation(
+            sample, "I think the correct option is B."
+        )
         self.assertEqual(result2["score"], 0.0)
         self.assertFalse(result2["is_pass"])
         self.assertEqual(result2["parsed"]["prediction"], "B")
 
         # Do not parse letters embedded in normal words.
-        result3 = metrics_module.score_generation(sample, "Answer: because of uncertainty.")
+        result3 = metrics_module.score_generation(
+            sample, "Answer: because of uncertainty."
+        )
         self.assertEqual(result3["score"], 0.0)
         self.assertIsNone(result3["parsed"]["prediction"])
 
@@ -373,7 +399,7 @@ class MetricsTests(unittest.TestCase):
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {"n": 2})
+        result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
         self.assertIn("accuracy_stderr", result)
         self.assertAlmostEqual(result["accuracy@2"], 0.25, places=6)
@@ -422,24 +448,72 @@ class MetricsTests(unittest.TestCase):
             {
                 "sample_id": "q1",
                 "records": [
-                    {"sample_id": "q1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 2, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 3, "score": 1.0, "is_pass": True, "parsed": {}},
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 2,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 3,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {},
+                    },
                 ],
             },
             {
                 "sample_id": "q2",
                 "records": [
-                    {"sample_id": "q2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q2", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q2", "gen_idx": 2, "score": 1.0, "is_pass": True, "parsed": {}},
-                    {"sample_id": "q2", "gen_idx": 3, "score": 0.0, "is_pass": False, "parsed": {}},
+                    {
+                        "sample_id": "q2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q2",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q2",
+                        "gen_idx": 2,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q2",
+                        "gen_idx": 3,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
                 ],
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {"n": 4})
+        result = self._aggregate(metrics_module, sample_results, {"n": 4})
         self.assertAlmostEqual(result["accuracy"], 0.375, places=6)
         self.assertIn("accuracy_stderr", result)
         self.assertAlmostEqual(result["accuracy@4"], 0.375, places=6)
@@ -455,16 +529,46 @@ class MetricsTests(unittest.TestCase):
             {
                 "sample_id": "q1",
                 "records": [
-                    {"sample_id": "q1", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 2, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 3, "score": 0.0, "is_pass": False, "parsed": {}},
-                    {"sample_id": "q1", "gen_idx": 4, "score": 1.0, "is_pass": True, "parsed": {}},
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 2,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 3,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {},
+                    },
+                    {
+                        "sample_id": "q1",
+                        "gen_idx": 4,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {},
+                    },
                 ],
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {"n": 5})
+        result = self._aggregate(metrics_module, sample_results, {"n": 5})
         self.assertIn("pass@1", result)
         self.assertIn("pass@2", result)
         self.assertIn("pass@4", result)
@@ -503,20 +607,44 @@ class MetricsTests(unittest.TestCase):
                 "sample_id": "m1",
                 "meta": {"category": "business"},
                 "records": [
-                    {"sample_id": "m1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {"prediction": "I"}},
-                    {"sample_id": "m1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction": "A"}},
+                    {
+                        "sample_id": "m1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {"prediction": "I"},
+                    },
+                    {
+                        "sample_id": "m1",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction": "A"},
+                    },
                 ],
             },
             {
                 "sample_id": "m2",
                 "meta": {"category": "law"},
                 "records": [
-                    {"sample_id": "m2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {"prediction": "B"}},
-                    {"sample_id": "m2", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction": "C"}},
+                    {
+                        "sample_id": "m2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction": "B"},
+                    },
+                    {
+                        "sample_id": "m2",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction": "C"},
+                    },
                 ],
             },
         ]
-        result = metrics_module.aggregate(sample_results, {"n": 2})
+        result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
         self.assertAlmostEqual(result["accuracy@2"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
@@ -551,18 +679,30 @@ class MetricsTests(unittest.TestCase):
                 "sample_id": "a1",
                 "meta": {"subset": "sat-en"},
                 "records": [
-                    {"sample_id": "a1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {"prediction": "D"}},
+                    {
+                        "sample_id": "a1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {"prediction": "D"},
+                    },
                 ],
             },
             {
                 "sample_id": "a2",
                 "meta": {"subset": "logiqa-en"},
                 "records": [
-                    {"sample_id": "a2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {"prediction": "A"}},
+                    {
+                        "sample_id": "a2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction": "A"},
+                    },
                 ],
             },
         ]
-        result = metrics_module.aggregate(sample_results, {"n": 1})
+        result = self._aggregate(metrics_module, sample_results, {"n": 1})
         self.assertAlmostEqual(result["accuracy"], 0.5, places=6)
         self.assertAlmostEqual(result["pass@1"], 0.5, places=6)
         self.assertAlmostEqual(result["accuracy_sat_en"], 1.0, places=6)
@@ -654,20 +794,44 @@ class MetricsTests(unittest.TestCase):
                 "sample_id": "bbh_1",
                 "meta": {"subset": "date_understanding"},
                 "records": [
-                    {"sample_id": "bbh_1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {"prediction_norm": "b"}},
-                    {"sample_id": "bbh_1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction_norm": ""}},
+                    {
+                        "sample_id": "bbh_1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {"prediction_norm": "b"},
+                    },
+                    {
+                        "sample_id": "bbh_1",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction_norm": ""},
+                    },
                 ],
             },
             {
                 "sample_id": "bbh_2",
                 "meta": {"subset": "boolean_expressions"},
                 "records": [
-                    {"sample_id": "bbh_2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {"prediction_norm": "false"}},
-                    {"sample_id": "bbh_2", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"prediction_norm": ""}},
+                    {
+                        "sample_id": "bbh_2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction_norm": "false"},
+                    },
+                    {
+                        "sample_id": "bbh_2",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"prediction_norm": ""},
+                    },
                 ],
             },
         ]
-        result = metrics_module.aggregate(sample_results, {"n": 2})
+        result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["exact_match"], 0.25, places=6)
         self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
@@ -687,9 +851,7 @@ class MetricsTests(unittest.TestCase):
         )
         scored = metrics_module.score_generation(
             sample,
-            (
-                '{"reasoning":"dummy","solution":{"House 1":{"Name":"Alice"}}}'
-            ),
+            ('{"reasoning":"dummy","solution":{"House 1":{"Name":"Alice"}}}'),
         )
         self.assertEqual(scored["score"], 1.0)
         self.assertAlmostEqual(scored["parsed"]["cell_accuracy"], 1.0, places=6)
@@ -735,7 +897,7 @@ class MetricsTests(unittest.TestCase):
                 ],
             },
         ]
-        result = metrics_module.aggregate(sample_results, {"n": 2})
+        result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["puzzle_accuracy"], 0.5, places=6)
         self.assertAlmostEqual(result["cell_accuracy"], 0.5, places=6)
         self.assertAlmostEqual(result["parsed"], 1.0, places=6)
@@ -793,21 +955,45 @@ class MetricsTests(unittest.TestCase):
                 "sample_id": "l1",
                 "meta": {"platform": "atcoder"},
                 "records": [
-                    {"sample_id": "l1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": {"had_code": True}},
-                    {"sample_id": "l1", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"had_code": True}},
+                    {
+                        "sample_id": "l1",
+                        "gen_idx": 0,
+                        "score": 1.0,
+                        "is_pass": True,
+                        "parsed": {"had_code": True},
+                    },
+                    {
+                        "sample_id": "l1",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"had_code": True},
+                    },
                 ],
             },
             {
                 "sample_id": "l2",
                 "meta": {"platform": "leetcode"},
                 "records": [
-                    {"sample_id": "l2", "gen_idx": 0, "score": 0.0, "is_pass": False, "parsed": {"had_code": False}},
-                    {"sample_id": "l2", "gen_idx": 1, "score": 0.0, "is_pass": False, "parsed": {"had_code": True}},
+                    {
+                        "sample_id": "l2",
+                        "gen_idx": 0,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"had_code": False},
+                    },
+                    {
+                        "sample_id": "l2",
+                        "gen_idx": 1,
+                        "score": 0.0,
+                        "is_pass": False,
+                        "parsed": {"had_code": True},
+                    },
                 ],
             },
         ]
 
-        result = metrics_module.aggregate(sample_results, {"n": 2})
+        result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
         self.assertAlmostEqual(result["accuracy@2"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
@@ -866,8 +1052,14 @@ class MetricsTests(unittest.TestCase):
             "Provide CONCISE reasoning on how to arrive at the answer.",
             prompt_no_starter[1]["content"],
         )
-        self.assertIn("Read the inputs from stdin solve the problem", prompt_no_starter[1]["content"])
-        self.assertIn("### Answer: (use the provided format with backticks)", prompt_no_starter[1]["content"])
+        self.assertIn(
+            "Read the inputs from stdin solve the problem",
+            prompt_no_starter[1]["content"],
+        )
+        self.assertIn(
+            "### Answer: (use the provided format with backticks)",
+            prompt_no_starter[1]["content"],
+        )
 
         sample_with_starter = Sample(
             id="lcb_prompt_func",
@@ -902,7 +1094,7 @@ class MetricsTests(unittest.TestCase):
             meta={"entry_point": "add"},
             data={
                 "task_id": "HumanEval/test_add",
-                "prompt": "def add(a, b):\n    \"\"\"Return sum of two numbers.\"\"\"\n",
+                "prompt": 'def add(a, b):\n    """Return sum of two numbers."""\n',
                 "entry_point": "add",
                 "test": (
                     "def check(candidate):\n"
@@ -922,9 +1114,13 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(prompt[1]["role"], "user")
         self.assertIn("### Question:", prompt[1]["content"])
         self.assertIn("### Format:", prompt[1]["content"])
-        self.assertIn("Provide a SHORT reasoning on how to solve the task", prompt[1]["content"])
+        self.assertIn(
+            "Provide a SHORT reasoning on how to solve the task", prompt[1]["content"]
+        )
         self.assertIn("# YOUR CODE HERE", prompt[1]["content"])
-        self.assertIn("### Answer: (use the provided format with backticks)", prompt[1]["content"])
+        self.assertIn(
+            "### Answer: (use the provided format with backticks)", prompt[1]["content"]
+        )
         self.assertIn(sample.data["prompt"], prompt[1]["content"])
 
         scored = metrics_module.score_generation(
@@ -946,7 +1142,7 @@ class MetricsTests(unittest.TestCase):
                 "prompt": (
                     "from typing import List\n\n"
                     "def first_item(items: List[int]) -> int:\n"
-                    "    \"\"\"Return the first item.\"\"\"\n"
+                    '    """Return the first item."""\n'
                 ),
                 "entry_point": "first_item",
                 "test": (
@@ -968,7 +1164,9 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(scored_full["parsed"]["base_pass"])
         self.assertTrue(scored_full["parsed"]["plus_pass"])
 
-    def test_humaneval_plus_score_generation_preserves_first_line_indentation(self) -> None:
+    def test_humaneval_plus_score_generation_preserves_first_line_indentation(
+        self,
+    ) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module
 
@@ -978,7 +1176,7 @@ class MetricsTests(unittest.TestCase):
             meta={"entry_point": "add"},
             data={
                 "task_id": "HumanEval/test_indent",
-                "prompt": "def add(a, b):\n    \"\"\"Return sum of two numbers.\"\"\"\n",
+                "prompt": 'def add(a, b):\n    """Return sum of two numbers."""\n',
                 "entry_point": "add",
                 "test": (
                     "def check(candidate):\n"
@@ -1044,7 +1242,7 @@ class MetricsTests(unittest.TestCase):
                 ],
             },
         ]
-        result = metrics_module.aggregate(sample_results, {"n": 2})
+        result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
         self.assertAlmostEqual(result["accuracy_plus"], 0.25, places=6)
         self.assertAlmostEqual(result["accuracy_base"], 0.25, places=6)
@@ -1070,8 +1268,7 @@ class MetricsTests(unittest.TestCase):
                     "    assert candidate([5.0, 4.0, 6.0]) == (4.0, 5.0)\n"
                 ),
                 "canonical_solution": (
-                    "    numbers.sort()\n"
-                    "    return (numbers[0], numbers[1])\n"
+                    "    numbers.sort()\n    return (numbers[0], numbers[1])\n"
                 ),
                 "base_input": [[[3.0, 1.0, 2.0]], [[5.0, 4.0, 6.0]]],
                 "plus_input": [[[9.0, 7.0, 8.0]]],

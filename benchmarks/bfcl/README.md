@@ -35,19 +35,20 @@ local **sglang** OSS handler, and [`_compat.py`](_compat.py) stubs those unused 
 
 ```bash
 # base HF model (registry name == HF id):
-python -m benchmarks.bfcl \
+aethereval --external-benchmark bfcl \
   --model Qwen/Qwen2.5-1.5B-Instruct \
   --output-dir outputs/bfcl-base --categories all --num-gpus 1
 
 # a GDPO/GRPO checkpoint (any registry name + a local dir):
-python -m benchmarks.bfcl \
+aethereval --external-benchmark bfcl \
   --model rlla-gdpo --model-path /path/to/hf_ckpt \
   --output-dir outputs/bfcl-gdpo --categories all --num-gpus 1
 ```
 
 `--categories` accepts BFCL collections/categories: `all`, `non_live`, `live`,
 `multi_turn`, or individual ones (`live_simple`, `multi_turn_base`, …). Backend defaults
-to **sglang**.
+to **sglang**. If `--num-gpus` is omitted, the AetherEval CLI uses `--tp-size` as the
+BFCL GPU count when it is provided.
 
 ### Python API
 
@@ -92,11 +93,12 @@ Qwen2.5-Instruct-1.5B  Live 37.89  Multi 0.12  Non-Live 15.63  Avg 17.88  Format
 
 ## Files
 
-- `handler.py` — `RLLAHandler` (bfcl `OSSHandler`): ToolRL prompt + `<tool_call>` decode.
+- `handler.py` — `RLLAHandler` (bfcl `OSSHandler`): faithful ToolRL
+  `benchmarks/BFCL/rlla_qwen.py` prompt + `<tool_call>` decode, adapted to `bfcl_eval`.
 - `register.py` — inject the handler into bfcl's `MODEL_CONFIG_MAPPING`.
 - `external.py` — `ExternalRunSpec` / `ExternalResult` / `run()` + score parsing.
 - `_compat.py` — stub drifted optional API SDKs so `bfcl_eval` imports under `--no-deps`.
-- `__main__.py` — CLI.
+- `__main__.py` — compatibility CLI; prefer `aethereval --external-benchmark bfcl`.
 
 > Multi-turn note: BFCL's new handler API drops the per-call `turn_type`; the handler
 > infers multi-turn from tool-feedback in the message history. Single-turn (Non-Live /

@@ -1,4 +1,3 @@
-
 import warnings
 from typing import Any
 
@@ -34,7 +33,7 @@ def _prompt_to_text(prompt: PromptType, tokenizer: Any) -> str:
                     tokenize=False,
                     add_generation_prompt=True,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except ValueError as exc:
                 _warn_chat_template_fallback(
                     f"apply_chat_template failed: {type(exc).__name__}: {exc}"
                 )
@@ -42,12 +41,16 @@ def _prompt_to_text(prompt: PromptType, tokenizer: Any) -> str:
             _warn_chat_template_fallback("missing apply_chat_template")
 
         lines = []
-        for message in prompt:
-            role = message.get("role", "user")
-            content = message.get("content", "")
+        for idx, message in enumerate(prompt):
+            if not isinstance(message, dict):
+                raise ValueError(
+                    f"Invalid chat message at index {idx}: expected dict, got {type(message).__name__}"
+                )
+            role = message["role"]
+            content = message["content"]
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
-    return str(prompt)
+    raise TypeError(f"Unsupported prompt type: {type(prompt).__name__}")
 
 
 def load_chat_tokenizer(

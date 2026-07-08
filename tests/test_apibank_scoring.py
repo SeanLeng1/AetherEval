@@ -1,6 +1,12 @@
-
 import unittest
+from pathlib import Path
 
+from aethereval.core.types import Sample
+from benchmarks.apibank.metrics import (
+    PRIMARY_METRIC,
+    aggregate as aggregate_native,
+    score_generation as score_generation_native,
+)
 from benchmarks.apibank.scoring import (
     aggregate_scores,
     compute_correctness_score,
@@ -9,6 +15,7 @@ from benchmarks.apibank.scoring import (
     score_record,
     validate_output_format,
 )
+from benchmarks.apibank.task import build_prompt, load_samples
 
 ANSWER = [{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}]
 
@@ -26,7 +33,12 @@ RAW_MISSING_TAGS = '{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}
 def _scored(raw: str, answer=ANSWER) -> dict:
     thought, tool_calls = parse_assistant_output(raw)
     return score_record(
-        {"data": {"answer": answer}, "raw_output": raw, "thought": thought, "tool_calls": tool_calls}
+        {
+            "data": {"answer": answer},
+            "raw_output": raw,
+            "thought": thought,
+            "tool_calls": tool_calls,
+        }
     )
 
 
@@ -60,22 +72,35 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(compute_correctness_score([ANSWER[0]], ANSWER[0]), 1)
         # String tool call is json-parsed.
         self.assertEqual(
-            compute_correctness_score(['{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}'], ANSWER), 1
+            compute_correctness_score(
+                ['{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}'], ANSWER
+            ),
+            1,
         )
         # Malformed gold answer -> None (excluded from acc).
         self.assertIsNone(compute_correctness_score([ANSWER[0]], "not-a-dict"))
         # Malformed string tool call aborts matching -> 0.
         self.assertEqual(compute_correctness_score(["{bad json", ANSWER[0]], ANSWER), 0)
+        # Reference script treats non-dict containers as non-matches and keeps scanning.
+        self.assertEqual(compute_correctness_score([[], ANSWER[0]], ANSWER), 1)
 
     def test_format_variants(self) -> None:
-        self.assertEqual(validate_output_format("<think>t</think>\n<response>r</response>"), (1, []))
-        self.assertEqual(validate_output_format("<think>t</think>"), (0, ["missing_tool_call_and_response"]))
         self.assertEqual(
-            validate_output_format("<think>t\n<tool_call>x</tool_call>"), (0, ["unbalanced_think_tags"])
+            validate_output_format("<think>t</think>\n<response>r</response>"), (1, [])
+        )
+        self.assertEqual(
+            validate_output_format("<think>t</think>"),
+            (0, ["missing_tool_call_and_response"]),
+        )
+        self.assertEqual(
+            validate_output_format("<think>t\n<tool_call>x</tool_call>"),
+            (0, ["unbalanced_think_tags"]),
         )
         self.assertEqual(validate_output_format(""), (0, ["empty_output"]))
         self.assertEqual(
-            validate_output_format("<think>t</think><response>r</response><tool_call>x</tool_call>"),
+            validate_output_format(
+                "<think>t</think><response>r</response><tool_call>x</tool_call>"
+            ),
             (0, ["response_before_tool_call_end", "tool_call_after_response"]),
         )
 
@@ -102,10 +127,68 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(record["length_avg_lv1"], 0.01)
         self.assertEqual(record["length_avg_lv2"], 0.0)
         self.assertEqual(record["overall_length_avg"], 0.0067)
+        self.assertEqual(record["Level 1 Acc."], 50.0)
+        self.assertEqual(record["Level 2 Acc."], 0.0)
+        self.assertIsNone(record["Level 3 Acc."])
+        self.assertEqual(record["lv1_format"], 100.0)
+        self.assertEqual(record["overall_format"], 66.67)
+        self.assertEqual(record["lv1_length"], 0.01)
+        self.assertEqual(record["overall_length"], 0.0067)
+        self.assertEqual(record["CorrectAcc."], 33.33)
+        self.assertEqual(record["FormatAcc."], 66.67)
+        self.assertEqual(record["LengthRew."], 0.0067)
+        self.assertEqual(record["LengthReward"], 0.0067)
+        self.assertEqual(record["Overall"], 1.0067)
         self.assertEqual(record["think_word_count_avg_lv1"], 4.0)
         self.assertEqual(record["overall_think_word_count_avg"], 2.6667)
         self.assertEqual(record["reward_avg_lv1"], 0.01)
         self.assertEqual(record["overall_reward_avg"], 0.0067)
+
+    def test_native_task_loads_jsonl(self) -> None:
+        task_dir = Path(__file__).resolve().parents[1] / "benchmarks" / "apibank"
+        samples = load_samples(task_dir)
+        self.assertEqual(len(samples), 597)
+        self.assertEqual(samples[0].id, "Level1_0")
+        self.assertEqual(samples[0].meta["level"], 1)
+        prompt = build_prompt(samples[0])
+        self.assertEqual([message["role"] for message in prompt], ["system", "user"])
+        self.assertTrue(prompt[0]["content"])
+        self.assertTrue(prompt[1]["content"])
+
+    def test_native_metrics_path(self) -> None:
+        sample = Sample(id="Level1_0", gold=ANSWER, meta={"level": 1})
+        scored = score_generation_native(sample, RAW_MATCH)
+        record = {
+            "sample_id": sample.id,
+            "gen_idx": 0,
+            "prompt": [],
+            "generation": RAW_MATCH,
+            "score": scored["score"],
+            "is_pass": scored["is_pass"],
+            "parsed": scored["parsed"],
+            "gold": sample.gold,
+            "error": None,
+            "meta": scored["meta"],
+        }
+        metrics = aggregate_native(
+            [
+                {
+                    "sample_id": sample.id,
+                    "gold": sample.gold,
+                    "meta": sample.meta,
+                    "scores": [scored["score"]],
+                    "passes": [scored["is_pass"]],
+                    "records": [record],
+                }
+            ],
+            {"n": 1},
+        )
+
+        self.assertEqual(PRIMARY_METRIC, "Overall")
+        self.assertEqual(metrics["CorrectAcc."], 100.0)
+        self.assertEqual(metrics["FormatAcc."], 100.0)
+        self.assertEqual(metrics["LengthRew."], 0.01)
+        self.assertEqual(metrics["Overall"], 2.01)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-
 import csv
 import io
 import json
@@ -7,7 +6,9 @@ from pathlib import Path
 from urllib.request import urlopen
 
 
-GPQA_DIAMOND_CSV_URL = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
+GPQA_DIAMOND_CSV_URL = (
+    "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
+)
 
 
 def _clean(value: object) -> str:

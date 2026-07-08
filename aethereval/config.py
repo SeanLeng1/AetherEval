@@ -1,9 +1,8 @@
-
 import ast
 from pathlib import Path
 from typing import Any
 
-SUPPORTED_BACKENDS = {"vllm", "sglang"}
+from aethereval.backends.factory import SUPPORTED_BACKENDS
 
 
 def _cfg_get(cfg: dict[str, Any], key: str, section: str | None = None) -> Any:
@@ -30,7 +29,7 @@ def _parse_scalar(value: str) -> Any:
         return None
     try:
         return ast.literal_eval(text)
-    except Exception:  # noqa: BLE001
+    except (ValueError, SyntaxError):
         return text
 
 
@@ -124,7 +123,9 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             args.max_new_tokens,
             _cfg_get(cfg, "max_new_tokens", "generation"),
         ),
-        "temperature": _pick(args.temperature, _cfg_get(cfg, "temperature", "generation")),
+        "temperature": _pick(
+            args.temperature, _cfg_get(cfg, "temperature", "generation")
+        ),
         "top_p": _pick(args.top_p, _cfg_get(cfg, "top_p", "generation")),
         "top_k": _pick(args.top_k, _cfg_get(cfg, "top_k", "generation")),
         "min_p": _pick(args.min_p, _cfg_get(cfg, "min_p", "generation")),
@@ -152,6 +153,37 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             0.95,
         )
     )
+    metric_options = {
+        "rm_model_path": _pick(
+            getattr(args, "rm_model_path", None),
+            _cfg_get(cfg, "rm_model_path", "metrics"),
+        ),
+        "cm_model_path": _pick(
+            getattr(args, "cm_model_path", None),
+            _cfg_get(cfg, "cm_model_path", "metrics"),
+        ),
+        "rm_batch_size": _pick(
+            getattr(args, "rm_batch_size", None),
+            _cfg_get(cfg, "rm_batch_size", "metrics"),
+        ),
+        "rm_max_length": _pick(
+            getattr(args, "rm_max_length", None),
+            _cfg_get(cfg, "rm_max_length", "metrics"),
+        ),
+        "rm_device": _pick(
+            getattr(args, "rm_device", None),
+            _cfg_get(cfg, "rm_device", "metrics"),
+        ),
+        "rm_dtype": _pick(
+            getattr(args, "rm_dtype", None),
+            _cfg_get(cfg, "rm_dtype", "metrics"),
+        ),
+        "rm_trust_remote_code": _pick(
+            getattr(args, "rm_trust_remote_code", None),
+            _cfg_get(cfg, "rm_trust_remote_code", "metrics"),
+        ),
+    }
+    metric_options = {k: v for k, v in metric_options.items() if v is not None}
 
     vllm_kwargs = {
         "gpu_memory_utilization": _pick(
@@ -165,7 +197,9 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "dtype": _pick(args.dtype, _cfg_get(cfg, "dtype", "vllm")),
     }
     cfg_extra_model_kwargs = _cfg_get(cfg, "extra_model_kwargs", "vllm")
-    if cfg_extra_model_kwargs is not None and not isinstance(cfg_extra_model_kwargs, dict):
+    if cfg_extra_model_kwargs is not None and not isinstance(
+        cfg_extra_model_kwargs, dict
+    ):
         raise ValueError("vllm.extra_model_kwargs must be a mapping/object")
     if isinstance(cfg_extra_model_kwargs, dict):
         vllm_kwargs.update(cfg_extra_model_kwargs)
@@ -215,6 +249,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "bootstrap_resamples": bootstrap_resamples,
         "bootstrap_seed": bootstrap_seed,
         "bootstrap_confidence": bootstrap_confidence,
+        "metric_options": metric_options,
         "backend_kwargs": backend_kwargs,
         "model_kwargs": backend_kwargs,
         "vllm_kwargs": vllm_kwargs,

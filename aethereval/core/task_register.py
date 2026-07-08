@@ -1,4 +1,3 @@
-
 import importlib.util
 from pathlib import Path
 from types import ModuleType
@@ -40,7 +39,9 @@ def list_tasks(benchmarks_dir: Path | None = None) -> list[str]:
     return sorted(discover_tasks(benchmarks_dir).keys())
 
 
-def list_task_default_gens(benchmarks_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+def list_task_default_gens(
+    benchmarks_dir: Path | None = None,
+) -> dict[str, dict[str, Any]]:
     tasks = discover_tasks(benchmarks_dir)
     resolved: dict[str, dict[str, Any]] = {}
     for task_name in sorted(tasks.keys()):
@@ -92,7 +93,9 @@ def _validate_task_contract(module: ModuleType) -> None:
         raise ValueError("TASK_NAME must be a non-empty string")
     if not isinstance(data_file, str) or not data_file.endswith(".jsonl"):
         raise ValueError("DATA_FILE must be a .jsonl path under the task folder")
-    if hasattr(module, "DEFAULT_GEN") and not isinstance(getattr(module, "DEFAULT_GEN"), dict):
+    if hasattr(module, "DEFAULT_GEN") and not isinstance(
+        getattr(module, "DEFAULT_GEN"), dict
+    ):
         raise ValueError("DEFAULT_GEN must be a dict when provided")
 
 

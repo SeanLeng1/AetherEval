@@ -1,4 +1,3 @@
-
 import unittest
 import warnings
 
@@ -63,11 +62,19 @@ class BackendPromptTests(unittest.TestCase):
     def test_fallback_warning_only_emitted_once(self) -> None:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            first = prompt_backend._prompt_to_text([{"role": "user", "content": "a"}], tokenizer=object())
-            second = prompt_backend._prompt_to_text([{"role": "user", "content": "b"}], tokenizer=object())
+            first = prompt_backend._prompt_to_text(
+                [{"role": "user", "content": "a"}], tokenizer=object()
+            )
+            second = prompt_backend._prompt_to_text(
+                [{"role": "user", "content": "b"}], tokenizer=object()
+            )
         self.assertEqual(first, "user: a")
         self.assertEqual(second, "user: b")
         self.assertEqual(len(caught), 1)
+
+    def test_fallback_requires_role_and_content(self) -> None:
+        with self.assertRaises(KeyError):
+            prompt_backend._prompt_to_text([{"role": "user"}], tokenizer=object())
 
 
 if __name__ == "__main__":

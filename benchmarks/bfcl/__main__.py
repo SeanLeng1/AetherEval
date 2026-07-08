@@ -1,9 +1,9 @@
 """CLI for the BFCL-v3 external benchmark.
 
-    # base HF model (registry name = HF id):
-    python -m benchmarks.bfcl --model Qwen/Qwen2.5-1.5B-Instruct \
+    # preferred:
+    aethereval --external-benchmark bfcl --model Qwen/Qwen2.5-1.5B-Instruct \
         --output-dir outputs/bfcl-base --categories non_live
-    # local checkpoint (any registry name + --model-path):
+    # compatibility:
     python -m benchmarks.bfcl --model rlla-gdpo --model-path /ckpt \
         --output-dir outputs/bfcl-gdpo
 
@@ -18,17 +18,29 @@ from .external import ExternalRunSpec, run
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="BFCL-v3 eval for ToolRL/GDPO models")
-    ap.add_argument("--model", required=True,
-                    help="registry name = HF id (base) or any name paired with --model-path")
-    ap.add_argument("--model-path", default=None, help="local checkpoint dir (overrides HF load)")
+    ap.add_argument(
+        "--model",
+        required=True,
+        help="registry name = HF id (base) or any name paired with --model-path",
+    )
+    ap.add_argument(
+        "--model-path", default=None, help="local checkpoint dir (overrides HF load)"
+    )
     ap.add_argument("--output-dir", required=True, type=Path)
-    ap.add_argument("--categories", default="all",
-                    help="comma-separated bfcl categories/collections (all|non_live|live|multi_turn|...)")
+    ap.add_argument(
+        "--categories",
+        default="all",
+        help="comma-separated bfcl categories/collections (all|non_live|live|multi_turn|...)",
+    )
     ap.add_argument("--backend", default="sglang", choices=["sglang", "vllm"])
     ap.add_argument("--num-gpus", type=int, default=1)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     ap.add_argument("--temperature", type=float, default=0.001)
-    ap.add_argument("--skip-generation", action="store_true", help="only re-evaluate existing results")
+    ap.add_argument(
+        "--skip-generation",
+        action="store_true",
+        help="only re-evaluate existing results",
+    )
     ap.add_argument("--skip-evaluation", action="store_true", help="only generate")
     args = ap.parse_args()
 

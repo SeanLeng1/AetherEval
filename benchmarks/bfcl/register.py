@@ -8,12 +8,6 @@ the ToolRL text format, not native function-calling JSON args).
 
 from ._compat import ensure_bfcl_importable
 
-ensure_bfcl_importable()  # stub drifted optional API SDKs before model_config imports
-
-from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING, ModelConfig
-
-from .handler import RLLAHandler
-
 DEFAULT_REGISTRY_NAME = "rlla-qwen"
 
 
@@ -30,6 +24,12 @@ def register_rlla_model(
     name together with ``model_path`` for a local checkpoint. (``ModelConfig.model_name``
     is unused by the OSS handler in BFCL v3.)
     """
+    ensure_bfcl_importable()
+
+    from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING, ModelConfig
+
+    from .handler import RLLAHandler
+
     MODEL_CONFIG_MAPPING[registry_name] = ModelConfig(
         model_name=registry_name,
         display_name=f"{registry_name} (ToolRL/GDPO)",

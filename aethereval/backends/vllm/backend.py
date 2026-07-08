@@ -1,4 +1,3 @@
-
 from collections import defaultdict
 from typing import Any
 
@@ -45,33 +44,28 @@ def _run_generation(
     for n, items in bucketed.items():
         sampling_params = _build_sampling_params(vllm_module, gen_cfg, n=n)
         prompts = [_prompt_to_text(x["prompt"], tokenizer) for x in items]
-        try:
-            outputs = llm.generate(
-                prompts=prompts,
-                sampling_params=sampling_params,
-                use_tqdm=show_progress,
+        outputs = llm.generate(
+            prompts=prompts,
+            sampling_params=sampling_params,
+            use_tqdm=show_progress,
+        )
+        if len(outputs) != len(items):
+            raise RuntimeError(
+                f"vLLM returned {len(outputs)} outputs for {len(items)} prompts."
             )
-            for item, output in zip(items, outputs):
-                texts = [candidate.text for candidate in output.outputs]
-                if len(texts) < n:
-                    texts.extend([""] * (n - len(texts)))
-                result_by_index[item["idx"]] = {
-                    "idx": item["idx"],
-                    "sample_id": item["sample_id"],
-                    "prompt": item["prompt"],
-                    "generations": texts[:n],
-                    "error": None,
-                }
-        except Exception as exc:  # noqa: BLE001
-            err = f"{type(exc).__name__}: {exc}"
-            for item in items:
-                result_by_index[item["idx"]] = {
-                    "idx": item["idx"],
-                    "sample_id": item["sample_id"],
-                    "prompt": item["prompt"],
-                    "generations": [""] * n,
-                    "error": err,
-                }
+        for item, output in zip(items, outputs):
+            texts = [candidate.text for candidate in output.outputs]
+            if len(texts) != n:
+                raise RuntimeError(
+                    f"vLLM returned {len(texts)} candidates for sample {item['sample_id']}; expected {n}."
+                )
+            result_by_index[item["idx"]] = {
+                "idx": item["idx"],
+                "sample_id": item["sample_id"],
+                "prompt": item["prompt"],
+                "generations": texts,
+                "error": None,
+            }
 
     return [result_by_index[i] for i in sorted(result_by_index)]
 

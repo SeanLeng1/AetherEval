@@ -1,5 +1,5 @@
-
 import base64
+import binascii
 import json
 import pickle
 import zlib
@@ -30,9 +30,7 @@ _FORMATTING_WITHOUT_STARTER_CODE = (
     "as follows. Ensure that when the python program runs, it reads the inputs, runs "
     "the algorithm and writes output to STDOUT."
 )
-_REASONING_PREFIX = (
-    "Provide CONCISE reasoning on how to arrive at the answer."
-)
+_REASONING_PREFIX = "Provide CONCISE reasoning on how to arrive at the answer."
 
 
 def _ensure_str_list(value: Any, key: str, sample_id: str) -> list[str]:
@@ -47,35 +45,52 @@ def _ensure_str_list(value: Any, key: str, sample_id: str) -> list[str]:
     return out
 
 
-def _safe_json_loads(raw: Any, default: Any) -> Any:
+def _json_loads_field(raw: Any, key: str, sample_id: str) -> Any:
     if isinstance(raw, str):
         try:
             return json.loads(raw)
-        except Exception:
-            return default
-    if raw is None:
-        return default
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{key} is invalid JSON for sample {sample_id}") from exc
     return raw
 
 
-def _decode_private_test_cases(encoded: str) -> list[dict[str, Any]]:
+def _decode_private_test_cases(encoded: str, sample_id: str) -> list[dict[str, Any]]:
     payload = str(encoded or "").strip()
     if not payload:
         return []
     try:
         loaded = json.loads(payload)
-        return loaded if isinstance(loaded, list) else []
-    except Exception:
-        pass
+    except json.JSONDecodeError:
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+            decompressed = zlib.decompress(decoded)
+            unpacked = pickle.loads(decompressed)
+            loaded = json.loads(unpacked)
+        except (
+            binascii.Error,
+            EOFError,
+            json.JSONDecodeError,
+            pickle.UnpicklingError,
+            TypeError,
+            ValueError,
+            zlib.error,
+        ) as exc:
+            raise ValueError(
+                f"private_test_cases is invalid for sample {sample_id}"
+            ) from exc
 
-    try:
-        decoded = base64.b64decode(payload)
-        decompressed = zlib.decompress(decoded)
-        unpacked = pickle.loads(decompressed)
-        loaded = json.loads(unpacked)
-        return loaded if isinstance(loaded, list) else []
-    except Exception:
-        return []
+    if not isinstance(loaded, list):
+        raise ValueError(
+            f"private_test_cases must decode to a list for sample {sample_id}"
+        )
+    return loaded
+
+
+def _case_field(case: dict[str, Any], key: str, sample_id: str, idx: int) -> str:
+    value = str(case[key])
+    if value == "":
+        raise ValueError(f"test_cases[{idx}].{key} is empty for sample {sample_id}")
+    return value
 
 
 def load_samples(task_dir: Path) -> list[Sample]:
@@ -86,26 +101,35 @@ def load_samples(task_dir: Path) -> list[Sample]:
         if not isinstance(row, dict):
             raise ValueError("LiveCodeBench row must be a JSON object")
 
-        sample_id = str(row.get("id", "")).strip()
+        sample_id = str(row["id"]).strip()
         if not sample_id:
             raise ValueError("LiveCodeBench row missing 'id'")
 
-        question = str(row.get("question_content", "")).strip()
+        question = str(row["question_content"]).strip()
         if not question:
             raise ValueError(f"Empty question_content for sample {sample_id}")
 
         starter_code = str(row.get("starter_code", ""))
 
-        public_cases = _safe_json_loads(row.get("public_test_cases"), [])
-        private_cases = _decode_private_test_cases(str(row.get("private_test_cases", "")))
+        public_cases = _json_loads_field(
+            row["public_test_cases"], "public_test_cases", sample_id
+        )
+        private_cases = _decode_private_test_cases(
+            str(row["private_test_cases"]), sample_id
+        )
         if not isinstance(public_cases, list):
-            public_cases = []
-        if not isinstance(private_cases, list):
-            private_cases = []
+            raise ValueError(f"public_test_cases must be a list for sample {sample_id}")
 
         all_cases = list(public_cases) + list(private_cases)
-        inputs = [str(case.get("input", "")) for case in all_cases if isinstance(case, dict)]
-        outputs = [str(case.get("output", "")) for case in all_cases if isinstance(case, dict)]
+        inputs: list[str] = []
+        outputs: list[str] = []
+        for idx, case in enumerate(all_cases):
+            if not isinstance(case, dict):
+                raise ValueError(
+                    f"test_cases[{idx}] must be an object for sample {sample_id}"
+                )
+            inputs.append(_case_field(case, "input", sample_id, idx))
+            outputs.append(_case_field(case, "output", sample_id, idx))
         inputs = _ensure_str_list(inputs, "inputs", sample_id)
         outputs = _ensure_str_list(outputs, "outputs", sample_id)
         if len(inputs) != len(outputs):
@@ -114,9 +138,9 @@ def load_samples(task_dir: Path) -> list[Sample]:
                 f"{len(inputs)} vs {len(outputs)}"
             )
 
-        metadata = _safe_json_loads(row.get("metadata"), {})
+        metadata = _json_loads_field(row["metadata"], "metadata", sample_id)
         if not isinstance(metadata, dict):
-            metadata = {}
+            raise ValueError(f"metadata must be a JSON object for sample {sample_id}")
 
         fn_name_raw = metadata.get("func_name")
         fn_name = str(fn_name_raw).strip() if fn_name_raw is not None else None
@@ -158,13 +182,11 @@ def build_prompt(sample: Sample) -> list[dict[str, str]]:
     format_instruction: str
     if starter_code:
         format_instruction = (
-            f"{_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
-            f"```python\n{starter_code}\n```"
+            f"{_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n```python\n{starter_code}\n```"
         )
     else:
         format_instruction = (
-            f"{_FORMATTING_WITHOUT_STARTER_CODE}\n"
-            "```python\n# YOUR CODE HERE\n```"
+            f"{_FORMATTING_WITHOUT_STARTER_CODE}\n```python\n# YOUR CODE HERE\n```"
         )
 
     user_prompt = (

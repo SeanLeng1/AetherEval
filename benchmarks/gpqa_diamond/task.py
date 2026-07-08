@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 from aethereval.core.io import read_jsonl
@@ -13,7 +12,7 @@ def _to_choice_map(raw: dict) -> dict[str, str]:
     keys = ("A", "B", "C", "D")
     choice_map: dict[str, str] = {}
     for key in keys:
-        value = str(raw.get(key, "")).strip()
+        value = str(raw[key]).strip()
         if not value:
             raise ValueError(f"Missing choice '{key}'")
         choice_map[key] = value
@@ -35,7 +34,7 @@ def load_samples(task_dir: Path) -> list[Sample]:
         if answer not in {"A", "B", "C", "D"}:
             raise ValueError(f"Invalid answer label for sample {sample_id}: {answer}")
 
-        raw_choices = row.get("choices", {})
+        raw_choices = row["choices"]
         if not isinstance(raw_choices, dict):
             raise ValueError(f"choices must be a JSON object for sample {sample_id}")
         choices = _to_choice_map(raw_choices)

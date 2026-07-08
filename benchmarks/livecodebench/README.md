@@ -52,6 +52,3 @@ Reported metrics:
 - `pass@k` (`k=1,2,4,...,n` by default)
 - `parsed_rate`
 - `accuracy_<platform>` (e.g., `accuracy_atcoder`, `accuracy_leetcode`)
-
-Performance note:
-- Scoring concurrency is controlled globally from CLI via `--score-workers`.

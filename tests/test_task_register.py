@@ -1,4 +1,3 @@
-
 import ast
 import tempfile
 import unittest
@@ -20,9 +19,13 @@ class TaskRegisterTests(unittest.TestCase):
                 continue
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "PRIMARY_METRIC":
-                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    if isinstance(node.value, ast.Constant) and isinstance(
+                        node.value.value, str
+                    ):
                         return node.value.value
-                    raise AssertionError(f"{metrics_path} PRIMARY_METRIC must be a string literal")
+                    raise AssertionError(
+                        f"{metrics_path} PRIMARY_METRIC must be a string literal"
+                    )
         raise AssertionError(f"{metrics_path} does not define PRIMARY_METRIC")
 
     def test_ifeval_task_discoverable(self) -> None:
@@ -31,6 +34,12 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("gpqa_diamond", tasks)
         self.assertIn("aime24", tasks)
         self.assertIn("aime25", tasks)
+        self.assertIn("amc23", tasks)
+        self.assertIn("math500", tasks)
+        self.assertIn("minerva", tasks)
+        self.assertIn("olympiad_bench", tasks)
+        self.assertIn("safe_alignment", tasks)
+        self.assertIn("apibank", tasks)
         self.assertIn("mmlu_pro", tasks)
         self.assertIn("agieval_en", tasks)
         self.assertIn("bbh", tasks)
@@ -100,12 +109,24 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["ifeval"]["n"], 1)
         self.assertEqual(defaults["bbh"]["n"], 1)
         self.assertEqual(defaults["aime24"]["n"], 16)
+        self.assertEqual(defaults["amc23"]["n"], 16)
+        self.assertEqual(defaults["math500"]["n"], 16)
+        self.assertEqual(defaults["minerva"]["n"], 16)
+        self.assertEqual(defaults["olympiad_bench"]["n"], 16)
+        self.assertEqual(defaults["safe_alignment"]["n"], 1)
+        self.assertEqual(defaults["safe_alignment"]["max_new_tokens"], 1024)
+        self.assertEqual(defaults["apibank"]["n"], 1)
+        self.assertEqual(defaults["apibank"]["max_new_tokens"], 4096)
         self.assertIn("max_new_tokens", defaults["livecodebench"])
 
     def test_instruction_following_primary_metrics(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        ifeval_metric = self._read_primary_metric(repo_root / "benchmarks" / "ifeval" / "metrics.py")
-        ifbench_metric = self._read_primary_metric(repo_root / "benchmarks" / "ifbench" / "metrics.py")
+        ifeval_metric = self._read_primary_metric(
+            repo_root / "benchmarks" / "ifeval" / "metrics.py"
+        )
+        ifbench_metric = self._read_primary_metric(
+            repo_root / "benchmarks" / "ifbench" / "metrics.py"
+        )
 
         self.assertEqual(ifeval_metric, "prompt_level_loose_acc")
         self.assertEqual(ifbench_metric, "prompt_level_loose_acc")

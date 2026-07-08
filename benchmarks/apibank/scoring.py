@@ -6,8 +6,8 @@ Per-sample scores:
   - format: ``<think>``/``<tool_call>``/``<response>`` tag-structure check.
   - length: ``round(think_word_count / 512, 2)`` capped at 1.0.
 
-``aggregate_scores`` reproduces the per-level record schema of the reference
-``aggregate_leaderboard.py`` (lv1/lv2/lv3 + overall).
+``aggregate_scores`` keeps the reference per-level record schema and adds the
+APIBank report columns used by AetherEval.
 """
 
 import json
@@ -35,24 +35,28 @@ def compute_correctness_score(tool_calls: list[Any], answer: Any) -> int | None:
     if not isinstance(answer_name, str) or not isinstance(answer_parameters, dict):
         return None
 
-    # Reference behavior: any parse error aborts matching -> 0.
-    try:
-        for tool_call in tool_calls:
-            if isinstance(tool_call, str):
+    for tool_call in tool_calls:
+        if isinstance(tool_call, str):
+            try:
                 tool_call = json.loads(tool_call)
-            predict = tool_call
+            except json.JSONDecodeError:
+                return 0
+        predict = tool_call
 
-            if "name" not in predict or "parameters" not in predict:
-                name = answer_name
-                parameters = predict
-            else:
-                name = predict["name"]
-                parameters = predict["parameters"]
+        try:
+            has_name = "name" in predict
+            has_parameters = "parameters" in predict
+        except TypeError:
+            return 0
+        if not has_name or not has_parameters:
+            name = answer_name
+            parameters = predict
+        else:
+            name = predict["name"]
+            parameters = predict["parameters"]
 
-            if name == answer_name and parameters == answer_parameters:
-                return 1
-    except Exception as e:  # noqa: BLE001
-        print("Error parsing tool calls:", e)
+        if name == answer_name and parameters == answer_parameters:
+            return 1
 
     return 0
 
@@ -145,19 +149,25 @@ def parse_assistant_output(assistant_output: str) -> tuple[str, list[Any]]:
     tool_calls = []
 
     if "<think>" in assistant_output and "</think>" in assistant_output:
-        thought = assistant_output.split("<think>", 1)[-1].split("</think>", 1)[0].strip()
+        thought = (
+            assistant_output.split("<think>", 1)[-1].split("</think>", 1)[0].strip()
+        )
 
     if "<tool_call>" in assistant_output and "</tool_call>" in assistant_output:
-        tool_block = assistant_output.split("<tool_call>", 1)[-1].split("</tool_call>", 1)[0].strip()
+        tool_block = (
+            assistant_output.split("<tool_call>", 1)[-1]
+            .split("</tool_call>", 1)[0]
+            .strip()
+        )
         for line in tool_block.splitlines():
             line = line.strip()
             if not line:
                 continue
-            # Reference behavior: malformed JSON lines are dropped.
+            # Reference behavior: malformed model tool-call lines are ignored.
             try:
                 tool_calls.append(json.loads(line))
-            except Exception:  # noqa: BLE001
-                pass
+            except json.JSONDecodeError:
+                continue
 
     return thought, tool_calls
 
@@ -199,8 +209,44 @@ def _round_or_none(value: float | None, ndigits: int) -> float | None:
     return round(value, ndigits)
 
 
+def _add_report_metrics(record: dict[str, Any]) -> None:
+    record["Level 1 Acc."] = record["lv1_acc"]
+    record["Level 2 Acc."] = record["lv2_acc"]
+    record["Level 3 Acc."] = record["lv3_acc"]
+
+    record["lv1_format"] = record["format_lv1_acc"]
+    record["lv2_format"] = record["format_lv2_acc"]
+    record["lv3_format"] = record["format_lv3_acc"]
+    record["overall_format"] = record["overall_format_acc"]
+
+    record["lv1_length"] = record["length_avg_lv1"]
+    record["lv2_length"] = record["length_avg_lv2"]
+    record["lv3_length"] = record["length_avg_lv3"]
+    record["overall_length"] = record["overall_length_avg"]
+
+    record["CorrectAcc."] = record["overall_acc"]
+    record["FormatAcc."] = record["overall_format_acc"]
+    record["LengthRew."] = record["overall_length_avg"]
+    record["LengthReward"] = record["LengthRew."]
+
+    if (
+        record["CorrectAcc."] is None
+        or record["FormatAcc."] is None
+        or record["LengthRew."] is None
+    ):
+        record["Overall"] = None
+        return
+
+    record["Overall"] = round(
+        record["CorrectAcc."] / 100
+        + record["FormatAcc."] / 100
+        + record["LengthRew."],
+        4,
+    )
+
+
 def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Reference ``aggregate_leaderboard.py`` record: per-level + overall acc/format/length."""
+    """Reference record plus APIBank report columns."""
     correct = {lv: 0 for lv in LEVELS}
     total_correct = {lv: 0 for lv in LEVELS}
 
@@ -249,36 +295,51 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
         record[f"total_{lv}"] = total_correct[lv]
     for lv in LEVELS:
         acc = _safe_div(correct[lv], total_correct[lv])
-        record[f"{lv}_acc"] = _round_or_none((acc * 100) if acc is not None else None, 2)
+        record[f"{lv}_acc"] = _round_or_none(
+            (acc * 100) if acc is not None else None, 2
+        )
 
     overall_acc = _safe_div(sum(correct.values()), sum(total_correct.values()))
-    record["overall_acc"] = _round_or_none((overall_acc * 100) if overall_acc is not None else None, 2)
+    record["overall_acc"] = _round_or_none(
+        (overall_acc * 100) if overall_acc is not None else None, 2
+    )
 
     for lv in LEVELS:
         record[f"format_{lv}"] = format_pass[lv]
     for lv in LEVELS:
         acc = _safe_div(format_pass[lv], total_format[lv])
-        record[f"format_{lv}_acc"] = _round_or_none((acc * 100) if acc is not None else None, 2)
+        record[f"format_{lv}_acc"] = _round_or_none(
+            (acc * 100) if acc is not None else None, 2
+        )
 
     overall_format = _safe_div(sum(format_pass.values()), sum(total_format.values()))
-    record["overall_format_acc"] = _round_or_none((overall_format * 100) if overall_format is not None else None, 2)
+    record["overall_format_acc"] = _round_or_none(
+        (overall_format * 100) if overall_format is not None else None, 2
+    )
 
     for lv in LEVELS:
-        record[f"length_avg_{lv}"] = _round_or_none(_safe_div(length_sum[lv], length_count[lv]), 4)
+        record[f"length_avg_{lv}"] = _round_or_none(
+            _safe_div(length_sum[lv], length_count[lv]), 4
+        )
     record["overall_length_avg"] = _round_or_none(
         _safe_div(sum(length_sum.values()), sum(length_count.values())), 4
     )
 
     for lv in LEVELS:
-        record[f"think_word_count_avg_{lv}"] = _round_or_none(_safe_div(think_sum[lv], think_count[lv]), 4)
+        record[f"think_word_count_avg_{lv}"] = _round_or_none(
+            _safe_div(think_sum[lv], think_count[lv]), 4
+        )
     record["overall_think_word_count_avg"] = _round_or_none(
         _safe_div(sum(think_sum.values()), sum(think_count.values())), 4
     )
 
     for lv in LEVELS:
-        record[f"reward_avg_{lv}"] = _round_or_none(_safe_div(reward_sum[lv], reward_count[lv]), 4)
+        record[f"reward_avg_{lv}"] = _round_or_none(
+            _safe_div(reward_sum[lv], reward_count[lv]), 4
+        )
     record["overall_reward_avg"] = _round_or_none(
         _safe_div(sum(reward_sum.values()), sum(reward_count.values())), 4
     )
 
+    _add_report_metrics(record)
     return record

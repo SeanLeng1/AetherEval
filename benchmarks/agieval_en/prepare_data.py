@@ -1,4 +1,3 @@
-
 import json
 import re
 from pathlib import Path
@@ -76,11 +75,12 @@ def main() -> None:
 
             gold_idx = _gold_index(row["gold"], len(choices_clean))
             if gold_idx < 0 or gold_idx >= len(choices_clean):
-                raise ValueError(f"Gold index out of range for subset={subset} idx={idx}")
+                raise ValueError(
+                    f"Gold index out of range for subset={subset} idx={idx}"
+                )
 
             choices = {
-                ascii_uppercase[i]: choices_clean[i]
-                for i in range(len(choices_clean))
+                ascii_uppercase[i]: choices_clean[i] for i in range(len(choices_clean))
             }
             answer = ascii_uppercase[gold_idx]
 

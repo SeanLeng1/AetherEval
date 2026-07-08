@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from string import ascii_uppercase
 
@@ -15,7 +14,7 @@ def _to_choice_map(raw: dict) -> dict[str, str]:
     for letter in ascii_uppercase:
         if letter not in raw:
             break
-        value = str(raw.get(letter, "")).strip()
+        value = str(raw[letter]).strip()
         if not value:
             raise ValueError(f"Missing choice '{letter}'")
         choice_map[letter] = value
@@ -37,7 +36,7 @@ def load_samples(task_dir: Path) -> list[Sample]:
         if not question:
             raise ValueError(f"Empty question for sample {sample_id}")
 
-        raw_choices = row.get("choices", {})
+        raw_choices = row["choices"]
         if not isinstance(raw_choices, dict):
             raise ValueError(f"choices must be a JSON object for sample {sample_id}")
         choices = _to_choice_map(raw_choices)

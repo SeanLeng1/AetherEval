@@ -1,8 +1,7 @@
-
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
 from types import ModuleType
+from typing import Any
 
 
 PromptType = str | list[dict[str, str]]
@@ -61,27 +60,3 @@ class TaskBundle:
     spec: TaskSpec
     task_module: ModuleType
     metrics_module: ModuleType
-
-
-class TaskModule(Protocol):
-    TASK_NAME: str
-    DATA_FILE: str
-    DEFAULT_GEN: dict[str, Any]
-
-    def load_samples(self, task_dir: Path) -> list[Sample]:
-        ...
-
-    def build_prompt(self, sample: Sample) -> PromptType:
-        ...
-
-
-class MetricsModule(Protocol):
-    def score_generation(self, sample: Sample, generation: str) -> dict[str, Any]:
-        ...
-
-    def aggregate(
-        self,
-        sample_results: list[dict[str, Any]],
-        metric_options: dict[str, Any] | None = None,
-    ) -> dict[str, float]:
-        ...

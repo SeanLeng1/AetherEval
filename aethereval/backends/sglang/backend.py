@@ -1,4 +1,3 @@
-
 from collections import defaultdict
 from typing import Any
 
@@ -50,7 +49,7 @@ def _extract_text(output: Any) -> str:
     if text is not None:
         return str(text)
 
-    return str(output)
+    raise TypeError(f"Unsupported SGLang output type: {type(output).__name__}")
 
 
 def _normalize_outputs(outputs: Any) -> list[Any]:
@@ -76,7 +75,7 @@ def _make_progress_bar(total: int, desc: str, enabled: bool) -> Any:
         return None
     try:
         from tqdm.auto import tqdm
-    except Exception:  # noqa: BLE001
+    except ImportError:
         return None
     return tqdm(total=total, desc=desc, unit="gen", dynamic_ncols=True)
 
@@ -136,40 +135,35 @@ def _run_generation(
                     request_payloads.append(item)
 
             grouped_texts: dict[int, list[str]] = defaultdict(list)
-            try:
-                for start in range(0, len(prompts), batch_size):
-                    end = start + batch_size
-                    batch_prompts = prompts[start:end]
-                    batch_payloads = request_payloads[start:end]
-                    outputs = _normalize_outputs(
-                        engine.generate(batch_prompts, sampling_params)
+            for start in range(0, len(prompts), batch_size):
+                end = start + batch_size
+                batch_prompts = prompts[start:end]
+                batch_payloads = request_payloads[start:end]
+                outputs = _normalize_outputs(
+                    engine.generate(batch_prompts, sampling_params)
+                )
+                if len(outputs) != len(batch_payloads):
+                    raise RuntimeError(
+                        f"SGLang returned {len(outputs)} outputs for {len(batch_payloads)} prompts."
                     )
-                    for item, output in zip(batch_payloads, outputs):
-                        grouped_texts[int(item["idx"])].append(_extract_text(output))
-                    if progress_bar is not None:
-                        progress_bar.update(len(batch_payloads))
+                for item, output in zip(batch_payloads, outputs):
+                    grouped_texts[int(item["idx"])].append(_extract_text(output))
+                if progress_bar is not None:
+                    progress_bar.update(len(batch_payloads))
 
-                for item in items:
-                    texts = grouped_texts[int(item["idx"])]
-                    if len(texts) < n:
-                        texts.extend([""] * (n - len(texts)))
-                    result_by_index[item["idx"]] = {
-                        "idx": item["idx"],
-                        "sample_id": item["sample_id"],
-                        "prompt": item["prompt"],
-                        "generations": texts[:n],
-                        "error": None,
-                    }
-            except Exception as exc:  # noqa: BLE001
-                err = f"{type(exc).__name__}: {exc}"
-                for item in items:
-                    result_by_index[item["idx"]] = {
-                        "idx": item["idx"],
-                        "sample_id": item["sample_id"],
-                        "prompt": item["prompt"],
-                        "generations": [""] * n,
-                        "error": err,
-                    }
+            for item in items:
+                texts = grouped_texts[int(item["idx"])]
+                if len(texts) != n:
+                    raise RuntimeError(
+                        f"SGLang returned {len(texts)} candidates for sample {item['sample_id']}; expected {n}."
+                    )
+                result_by_index[item["idx"]] = {
+                    "idx": item["idx"],
+                    "sample_id": item["sample_id"],
+                    "prompt": item["prompt"],
+                    "generations": texts,
+                    "error": None,
+                }
     finally:
         if progress_bar is not None:
             progress_bar.close()

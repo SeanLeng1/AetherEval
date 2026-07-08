@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 from aethereval.core.io import read_jsonl
@@ -42,9 +41,7 @@ BBH_DESCRIPTIONS = {
     "salient_translation_error_detection": (
         "Detect the type of error in an English translation of a German source sentence."
     ),
-    "snarks": (
-        "Determine which of two sentences is sarcastic."
-    ),
+    "snarks": ("Determine which of two sentences is sarcastic."),
     "sports_understanding": (
         "Determine whether an artificially constructed sentence relating to sports is plausible or not."
     ),
@@ -106,7 +103,9 @@ def load_samples(task_dir: Path) -> list[Sample]:
         if not answer:
             raise ValueError(f"BBH answer is empty for sample {sample_id}")
 
-        description = str(row.get("description", BBH_DESCRIPTIONS.get(subset, ""))).strip()
+        description = str(
+            row.get("description", BBH_DESCRIPTIONS.get(subset, ""))
+        ).strip()
 
         samples.append(
             Sample(

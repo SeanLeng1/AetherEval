@@ -1,4 +1,3 @@
-
 import json
 import re
 from pathlib import Path
@@ -20,7 +19,7 @@ def ensure_dir(path: Path) -> None:
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not path.exists():
-        return rows
+        raise FileNotFoundError(f"JSONL file not found: {path}")
 
     with path.open("r", encoding="utf-8") as f:
         first_line = f.readline()

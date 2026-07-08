@@ -1,2 +1,1 @@
 """IFBench benchmark package."""
-
