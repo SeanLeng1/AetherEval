@@ -1,16 +1,18 @@
 import unittest
 from pathlib import Path
 
-from aethereval.core.types import Sample
+from aethereval.core.types import GenerationOutput, Sample
 from benchmarks.apibank.metrics import (
     PRIMARY_METRIC,
     aggregate as aggregate_native,
     score_generation as score_generation_native,
+    score_generations_batch,
 )
 from benchmarks.apibank.scoring import (
     aggregate_scores,
     compute_correctness_score,
     compute_length_score,
+    extract_think_content,
     extract_tool_calls_lenient,
     parse_assistant_output,
     score_record,
@@ -31,6 +33,26 @@ RAW_WRONG_PARAMS = (
 RAW_MISSING_TAGS = '{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}'
 
 
+class WhitespaceTokenizer:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[str]:
+        del add_special_tokens
+        return text.split()
+
+
+class CharacterTokenizer:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[str]:
+        del add_special_tokens
+        return [char for char in text if not char.isspace()]
+
+
+def _think_token_count(raw: str, tokenizer=None) -> int | None:  # noqa: ANN001
+    content = extract_think_content(raw)
+    if content is None:
+        return None
+    tokenizer = tokenizer or WhitespaceTokenizer()
+    return len(tokenizer.encode(content, add_special_tokens=False))
+
+
 def _scored(raw: str, answer=ANSWER) -> dict:
     thought, tool_calls = parse_assistant_output(raw)
     return score_record(
@@ -39,7 +61,8 @@ def _scored(raw: str, answer=ANSWER) -> dict:
             "raw_output": raw,
             "thought": thought,
             "tool_calls": tool_calls,
-        }
+        },
+        _think_token_count(raw),
     )
 
 
@@ -51,7 +74,7 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(record["format_score"], 1)
         self.assertEqual(record["format_errors"], [])
         self.assertEqual(record["length_score"], 0.01)  # round(4 / 512, 2)
-        self.assertEqual(record["think_word_count"], 4)
+        self.assertEqual(record["think_token_count"], 4)
 
     def test_wrong_params(self) -> None:
         record = _scored(RAW_WRONG_PARAMS)
@@ -67,7 +90,7 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(record["format_score"], 0)
         self.assertEqual(record["format_errors"], ["missing_think"])
         self.assertEqual(record["length_score"], 0.0)
-        self.assertEqual(record["think_word_count"], 0)
+        self.assertEqual(record["think_token_count"], 0)
 
     def test_lenient_extraction(self) -> None:
         # ToolRL parser: last <tool_call> block, no closing-tag guard.
@@ -134,7 +157,24 @@ class ApiBankScoringTests(unittest.TestCase):
 
     def test_length_cap(self) -> None:
         raw = "<think>" + " ".join(["w"] * 600) + "</think>\n<response>r</response>"
-        self.assertEqual(compute_length_score(raw), (1.0, 600))
+        self.assertEqual(compute_length_score(raw, _think_token_count(raw)), (1.0, 600))
+
+    def test_length_uses_tokenizer_count_not_word_count(self) -> None:
+        raw = "<think>abcdefghij</think>\n<response>r</response>"
+        results = score_generations_batch(
+            [Sample(id="Level1_0", gold=ANSWER, meta={"level": 1})],
+            [
+                GenerationOutput(
+                    sample_id="Level1_0",
+                    prompt=[],
+                    generations=[raw],
+                )
+            ],
+            {"_tokenizer": CharacterTokenizer()},
+        )
+        meta = results[0][0]["meta"]
+        self.assertEqual(meta["think_token_count"], 10)
+        self.assertEqual(meta["length_score"], 0.02)
 
     def test_aggregate(self) -> None:
         scores = {
@@ -174,8 +214,8 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(record["LengthRew."], 0.0067)
         self.assertEqual(record["LengthReward"], 0.0067)
         self.assertEqual(record["Overall"], 1.0067)
-        self.assertEqual(record["think_word_count_avg_lv1"], 4.0)
-        self.assertEqual(record["overall_think_word_count_avg"], 2.6667)
+        self.assertEqual(record["think_token_count_avg_lv1"], 4.0)
+        self.assertEqual(record["overall_think_token_count_avg"], 2.6667)
         self.assertEqual(record["reward_avg_lv1"], 0.01)
         self.assertEqual(record["overall_reward_avg"], 0.0067)
 
@@ -192,7 +232,19 @@ class ApiBankScoringTests(unittest.TestCase):
 
     def test_native_metrics_path(self) -> None:
         sample = Sample(id="Level1_0", gold=ANSWER, meta={"level": 1})
-        scored = score_generation_native(sample, RAW_MATCH)
+        with self.assertRaises(RuntimeError):
+            score_generation_native(sample, RAW_MATCH)
+        scored = score_generations_batch(
+            [sample],
+            [
+                GenerationOutput(
+                    sample_id=sample.id,
+                    prompt=[],
+                    generations=[RAW_MATCH],
+                )
+            ],
+            {"_tokenizer": WhitespaceTokenizer()},
+        )[0][0]
         record = {
             "sample_id": sample.id,
             "gen_idx": 0,

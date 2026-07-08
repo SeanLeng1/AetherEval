@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import io
 import json
 import os
@@ -20,6 +21,8 @@ from benchmarks.bfcl.external import (
     _is_allowed_zero_score_error,
     _raise_on_inference_errors,
     _server_command_with_context,
+    parse_scores,
+    write_predictions_jsonl,
 )
 
 
@@ -122,10 +125,121 @@ class ExternalCliTests(unittest.TestCase):
 
             self.assertEqual(result["selected_tasks"], ["bfcl"])
             self.assertEqual(result["tasks"], ["bfcl"])
-            self.assertEqual(result["results"]["bfcl"]["primary_metric"], "avg_acc")
+            self.assertEqual(
+                result["results"]["bfcl"]["primary_metric"], "OverallAcc"
+            )
             self.assertEqual(result["results"]["bfcl"]["primary_score"], 0.0)
             self.assertTrue((out / "dry-model" / "bfcl" / "summary.json").exists())
+            self.assertTrue(
+                (out / "dry-model" / "bfcl" / "predictions.jsonl").exists()
+            )
             self.assertTrue((out / "dry-model" / "run_summary.json").exists())
+
+    def test_bfcl_predictions_jsonl_uses_aethereval_schema(self) -> None:
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "bfcl"
+            result_dir = out / "result"
+            score_dir = out / "score"
+            model_dir = result_dir / "dry-model"
+            score_model_dir = score_dir / "dry-model"
+            model_dir.mkdir(parents=True)
+            score_model_dir.mkdir(parents=True)
+            (model_dir / "BFCL_simple_result.json").write_text(
+                json.dumps(
+                    {
+                        "id": "simple_1",
+                        "result": "<think>x</think>",
+                        "inference_input_log": {"formatted_prompt": "prompt text"},
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "id": "simple_2",
+                        "result": "Error during inference: BFCL prompt exceeds max context length.",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (score_model_dir / "BFCL_simple_score.json").write_text(
+                json.dumps({"accuracy": 0.5}) + "\n"
+                + json.dumps({"id": "simple_2", "valid": False}) + "\n",
+                encoding="utf-8",
+            )
+
+            stats = write_predictions_jsonl(
+                out=out,
+                result_dir=result_dir,
+                score_dir=score_dir,
+                model="dry-model",
+            )
+
+            predictions_path = out / "predictions.jsonl"
+            rows = [
+                json.loads(line)
+                for line in predictions_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(stats["prediction_records"], 2)
+            self.assertEqual(stats["prediction_scored_records"], 2)
+            self.assertEqual(rows[0]["sample_id"], "simple_1")
+            self.assertEqual(rows[0]["gen_idx"], 0)
+            self.assertEqual(rows[0]["prompt"], "prompt text")
+            self.assertEqual(rows[0]["generation"], "<think>x</think>")
+            self.assertEqual(rows[0]["score"], 1.0)
+            self.assertTrue(rows[0]["is_pass"])
+            self.assertEqual(rows[0]["parsed"], "<think>x</think>")
+            self.assertIsNone(rows[0]["gold"])
+            self.assertIsNone(rows[0]["error"])
+            self.assertEqual(rows[0]["meta"]["benchmark"], "bfcl")
+            self.assertEqual(rows[0]["meta"]["test_category"], "simple")
+            self.assertFalse(rows[1]["is_pass"])
+            self.assertEqual(rows[1]["score"], 0.0)
+            self.assertIn("Error during inference", rows[1]["error"])
+
+    def test_bfcl_parse_scores_reports_toolrl_columns(self) -> None:
+        with TemporaryDirectory() as tmp:
+            score_dir = Path(tmp) / "score"
+            score_dir.mkdir()
+            columns = [
+                "Model",
+                "Overall Acc",
+                "Non-Live AST Acc",
+                "Non-Live Exec Acc",
+                "Live Acc",
+                "Multi Turn Acc",
+                "Relevance Detection",
+                "Irrelevance Detection",
+            ]
+            with (score_dir / "data_overall.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "Model": "dry-model",
+                        "Overall Acc": "38.35%",
+                        "Non-Live AST Acc": "56.33%",
+                        "Non-Live Exec Acc": "63.77%",
+                        "Live Acc": "57.31%",
+                        "Multi Turn Acc": "0.25%",
+                        "Relevance Detection": "77.78%",
+                        "Irrelevance Detection": "41.84%",
+                    }
+                )
+
+            metrics = parse_scores(score_dir, "dry-model")
+
+            self.assertEqual(metrics["OverallAcc"], 38.35)
+            self.assertEqual(metrics["Non-LiveASTAcc"], 56.33)
+            self.assertEqual(metrics["Non-LiveExecAcc"], 63.77)
+            self.assertEqual(metrics["LiveAcc"], 57.31)
+            self.assertEqual(metrics["MultiTurnAcc"], 0.25)
+            self.assertEqual(metrics["RelevanceDetection"], 77.78)
+            self.assertEqual(metrics["IrrelevanceDetection"], 41.84)
+            self.assertEqual(metrics["avg_acc"], 38.35)
+            self.assertEqual(metrics["non_live_ast_acc"], 56.33)
 
     def test_bfcl_uses_resolved_generation_config(self) -> None:
         with TemporaryDirectory() as tmp:

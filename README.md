@@ -188,6 +188,7 @@ benchmark schema:
 
 ```text
 outputs/<run_id>/bfcl/
+  predictions.jsonl
   result/
   score/
   summary.json
@@ -236,11 +237,14 @@ outputs/<run_id>/
 - `parsed`
 - `gold`
 - `error`
-- `meta`
+- `meta` (always includes `prompt_token_count` and `response_token_count`)
 
 `summary.json` is task-level aggregate, and includes:
 
 - `metrics`: full metric dict from task aggregate
+- `metrics.avg_prompt_tokens` / `metrics.avg_response_tokens`: model-tokenized
+  average prompt and response lengths
+- `token_usage`: average and total prompt/response token counts
 - `primary_metric`: report metric name
 - `primary_score`: report metric value
 

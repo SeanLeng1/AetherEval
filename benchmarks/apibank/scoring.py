@@ -7,7 +7,7 @@ Per-sample scores:
     ``generate.py`` parser (last ``<tool_call>`` block, no closing-tag guard);
     ``loose_*_acc`` is the ToolRL-aligned number on the same generations.
   - format: ``<think>``/``<tool_call>``/``<response>`` tag-structure check.
-  - length: ``round(think_word_count / 512, 2)`` capped at 1.0.
+  - length: ``round(think_token_count / 512, 2)`` capped at 1.0.
 
 ``aggregate_scores`` keeps the reference per-level record schema and adds the
 APIBank report columns used by AetherEval.
@@ -135,15 +135,22 @@ def extract_think_content(raw_output: str) -> str | None:
     return raw_output[think_start:think_end].strip()
 
 
-def compute_length_score(raw_output: str) -> tuple[float, int]:
+def compute_length_score(
+    raw_output: str,
+    think_token_count: int | None,
+) -> tuple[float, int]:
     think_content = extract_think_content(raw_output)
     if think_content is None:
         return 0.0, 0
+    if think_token_count is None:
+        raise ValueError(
+            "APIBank length scoring requires tokenizer-counted think tokens."
+        )
 
-    reward = round(len(think_content.split()) / MAX_REWARD_LEN, 2)
+    reward = round(int(think_token_count) / MAX_REWARD_LEN, 2)
     if reward > 1.0:
         reward = 1.0
-    return reward, len(think_content.split())
+    return reward, int(think_token_count)
 
 
 def parse_assistant_output(assistant_output: str) -> tuple[str, list[Any]]:
@@ -200,21 +207,28 @@ def extract_tool_calls_lenient(raw_output: str) -> list[Any]:
     return tool_calls
 
 
-def score_record(record: dict[str, Any]) -> dict[str, Any]:
+def score_record(
+    record: dict[str, Any],
+    think_token_count: int | None,
+) -> dict[str, Any]:
     """Attach the ``evaluate_reward.py`` per-sample score fields to a generation record."""
     answer = record["data"]["answer"]
     score = compute_correctness_score(record["tool_calls"], answer)
     # Loose correctness: same match on ToolRL's own (last-block, no-guard) parser.
-    loose_score = compute_correctness_score(extract_tool_calls_lenient(record["raw_output"]), answer)
+    loose_score = compute_correctness_score(
+        extract_tool_calls_lenient(record["raw_output"]), answer
+    )
     format_score, format_errors = validate_output_format(record["raw_output"])
-    length_score, think_word_count = compute_length_score(record["raw_output"])
+    length_score, think_token_count = compute_length_score(
+        record["raw_output"], think_token_count
+    )
 
     record["score"] = score
     record["correct_score"] = score
     record["loose_score"] = loose_score
     record["format_score"] = format_score
     record["length_score"] = length_score
-    record["think_word_count"] = think_word_count
+    record["think_token_count"] = think_token_count
     record["format_errors"] = format_errors
     return record
 
@@ -295,8 +309,8 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
     length_sum = {lv: 0.0 for lv in LEVELS}
     length_count = {lv: 0 for lv in LEVELS}
 
-    think_sum = {lv: 0.0 for lv in LEVELS}
-    think_count = {lv: 0 for lv in LEVELS}
+    think_token_sum = {lv: 0.0 for lv in LEVELS}
+    think_token_count = {lv: 0 for lv in LEVELS}
 
     reward_sum = {lv: 0.0 for lv in LEVELS}
     reward_count = {lv: 0 for lv in LEVELS}
@@ -323,10 +337,10 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
             reward_sum[lv] += float(length_score)
             reward_count[lv] += 1
 
-        think_word_count = item["think_word_count"]
-        if isinstance(think_word_count, (int, float)):
-            think_sum[lv] += float(think_word_count)
-            think_count[lv] += 1
+        sample_think_token_count = item["think_token_count"]
+        if isinstance(sample_think_token_count, (int, float)):
+            think_token_sum[lv] += float(sample_think_token_count)
+            think_token_count[lv] += 1
 
     record: dict[str, Any] = {}
 
@@ -379,11 +393,11 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
     )
 
     for lv in LEVELS:
-        record[f"think_word_count_avg_{lv}"] = _round_or_none(
-            _safe_div(think_sum[lv], think_count[lv]), 4
+        record[f"think_token_count_avg_{lv}"] = _round_or_none(
+            _safe_div(think_token_sum[lv], think_token_count[lv]), 4
         )
-    record["overall_think_word_count_avg"] = _round_or_none(
-        _safe_div(sum(think_sum.values()), sum(think_count.values())), 4
+    record["overall_think_token_count_avg"] = _round_or_none(
+        _safe_div(sum(think_token_sum.values()), sum(think_token_count.values())), 4
     )
 
     for lv in LEVELS:

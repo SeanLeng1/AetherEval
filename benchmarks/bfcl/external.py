@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from .register import register_rlla_model
 
@@ -255,14 +256,20 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
     fmt = compute_format_rate(result_dir, spec.model)
     if fmt is not None:
         metrics["correct_format"] = fmt
-    primary_metric = "avg_acc"
+    prediction_stats = write_predictions_jsonl(
+        out=out,
+        result_dir=result_dir,
+        score_dir=score_dir,
+        model=spec.model,
+    )
+    primary_metric = "OverallAcc"
     primary_score = float(metrics.get(primary_metric, 0.0))
-    _write_summary(out, spec, metrics, primary_metric, primary_score)
+    _write_summary(out, spec, metrics, primary_metric, primary_score, prediction_stats)
     return ExternalResult(metrics, primary_metric, primary_score, result_dir, score_dir)
 
 
 def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
-    """Parse BFCL's leaderboard ``data_overall.csv`` -> Table 1 overall accuracies."""
+    """Parse BFCL's leaderboard ``data_overall.csv`` into ToolRL report metrics."""
     csv_path = score_dir / "data_overall.csv"
     if not csv_path.exists():
         return None
@@ -272,27 +279,56 @@ def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
         return None
     row = rows[0]  # single registered model
 
-    def pct(col: str) -> float | None:
-        v = row.get(col)
-        if v is None:
+    def pct(*columns: str) -> float | None:
+        value = None
+        for column in columns:
+            value = row.get(column)
+            if value is not None:
+                break
+        if value is None:
             return None
         try:
-            return float(str(v).replace("%", "").strip())
+            return float(str(value).replace("%", "").strip())
         except ValueError:
             return None  # "N/A" (category not run)
 
-    # Exact BFCL leaderboard columns -> GDPO Table 1 accuracies.
-    mapping = {
-        "non_live_overall_acc": "Non-Live AST Acc",
-        "live_overall_acc": "Live Acc",
-        "multi_turn_overall_acc": "Multi Turn Acc",
-        "overall_acc": "Overall Acc",
+    report_mapping = {
+        "OverallAcc": ("Overall Acc",),
+        "Non-LiveASTAcc": ("Non-Live AST Acc",),
+        "Non-LiveExecAcc": ("Non-Live Exec Acc",),
+        "LiveAcc": ("Live Acc",),
+        "MultiTurnAcc": ("Multi Turn Acc",),
+        "RelevanceDetection": ("Relevance Detection",),
+        "IrrelevanceDetection": ("Irrelevance Detection",),
     }
     out: dict[str, float] = {}
-    for metric, col in mapping.items():
-        val = pct(col)
-        if val is not None:
-            out[metric] = val
+    for metric, columns in report_mapping.items():
+        value = pct(*columns)
+        if value is not None:
+            out[metric] = value
+
+    alias_mapping = {
+        "overall_acc": "OverallAcc",
+        "non_live_ast_acc": "Non-LiveASTAcc",
+        "non_live_exec_acc": "Non-LiveExecAcc",
+        "live_acc": "LiveAcc",
+        "multi_turn_acc": "MultiTurnAcc",
+        "relevance_detection": "RelevanceDetection",
+        "irrelevance_detection": "IrrelevanceDetection",
+    }
+    for alias, source in alias_mapping.items():
+        if source in out:
+            out[alias] = out[source]
+
+    legacy_mapping = {
+        "non_live_overall_acc": "Non-LiveASTAcc",
+        "live_overall_acc": "LiveAcc",
+        "multi_turn_overall_acc": "MultiTurnAcc",
+        "avg_acc": "OverallAcc",
+    }
+    for alias, source in legacy_mapping.items():
+        if source in out:
+            out[alias] = out[source]
     return out or None
 
 
@@ -333,8 +369,21 @@ def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
         for c in _COLLECTIONS
         if f"{c}_overall_acc" in metrics
     ]
-    if overalls:
+    if "OverallAcc" in metrics:
+        metrics["avg_acc"] = metrics["OverallAcc"]
+    elif overalls:
         metrics["avg_acc"] = sum(overalls) / len(overalls)
+        metrics["OverallAcc"] = metrics["avg_acc"]
+        metrics["overall_acc"] = metrics["avg_acc"]
+    if "Non-LiveASTAcc" not in metrics and "non_live_overall_acc" in metrics:
+        metrics["Non-LiveASTAcc"] = metrics["non_live_overall_acc"]
+        metrics["non_live_ast_acc"] = metrics["non_live_overall_acc"]
+    if "LiveAcc" not in metrics and "live_overall_acc" in metrics:
+        metrics["LiveAcc"] = metrics["live_overall_acc"]
+        metrics["live_acc"] = metrics["live_overall_acc"]
+    if "MultiTurnAcc" not in metrics and "multi_turn_overall_acc" in metrics:
+        metrics["MultiTurnAcc"] = metrics["multi_turn_overall_acc"]
+        metrics["multi_turn_acc"] = metrics["multi_turn_overall_acc"]
     return metrics
 
 
@@ -402,12 +451,162 @@ def compute_format_rate(result_dir: Path, model: str) -> float | None:
     return 100.0 * ok / total if total else None
 
 
+def _as_generation_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _result_error(value: Any) -> str | None:
+    if isinstance(value, str) and value.startswith("Error during inference:"):
+        return value
+    return None
+
+
+def _result_file_category(path: Path) -> str:
+    name = path.name
+    if name.endswith("_result.json"):
+        name = name[: -len("_result.json")]
+    if name.startswith("BFCL_"):
+        name = name[len("BFCL_") :]
+    return name
+
+
+def _score_file_for_result_file(
+    *,
+    result_file: Path,
+    result_model_dir: Path,
+    score_model_dir: Path,
+) -> Path | None:
+    relative = result_file.relative_to(result_model_dir)
+    direct = score_model_dir / str(relative).replace("_result.json", "_score.json")
+    if direct.exists():
+        return direct
+
+    stem = result_file.name.replace("_result.json", "_score.json")
+    matches = list(score_model_dir.rglob(stem)) if score_model_dir.exists() else []
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Multiple BFCL score files match {result_file.name}: "
+            f"{[str(path) for path in matches]}"
+        )
+    return matches[0]
+
+
+def _invalid_ids_from_score_file(score_file: Path | None) -> set[str] | None:
+    if score_file is None:
+        return None
+
+    invalid_ids: set[str] = set()
+    with score_file.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if line_no == 1 and "accuracy" in record:
+                continue
+            if "id" in record:
+                invalid_ids.add(str(record["id"]))
+    return invalid_ids
+
+
+def _score_from_invalid_ids(
+    sample_id: str,
+    invalid_ids: set[str] | None,
+) -> tuple[float | None, bool | None]:
+    if invalid_ids is None:
+        return None, None
+    is_pass = sample_id not in invalid_ids
+    return float(is_pass), is_pass
+
+
+def _prompt_from_bfcl_record(record: dict[str, Any]) -> Any:
+    input_log = record.get("inference_input_log")
+    if isinstance(input_log, dict) and "formatted_prompt" in input_log:
+        return input_log["formatted_prompt"]
+    if "prompt" in record:
+        return record["prompt"]
+    return ""
+
+
+def write_predictions_jsonl(
+    *,
+    out: Path,
+    result_dir: Path,
+    score_dir: Path,
+    model: str,
+) -> dict[str, int | str]:
+    predictions_path = out / "predictions.jsonl"
+    model_dir = result_dir / model.replace("/", "_")
+    score_model_dir = score_dir / model.replace("/", "_")
+    result_files = sorted(model_dir.rglob("*_result.json")) if model_dir.exists() else []
+
+    total_records = 0
+    scored_records = 0
+    with predictions_path.open("w", encoding="utf-8") as f:
+        for result_file in result_files:
+            invalid_ids = _invalid_ids_from_score_file(
+                _score_file_for_result_file(
+                    result_file=result_file,
+                    result_model_dir=model_dir,
+                    score_model_dir=score_model_dir,
+                )
+            )
+            category = _result_file_category(result_file)
+            with result_file.open("r", encoding="utf-8") as rf:
+                for line in rf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    raw_record = json.loads(line)
+                    sample_id = str(raw_record["id"])
+                    score, is_pass = _score_from_invalid_ids(sample_id, invalid_ids)
+                    if score is not None:
+                        scored_records += 1
+
+                    raw_result = raw_record["result"]
+                    row = {
+                        "sample_id": sample_id,
+                        "gen_idx": 0,
+                        "prompt": _prompt_from_bfcl_record(raw_record),
+                        "generation": _as_generation_text(raw_result),
+                        "score": score,
+                        "is_pass": is_pass,
+                        "parsed": raw_result,
+                        "gold": None,
+                        "error": _result_error(raw_result),
+                        "meta": {
+                            "benchmark": "bfcl",
+                            "test_category": category,
+                            "result_file": str(result_file.relative_to(result_dir)),
+                            "score_available": score is not None,
+                            "bfcl_record": {
+                                key: value
+                                for key, value in raw_record.items()
+                                if key != "result"
+                            },
+                        },
+                    }
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    total_records += 1
+
+    return {
+        "predictions_path": str(predictions_path),
+        "prediction_records": total_records,
+        "prediction_scored_records": scored_records,
+    }
+
+
 def _write_summary(
     out: Path,
     spec: ExternalRunSpec,
     metrics: dict[str, float],
     primary_metric: str,
     primary_score: float,
+    prediction_stats: dict[str, int | str],
 ) -> None:
     summary = {
         "benchmark": "bfcl",
@@ -427,6 +626,7 @@ def _write_summary(
         "repetition_penalty": spec.repetition_penalty,
         "verbose": spec.verbose,
         "metrics": metrics,
+        **prediction_stats,
         "primary_metric": primary_metric,
         "primary_score": primary_score,
     }

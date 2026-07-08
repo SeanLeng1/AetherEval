@@ -52,7 +52,7 @@ outputs/<run_id>/apibank/
 ```
 
 Per-generation `meta` in `predictions.jsonl` includes `correct_score`,
-`format_score`, `length_score`, and `think_word_count`.
+`format_score`, `length_score`, and tokenizer-counted `think_token_count`.
 
 ## Metrics
 
@@ -67,13 +67,15 @@ Per-generation `meta` in `predictions.jsonl` includes `correct_score`,
   `LooseCorrectAcc.`, `Loose Level {1,2,3} Acc.`.
 - `format_lv{1,2,3}_acc`, `overall_format_acc` — tag-structure check.
 - `length_avg_lv{1,2,3}`, `overall_length_avg` — mean of
-  `min(round(think_word_count / 512, 2), 1.0)`.
+  `min(round(think_token_count / 512, 2), 1.0)`, where
+  `think_token_count` is counted with the evaluated model tokenizer on the
+  `<think>...</think>` content.
 - Report aliases: `Level 1 Acc.`, `Level 2 Acc.`, `Level 3 Acc.`, `CorrectAcc.`,
   `FormatAcc.`, `LengthRew.`, `LengthReward`, and `Overall`.
 - `Overall = CorrectAcc. / 100 + FormatAcc. / 100 + LengthRew.` and is the
   AetherEval `PRIMARY_METRIC`.
 
-Raw counts (`correct_*`, `total_*`, `format_*`), `think_word_count_avg_*`, and
+Raw counts (`correct_*`, `total_*`, `format_*`), `think_token_count_avg_*`, and
 `reward_avg_*` are also reported for parity with the GD2PO leaderboard layer.
 
 The reference's `LENGTH_*`/`SCHEDULELENGTH` env overrides are never set by its eval

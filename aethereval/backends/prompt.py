@@ -74,5 +74,31 @@ def load_chat_tokenizer(
     return AutoTokenizer.from_pretrained(tokenizer_name, **tokenizer_args)
 
 
+def count_token_ids(token_ids: Any) -> int:
+    if token_ids is None:
+        raise ValueError("token_ids must not be None")
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    return len(token_ids)
+
+
+def count_text_tokens(text: str, tokenizer: Any) -> int:
+    if tokenizer is None:
+        raise RuntimeError("Tokenizer is required for token counting.")
+
+    if hasattr(tokenizer, "encode"):
+        try:
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+        except TypeError:
+            token_ids = tokenizer.encode(text)
+        return count_token_ids(token_ids)
+
+    encoded = tokenizer(text, add_special_tokens=False)
+    if isinstance(encoded, dict):
+        return count_token_ids(encoded["input_ids"])
+    input_ids = getattr(encoded, "input_ids")
+    return count_token_ids(input_ids)
+
+
 def render_prompt_with_chat_template(prompt: PromptType, tokenizer: Any) -> str:
     return _prompt_to_text(prompt, tokenizer)

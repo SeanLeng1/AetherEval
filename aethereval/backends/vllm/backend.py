@@ -3,7 +3,7 @@ from typing import Any
 
 from aethereval.core.types import GenerationInput, GenerationOutput
 
-from ..prompt import _prompt_to_text
+from ..prompt import _prompt_to_text, count_token_ids
 
 
 def _build_sampling_params(vllm_module: Any, gen_cfg: dict[str, Any], n: int) -> Any:
@@ -22,6 +22,15 @@ def _build_sampling_params(vllm_module: Any, gen_cfg: dict[str, Any], n: int) ->
     if gen_cfg.get("seed") is not None:
         kwargs["seed"] = int(gen_cfg["seed"])
     return vllm_module.SamplingParams(**kwargs)
+
+
+def _maybe_count_token_ids(token_ids: Any) -> int | None:
+    if token_ids is None:
+        return None
+    try:
+        return count_token_ids(token_ids)
+    except TypeError:
+        return None
 
 
 def _run_generation(
@@ -59,12 +68,22 @@ def _run_generation(
                 raise RuntimeError(
                     f"vLLM returned {len(texts)} candidates for sample {item['sample_id']}; expected {n}."
                 )
+            response_token_counts = [
+                _maybe_count_token_ids(getattr(candidate, "token_ids", None))
+                for candidate in output.outputs
+            ]
             result_by_index[item["idx"]] = {
                 "idx": item["idx"],
                 "sample_id": item["sample_id"],
                 "prompt": item["prompt"],
                 "generations": texts,
                 "error": None,
+                "meta": {
+                    "prompt_token_count": _maybe_count_token_ids(
+                        getattr(output, "prompt_token_ids", None)
+                    ),
+                    "response_token_counts": response_token_counts,
+                },
             }
 
     return [result_by_index[i] for i in sorted(result_by_index)]
@@ -223,6 +242,7 @@ class VLLMBackend:
                 prompt=item["prompt"],
                 generations=item["generations"],
                 error=item["error"],
+                meta=item.get("meta", {}),
             )
             for item in output_dicts
         ]

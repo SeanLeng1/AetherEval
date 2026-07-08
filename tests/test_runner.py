@@ -7,10 +7,26 @@ from aethereval.core.runner import inspect_prompts, run_evaluation
 from aethereval.core.types import GenerationInput, GenerationOutput
 
 
+class FakeTokenizer:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[str]:
+        del add_special_tokens
+        return text.split()
+
+    def apply_chat_template(
+        self,
+        prompt: list[dict[str, str]],
+        tokenize: bool = False,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        del tokenize, add_generation_prompt
+        return "\n".join(f"{message['role']}: {message['content']}" for message in prompt)
+
+
 class FakeBackend:
     def __init__(self) -> None:
         self.calls = 0
         self.last_gen_cfg: dict | None = None
+        self._tokenizer = FakeTokenizer()
 
     def generate(
         self, inputs: list[GenerationInput], gen_cfg: dict
@@ -31,6 +47,12 @@ class FakeBackend:
                     sample_id=item.sample_id,
                     prompt=item.prompt,
                     generations=[answer for _ in range(item.num_generations)],
+                    meta={
+                        "prompt_token_count": len(str(item.prompt).split()),
+                        "response_token_counts": [
+                            len(answer.split()) for _ in range(item.num_generations)
+                        ],
+                    },
                 )
             )
         return outputs
@@ -232,6 +254,9 @@ class RunnerTests(unittest.TestCase):
             summary = first["results"]["toy"]
             self.assertEqual(summary["new_records"], 2)
             self.assertAlmostEqual(summary["metrics"]["accuracy_first"], 1.0, places=6)
+            self.assertAlmostEqual(
+                summary["metrics"]["avg_response_tokens"], 1.0, places=6
+            )
             self.assertEqual(summary["primary_metric"], "accuracy_first")
             self.assertAlmostEqual(float(summary["primary_score"]), 1.0, places=6)
             self.assertAlmostEqual(
@@ -253,6 +278,7 @@ class RunnerTests(unittest.TestCase):
             self.assertIsInstance(first_row["prompt"], list)
             self.assertEqual(first_row["prompt"][0]["role"], "user")
             self.assertIn("Question: 2 + 2", first_row["prompt"][0]["content"])
+            self.assertEqual(first_row["meta"]["response_token_count"], 1)
 
             resume_backend = NeverCalledBackend()
             second = run_evaluation(
@@ -290,6 +316,9 @@ class RunnerTests(unittest.TestCase):
                 rows = [json.loads(line) for line in f if line.strip()]
             self.assertEqual(len(rows), 2)
             self.assertTrue(all(row["meta"]["batch"] is True for row in rows))
+            self.assertTrue(
+                all(row["meta"]["response_token_count"] == 1 for row in rows)
+            )
 
     def test_resume_rescores_existing_predictions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

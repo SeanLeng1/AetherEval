@@ -20,6 +20,7 @@ from .types import (
 )
 from aethereval.backends import (
     GenerationBackend,
+    count_text_tokens,
     create_backend,
     load_chat_tokenizer,
     render_prompt_with_chat_template,
@@ -156,6 +157,147 @@ def _merge_generation_config(
     if cfg["n"] > 1 and cfg["temperature"] == 0.0:
         raise ValueError("n>1 requires temperature>0. Set --temperature > 0.")
     return cfg
+
+
+def _is_token_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _tokenizer_getter(
+    *,
+    backend: GenerationBackend,
+    model: str,
+    model_kwargs: dict[str, Any] | None,
+) -> Callable[[], Any]:
+    cache = {"tokenizer": getattr(backend, "_tokenizer", None)}
+
+    def _get() -> Any:
+        tokenizer = cache["tokenizer"] or getattr(backend, "_tokenizer", None)
+        if tokenizer is None:
+            tokenizer = load_chat_tokenizer(model, model_kwargs)
+        cache["tokenizer"] = tokenizer
+        return tokenizer
+
+    return _get
+
+
+def _token_count_from_text(text: str, tokenizer_getter: Callable[[], Any]) -> int:
+    return count_text_tokens(text, tokenizer_getter())
+
+
+def _normalize_response_token_counts(
+    *,
+    output: GenerationOutput,
+    tokenizer_getter: Callable[[], Any],
+) -> list[int]:
+    raw_counts = output.meta.get("response_token_counts")
+    if raw_counts is None:
+        counts: list[int | None] = [None for _ in output.generations]
+    elif isinstance(raw_counts, list) and len(raw_counts) == len(output.generations):
+        counts = []
+        for idx, value in enumerate(raw_counts):
+            if value is None:
+                counts.append(None)
+            elif _is_token_count(value):
+                counts.append(int(value))
+            else:
+                raise ValueError(
+                    f"Invalid response_token_counts[{idx}] for sample {output.sample_id}: {value!r}"
+                )
+    else:
+        raise ValueError(
+            "GenerationOutput.meta['response_token_counts'] must be a list aligned "
+            f"with generations for sample {output.sample_id}."
+        )
+
+    normalized: list[int] = []
+    for generation, count in zip(output.generations, counts, strict=True):
+        if count is None:
+            count = _token_count_from_text(generation, tokenizer_getter)
+        normalized.append(count)
+    return normalized
+
+
+def _ensure_output_token_metadata(
+    *,
+    output: GenerationOutput,
+    tokenizer_getter: Callable[[], Any],
+) -> None:
+    if not isinstance(output.meta, dict):
+        raise ValueError(f"GenerationOutput meta must be a dict for {output.sample_id}")
+
+    prompt_count = output.meta.get("prompt_token_count")
+    if prompt_count is None:
+        rendered_prompt = render_prompt_with_chat_template(
+            output.prompt, tokenizer_getter()
+        )
+        prompt_count = _token_count_from_text(rendered_prompt, tokenizer_getter)
+    elif not _is_token_count(prompt_count):
+        raise ValueError(
+            f"Invalid prompt_token_count for sample {output.sample_id}: {prompt_count!r}"
+        )
+
+    output.meta["prompt_token_count"] = int(prompt_count)
+    output.meta["response_token_counts"] = _normalize_response_token_counts(
+        output=output,
+        tokenizer_getter=tokenizer_getter,
+    )
+
+
+def _ensure_outputs_token_metadata(
+    outputs: list[GenerationOutput],
+    tokenizer_getter: Callable[[], Any],
+) -> None:
+    for output in outputs:
+        _ensure_output_token_metadata(output=output, tokenizer_getter=tokenizer_getter)
+
+
+def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str, int]:
+    prompt_count = output.meta["prompt_token_count"]
+    response_counts = output.meta["response_token_counts"]
+    if not _is_token_count(prompt_count):
+        raise ValueError(f"Invalid prompt_token_count for sample {output.sample_id}")
+    if (
+        not isinstance(response_counts, list)
+        or local_idx >= len(response_counts)
+        or not _is_token_count(response_counts[local_idx])
+    ):
+        raise ValueError(
+            f"Invalid response_token_counts for sample {output.sample_id}"
+        )
+    return {
+        "prompt_token_count": int(prompt_count),
+        "response_token_count": int(response_counts[local_idx]),
+    }
+
+
+def _token_usage_summary(records: list[GenerationRecord]) -> dict[str, Any]:
+    prompt_counts: list[int] = []
+    response_counts: list[int] = []
+    for record in records:
+        prompt_count = record.meta.get("prompt_token_count")
+        response_count = record.meta.get("response_token_count")
+        if not _is_token_count(prompt_count) or not _is_token_count(response_count):
+            raise ValueError(
+                f"Missing token counts in record meta for sample {record.sample_id}"
+            )
+        prompt_counts.append(int(prompt_count))
+        response_counts.append(int(response_count))
+
+    if not records:
+        return {
+            "avg_prompt_tokens": None,
+            "avg_response_tokens": None,
+            "total_prompt_tokens": 0,
+            "total_response_tokens": 0,
+        }
+
+    return {
+        "avg_prompt_tokens": sum(prompt_counts) / len(prompt_counts),
+        "avg_response_tokens": sum(response_counts) / len(response_counts),
+        "total_prompt_tokens": sum(prompt_counts),
+        "total_response_tokens": sum(response_counts),
+    }
 
 
 def _record_to_json(record: GenerationRecord) -> dict[str, Any]:
@@ -309,13 +451,17 @@ def _score_generation_outputs(
     samples_by_id: dict[str, Sample],
     outputs: list[GenerationOutput],
     metric_options: dict[str, Any],
+    runtime_metric_options: dict[str, Any] | None = None,
     total_records: int,
     progress_desc: str,
 ) -> dict[str, list[tuple[float, bool, Any, dict[str, Any]]]]:
     batch_score_fn = getattr(metrics_module, "score_generations_batch", None)
     if callable(batch_score_fn):
         samples = [samples_by_id[output.sample_id] for output in outputs]
-        raw_results = batch_score_fn(samples, outputs, metric_options)
+        score_options = dict(metric_options)
+        if runtime_metric_options:
+            score_options.update(runtime_metric_options)
+        raw_results = batch_score_fn(samples, outputs, score_options)
         return _normalize_batch_score_results(raw_results=raw_results, outputs=outputs)
 
     score_bar = _make_progress_bar(total_records, progress_desc)
@@ -347,11 +493,25 @@ def _records_to_generation_outputs(
     outputs: list[GenerationOutput] = []
     gen_indices: dict[str, list[int]] = {}
     for sample_id, sample_records in grouped.items():
+        prompt_counts = [
+            record.meta.get("prompt_token_count")
+            for record in sample_records
+            if record.meta.get("prompt_token_count") is not None
+        ]
+        meta: dict[str, Any] = {}
+        if prompt_counts:
+            meta["prompt_token_count"] = prompt_counts[0]
+        response_counts: list[int | None] = [
+            record.meta.get("response_token_count") for record in sample_records
+        ]
+        if any(count is not None for count in response_counts):
+            meta["response_token_counts"] = response_counts
         outputs.append(
             GenerationOutput(
                 sample_id=sample_id,
                 prompt=sample_records[0].prompt,
                 generations=[record.generation for record in sample_records],
+                meta=meta,
             )
         )
         gen_indices[sample_id] = [record.gen_idx for record in sample_records]
@@ -433,6 +593,7 @@ def _run_single_task(
     metric_options: dict[str, Any],
     overwrite: bool,
     run_config_common: dict[str, Any],
+    tokenizer_getter: Callable[[], Any],
 ) -> dict[str, Any]:
     _info(f"[{task_name}] loading task from {task_dir}")
     samples_raw = task_module.load_samples(task_dir)
@@ -493,11 +654,16 @@ def _run_single_task(
         existing_outputs, existing_gen_indices = _records_to_generation_outputs(
             existing_records
         )
+        _ensure_outputs_token_metadata(existing_outputs, tokenizer_getter)
+        runtime_metric_options = {}
+        if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
+            runtime_metric_options["_tokenizer"] = tokenizer_getter()
         existing_scores = _score_generation_outputs(
             metrics_module=metrics_module,
             samples_by_id=samples_by_id,
             outputs=existing_outputs,
             metric_options={**metric_options, "n": n},
+            runtime_metric_options=runtime_metric_options,
             total_records=len(existing_records),
             progress_desc=f"[{task_name}] rescoring",
         )
@@ -507,10 +673,12 @@ def _run_single_task(
             original_records = existing_records_by_id[output.sample_id]
             scores = existing_scores[output.sample_id]
             gen_indices = existing_gen_indices[output.sample_id]
-            for record, gen_idx, scored in zip(
-                original_records, gen_indices, scores, strict=True
+            for local_idx, (record, gen_idx, scored) in enumerate(
+                zip(original_records, gen_indices, scores, strict=True)
             ):
                 score, is_pass, parsed, meta = scored
+                record_meta = dict(meta)
+                record_meta.update(_generation_token_meta(output, local_idx))
                 rescored_existing.append(
                     GenerationRecord(
                         sample_id=record.sample_id,
@@ -522,7 +690,7 @@ def _run_single_task(
                         parsed=parsed,
                         gold=sample.gold,
                         error=record.error,
-                        meta=meta,
+                        meta=record_meta,
                     )
                 )
 
@@ -600,11 +768,17 @@ def _run_single_task(
                     f"sample {output.sample_id}, expected {len(missing)}"
                 )
 
+        _ensure_outputs_token_metadata(generated_outputs, tokenizer_getter)
+        runtime_metric_options = {}
+        if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
+            runtime_metric_options["_tokenizer"] = tokenizer_getter()
+
         generated_scores = _score_generation_outputs(
             metrics_module=metrics_module,
             samples_by_id=samples_by_id,
             outputs=generated_outputs,
             metric_options={**metric_options, "n": n},
+            runtime_metric_options=runtime_metric_options,
             total_records=pending_record_count,
             progress_desc=f"[{task_name}] scoring",
         )
@@ -617,6 +791,8 @@ def _run_single_task(
             scores = generated_scores[output.sample_id]
             for local_idx, gen_idx in enumerate(missing):
                 score, is_pass, parsed, meta = scores[local_idx]
+                record_meta = dict(meta)
+                record_meta.update(_generation_token_meta(output, local_idx))
                 record = GenerationRecord(
                     sample_id=sample.id,
                     gen_idx=gen_idx,
@@ -627,7 +803,7 @@ def _run_single_task(
                     parsed=parsed,
                     gold=sample.gold,
                     error=None,
-                    meta=meta,
+                    meta=record_meta,
                 )
                 new_records.append(record)
                 rows_to_write.append(_record_to_json(record))
@@ -651,6 +827,11 @@ def _run_single_task(
         warnings = [str(warnings)]
 
     metrics = aggregate_result
+    token_usage = _token_usage_summary(all_records)
+    if token_usage["avg_prompt_tokens"] is not None:
+        metrics["avg_prompt_tokens"] = token_usage["avg_prompt_tokens"]
+    if token_usage["avg_response_tokens"] is not None:
+        metrics["avg_response_tokens"] = token_usage["avg_response_tokens"]
     primary_metric, primary_score = _resolve_primary_metric(metrics_module, metrics)
 
     summary = {
@@ -661,6 +842,7 @@ def _run_single_task(
         "new_records": len(new_records),
         "total_records": len(all_records),
         "metrics": metrics,
+        "token_usage": token_usage,
         "primary_metric": primary_metric,
         "primary_score": primary_score,
         "warnings": warnings,
@@ -743,6 +925,11 @@ def run_evaluation(
         )
         created_backend = True
     backend_label = getattr(backend, "name", backend_name)
+    get_tokenizer = _tokenizer_getter(
+        backend=backend,
+        model=model,
+        model_kwargs=effective_model_kwargs,
+    )
 
     try:
         run_config_common = {
@@ -776,6 +963,7 @@ def run_evaluation(
                 metric_options=resolved_metric_options,
                 overwrite=overwrite,
                 run_config_common=run_config_common,
+                tokenizer_getter=get_tokenizer,
             )
             summaries[task_name] = summary
             _info(f"===== finish task: {task_name} =====")

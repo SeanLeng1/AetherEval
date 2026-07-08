@@ -1,8 +1,9 @@
 # BFCL-v3 (external benchmark)
 
-Reproduces the **Berkeley Function Calling Leaderboard v3** numbers in GDPO Table 1
-(Live / Non-Live / Multi-Turn Overall Acc, Avg Acc, Correct Format) for ToolRL/GDPO-style
-models — i.e. models that emit
+Reproduces the **Berkeley Function Calling Leaderboard v3** numbers reported by
+ToolRL-style papers (`OverallAcc`, `Non-LiveASTAcc`, `Non-LiveExecAcc`, `LiveAcc`,
+`MultiTurnAcc`, `RelevanceDetection`, `IrrelevanceDetection`) for ToolRL/GDPO-style
+models, i.e. models that emit
 `<think>…</think>\n<tool_call>…</tool_call>\n<response>…</response>`.
 
 ## Why this is an *external* benchmark
@@ -78,27 +79,41 @@ result = run(ExternalRunSpec(
     output_dir=Path("outputs/bfcl-base"),
     categories=["all"], backend="sglang", num_gpus=1,
 ))
-print(result.metrics, result.primary_score)   # primary_metric = "avg_acc"
+print(result.metrics, result.primary_score)   # primary_metric = "OverallAcc"
 ```
 
 ## Output
 
 ```text
 outputs/<run_id>/bfcl/
+  predictions.jsonl   # AetherEval-normalized rows, one BFCL test case per row
   result/   # bfcl raw generations
   score/    # bfcl leaderboard csv (data_overall.csv, data_live.csv, …)
   summary.json   # AetherEval-style: {metrics, primary_metric, primary_score}
 ```
 
-`metrics` keys → GDPO Table 1 columns:
+`predictions.jsonl` follows the standard AetherEval row shape
+(`sample_id`, `gen_idx`, `prompt`, `generation`, `score`, `is_pass`, `parsed`,
+`gold`, `error`, `meta`). The BFCL raw record is preserved under
+`meta.bfcl_record`, and the original `result/` and `score/` trees are retained for
+faithful BFCL debugging/re-scoring.
 
-| metric key                | Table 1 column        | source (data_overall.csv) |
-|---------------------------|-----------------------|---------------------------|
-| `non_live_overall_acc`    | Non-Live Overall Acc  | `Non-Live AST Acc`        |
-| `live_overall_acc`        | Live Overall Acc      | `Live Acc`                |
-| `multi_turn_overall_acc`  | Multi Turn Overall Acc| `Multi Turn Acc`          |
-| `avg_acc`                 | Avg Acc               | mean of the three overalls |
-| `correct_format`          | Correct Format        | ToolRL format check over generations |
+`metrics` keys → ToolRL paper columns:
+
+| metric key              | source (`data_overall.csv`) |
+|-------------------------|-----------------------------|
+| `OverallAcc`            | `Overall Acc`               |
+| `Non-LiveASTAcc`        | `Non-Live AST Acc`          |
+| `Non-LiveExecAcc`       | `Non-Live Exec Acc`         |
+| `LiveAcc`               | `Live Acc`                  |
+| `MultiTurnAcc`          | `Multi Turn Acc`            |
+| `RelevanceDetection`    | `Relevance Detection`       |
+| `IrrelevanceDetection`  | `Irrelevance Detection`     |
+| `correct_format`        | ToolRL format check over generations |
+
+Snake-case aliases (`overall_acc`, `non_live_ast_acc`, etc.) and legacy aliases
+(`avg_acc`, `non_live_overall_acc`, `live_overall_acc`, `multi_turn_overall_acc`)
+are also emitted for compatibility.
 
 GDPO Table 1 reference (avg of 5 runs) for sanity-checking:
 
@@ -118,4 +133,5 @@ Qwen2.5-Instruct-1.5B  Live 37.89  Multi 0.12  Non-Live 15.63  Avg 17.88  Format
 
 > Multi-turn note: BFCL's new handler API drops the per-call `turn_type`; the handler
 > infers multi-turn from tool-feedback in the message history. Single-turn (Non-Live /
-> Live, which dominate Avg Acc) is exact; multi-turn uses the same ToolRL template.
+> Live, which dominate the overall report) is exact; multi-turn uses the same ToolRL
+> template.

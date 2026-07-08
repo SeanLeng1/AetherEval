@@ -3,7 +3,12 @@ from typing import Any
 
 from aethereval.core.types import GenerationInput, GenerationOutput
 
-from ..prompt import _prompt_to_text, load_chat_tokenizer
+from ..prompt import (
+    _prompt_to_text,
+    count_text_tokens,
+    count_token_ids,
+    load_chat_tokenizer,
+)
 
 
 def _build_sampling_params(gen_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +57,105 @@ def _extract_text(output: Any) -> str:
     raise TypeError(f"Unsupported SGLang output type: {type(output).__name__}")
 
 
+def _maybe_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _dict_first_int(mapping: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        value = _maybe_int(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _maybe_count_token_ids(token_ids: Any) -> int | None:
+    if token_ids is None:
+        return None
+    try:
+        return count_token_ids(token_ids)
+    except TypeError:
+        return None
+
+
+def _extract_output_token_count(output: Any) -> int | None:
+    if isinstance(output, str):
+        return None
+
+    if isinstance(output, dict):
+        for key in ("output_token_ids", "output_ids", "token_ids"):
+            count = _maybe_count_token_ids(output.get(key))
+            if count is not None:
+                return count
+        count = _dict_first_int(
+            output,
+            (
+                "output_token_count",
+                "completion_token_count",
+                "num_output_tokens",
+                "num_completion_tokens",
+                "completion_tokens",
+            ),
+        )
+        if count is not None:
+            return count
+        meta_info = output.get("meta_info")
+        if isinstance(meta_info, dict):
+            count = _dict_first_int(
+                meta_info,
+                (
+                    "output_token_count",
+                    "completion_token_count",
+                    "num_output_tokens",
+                    "num_completion_tokens",
+                    "completion_tokens",
+                ),
+            )
+            if count is not None:
+                return count
+        choices = output.get("choices")
+        if isinstance(choices, list) and choices:
+            return _extract_output_token_count(choices[0])
+        outputs = output.get("outputs")
+        if isinstance(outputs, list) and outputs:
+            return _extract_output_token_count(outputs[0])
+        return None
+
+    for attr in ("output_token_ids", "output_ids", "token_ids"):
+        count = _maybe_count_token_ids(getattr(output, attr, None))
+        if count is not None:
+            return count
+    for attr in (
+        "output_token_count",
+        "completion_token_count",
+        "num_output_tokens",
+        "num_completion_tokens",
+        "completion_tokens",
+    ):
+        count = _maybe_int(getattr(output, attr, None))
+        if count is not None:
+            return count
+    meta_info = getattr(output, "meta_info", None)
+    if isinstance(meta_info, dict):
+        return _dict_first_int(
+            meta_info,
+            (
+                "output_token_count",
+                "completion_token_count",
+                "num_output_tokens",
+                "num_completion_tokens",
+                "completion_tokens",
+            ),
+        )
+    return None
+
+
 def _normalize_outputs(outputs: Any) -> list[Any]:
     if isinstance(outputs, dict):
         return [outputs]
@@ -97,6 +201,7 @@ def _outputs_from_dicts(output_dicts: list[dict[str, Any]]) -> list[GenerationOu
             prompt=item["prompt"],
             generations=item["generations"],
             error=item["error"],
+            meta=item.get("meta", {}),
         )
         for item in output_dicts
     ]
@@ -135,6 +240,8 @@ def _run_generation(
                     request_payloads.append(item)
 
             grouped_texts: dict[int, list[str]] = defaultdict(list)
+            grouped_token_counts: dict[int, list[int | None]] = defaultdict(list)
+            prompt_token_counts: dict[int, int] = {}
             for start in range(0, len(prompts), batch_size):
                 end = start + batch_size
                 batch_prompts = prompts[start:end]
@@ -146,13 +253,23 @@ def _run_generation(
                     raise RuntimeError(
                         f"SGLang returned {len(outputs)} outputs for {len(batch_payloads)} prompts."
                     )
-                for item, output in zip(batch_payloads, outputs):
-                    grouped_texts[int(item["idx"])].append(_extract_text(output))
+                for item, prompt_text, output in zip(
+                    batch_payloads, batch_prompts, outputs, strict=True
+                ):
+                    item_idx = int(item["idx"])
+                    grouped_texts[item_idx].append(_extract_text(output))
+                    grouped_token_counts[item_idx].append(
+                        _extract_output_token_count(output)
+                    )
+                    prompt_token_counts[item_idx] = count_text_tokens(
+                        prompt_text, tokenizer
+                    )
                 if progress_bar is not None:
                     progress_bar.update(len(batch_payloads))
 
             for item in items:
-                texts = grouped_texts[int(item["idx"])]
+                item_idx = int(item["idx"])
+                texts = grouped_texts[item_idx]
                 if len(texts) != n:
                     raise RuntimeError(
                         f"SGLang returned {len(texts)} candidates for sample {item['sample_id']}; expected {n}."
@@ -163,6 +280,10 @@ def _run_generation(
                     "prompt": item["prompt"],
                     "generations": texts,
                     "error": None,
+                    "meta": {
+                        "prompt_token_count": prompt_token_counts[item_idx],
+                        "response_token_counts": grouped_token_counts[item_idx],
+                    },
                 }
     finally:
         if progress_bar is not None:
