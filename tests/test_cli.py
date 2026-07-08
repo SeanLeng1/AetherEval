@@ -15,7 +15,12 @@ from aethereval.cli import (
 )
 from aethereval.config import resolve_run_arguments
 from benchmarks.bfcl._compat import _set_bfcl_project_root
-from benchmarks.bfcl.external import _filter_bfcl_prints, _raise_on_inference_errors
+from benchmarks.bfcl.external import (
+    _filter_bfcl_prints,
+    _is_allowed_zero_score_error,
+    _raise_on_inference_errors,
+    _server_command_with_context,
+)
 
 
 class ExternalCliTests(unittest.TestCase):
@@ -183,6 +188,45 @@ class ExternalCliTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "simple_1"):
                 _raise_on_inference_errors(result_dir, "dry-model")
 
+    def test_bfcl_context_overflow_counts_as_zero_score(self) -> None:
+        errors = [
+            (
+                "Error during inference: BFCL prompt exceeds max context length: "
+                "input_tokens=95602, max_context_length=32768."
+            ),
+            (
+                "Error during inference: BFCL prompt exceeds max context length: "
+                "input_tokens=32817, max_context_length=32768."
+            ),
+        ]
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "BFCL_multi_turn_long_context_result.json").write_text(
+                json.dumps(
+                    {
+                        "id": "multi_turn_long_context_129",
+                        "result": errors[0],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (model_dir / "BFCL_multi_turn_miss_param_result.json").write_text(
+                json.dumps(
+                    {
+                        "id": "multi_turn_miss_param_190",
+                        "result": errors[1],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(all(_is_allowed_zero_score_error(e) for e in errors))
+            _raise_on_inference_errors(result_dir, "dry-model")
+
     def test_bfcl_print_filter_keeps_errors(self) -> None:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -206,6 +250,25 @@ class ExternalCliTests(unittest.TestCase):
                     os.environ["BFCL_PROJECT_ROOT"],
                     str(Path(tmp) / "bfcl"),
                 )
+
+    def test_bfcl_server_command_receives_context_length(self) -> None:
+        sglang_cmd = [
+            "python",
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "model",
+        ]
+        vllm_cmd = ["vllm", "serve", "model"]
+
+        self.assertEqual(
+            _server_command_with_context(sglang_cmd, 131072)[-2:],
+            ["--context-length", "131072"],
+        )
+        self.assertEqual(
+            _server_command_with_context(vllm_cmd, 65536)[-2:],
+            ["--max-model-len", "65536"],
+        )
 
 
 if __name__ == "__main__":

@@ -240,13 +240,20 @@ class RLLAHandler(OSSHandler):
         if max_tokens is None or max_tokens <= 0:
             raise ValueError("RLLA_BFCL_MAX_TOKENS must be positive.")
 
+        max_context_length = _env_int(
+            "RLLA_BFCL_MAX_CONTEXT_LENGTH",
+            self.max_context_length,
+        )
+        if max_context_length is None or max_context_length <= 0:
+            raise ValueError("BFCL max context length must be positive.")
+
         input_token_count = len(self.tokenizer.tokenize(formatted_prompt))
-        available_tokens = self.max_context_length - input_token_count - 2
+        available_tokens = max_context_length - input_token_count - 2
         if available_tokens <= 0:
             raise ValueError(
                 "BFCL prompt exceeds max context length: "
                 f"input_tokens={input_token_count}, "
-                f"max_context_length={self.max_context_length}."
+                f"max_context_length={max_context_length}."
             )
         leftover_tokens_count = min(max_tokens, available_tokens)
 

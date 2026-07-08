@@ -142,6 +142,54 @@ def _cap_bfcl_thread_pool(max_workers: int):
         base_oss_handler.ThreadPoolExecutor = original
 
 
+def _server_command_with_context(
+    command,
+    max_context_length: int | None,
+):
+    if max_context_length is None:
+        return command
+    if not isinstance(command, (list, tuple)):
+        return command
+
+    patched = list(command)
+    if "sglang.launch_server" in patched and "--context-length" not in patched:
+        patched.extend(["--context-length", str(max_context_length)])
+    elif patched[:2] == ["vllm", "serve"] and "--max-model-len" not in patched:
+        patched.extend(["--max-model-len", str(max_context_length)])
+
+    return type(command)(patched) if isinstance(command, tuple) else patched
+
+
+@contextlib.contextmanager
+def _patch_bfcl_server_context(max_context_length: int | None):
+    if max_context_length is None:
+        yield
+        return
+
+    from bfcl_eval.model_handler.local_inference import base_oss_handler
+
+    original = base_oss_handler.subprocess.Popen
+
+    def context_popen(*args, **kwargs):
+        if args:
+            args = (
+                _server_command_with_context(args[0], max_context_length),
+                *args[1:],
+            )
+        elif "args" in kwargs:
+            kwargs["args"] = _server_command_with_context(
+                kwargs["args"],
+                max_context_length,
+            )
+        return original(*args, **kwargs)
+
+    base_oss_handler.subprocess.Popen = context_popen
+    try:
+        yield
+    finally:
+        base_oss_handler.subprocess.Popen = original
+
+
 def _is_noisy_bfcl_print(args: tuple[object, ...]) -> bool:
     text = " ".join(str(arg) for arg in args).strip()
     if text in _NOISY_BFCL_MESSAGES:
@@ -185,8 +233,10 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
         if spec.run_generation:
             from bfcl_eval._llm_response_generation import main as generation_main
 
-            with _filter_bfcl_prints(not spec.verbose), _cap_bfcl_thread_pool(
-                spec.num_threads
+            with (
+                _filter_bfcl_prints(not spec.verbose),
+                _cap_bfcl_thread_pool(spec.num_threads),
+                _patch_bfcl_server_context(spec.max_context_length),
             ):
                 generation_main(_gen_args(spec, result_dir))
 
@@ -288,6 +338,10 @@ def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
     return metrics
 
 
+def _is_allowed_zero_score_error(error: str) -> bool:
+    return "BFCL prompt exceeds max context length:" in error
+
+
 def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
     model_dir = result_dir / model.replace("/", "_")
     result_files = list(model_dir.rglob("*_result.json")) if model_dir.exists() else []
@@ -307,6 +361,7 @@ def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
                     str(value)
                     for value in values
                     if str(value).startswith("Error during inference:")
+                    and not _is_allowed_zero_score_error(str(value))
                 ]
                 if not errors:
                     continue
