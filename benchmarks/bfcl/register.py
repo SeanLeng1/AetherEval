@@ -15,6 +15,7 @@ def register_rlla_model(
     registry_name: str = DEFAULT_REGISTRY_NAME,
     *,
     is_fc_model: bool = False,
+    project_root: str | None = None,
 ) -> str:
     """Add ``registry_name`` -> RLLAHandler to MODEL_CONFIG_MAPPING (idempotent).
 
@@ -24,7 +25,7 @@ def register_rlla_model(
     name together with ``model_path`` for a local checkpoint. (``ModelConfig.model_name``
     is unused by the OSS handler in BFCL v3.)
     """
-    ensure_bfcl_importable()
+    ensure_bfcl_importable(project_root=project_root)
 
     from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING, ModelConfig
 

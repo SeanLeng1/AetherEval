@@ -180,7 +180,7 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
 
     with _temporary_env(_handler_env(spec)):
         if spec.run_generation or spec.run_evaluation:
-            register_rlla_model(spec.model)
+            register_rlla_model(spec.model, project_root=str(out))
 
         if spec.run_generation:
             from bfcl_eval._llm_response_generation import main as generation_main

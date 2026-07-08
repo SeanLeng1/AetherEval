@@ -10,8 +10,11 @@ until ``model_config`` imports. No real API SDK behaviour is required.
 """
 
 import importlib
+import os
 import sys
+import tempfile
 import types
+from pathlib import Path
 
 
 _TREE_SITTER_MODULES = (
@@ -146,9 +149,24 @@ def _ensure_tenacity_stubs() -> None:
         sys.modules.pop(module_name, None)
 
 
-def ensure_bfcl_importable(max_iters: int = 64) -> None:
+def _set_bfcl_project_root(project_root: str | Path | None) -> None:
+    if project_root is not None:
+        os.environ["BFCL_PROJECT_ROOT"] = str(Path(project_root).resolve())
+        return
+    os.environ.setdefault(
+        "BFCL_PROJECT_ROOT",
+        str((Path(tempfile.gettempdir()) / "aethereval_bfcl").resolve()),
+    )
+
+
+def ensure_bfcl_importable(
+    max_iters: int = 64,
+    *,
+    project_root: str | Path | None = None,
+) -> None:
     """Import bfcl_eval.constants.model_config, patching SDK gaps until it succeeds."""
     target = "bfcl_eval.constants.model_config"
+    _set_bfcl_project_root(project_root)
     _ensure_tree_sitter_stubs()
     _ensure_tenacity_stubs()
     for _ in range(max_iters):

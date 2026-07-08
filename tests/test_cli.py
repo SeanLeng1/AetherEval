@@ -1,8 +1,11 @@
 import contextlib
 import io
+import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from aethereval.cli import (
     _build_external_spec,
@@ -11,6 +14,7 @@ from aethereval.cli import (
     run_selected_tasks,
 )
 from aethereval.config import resolve_run_arguments
+from benchmarks.bfcl._compat import _set_bfcl_project_root
 from benchmarks.bfcl.external import _filter_bfcl_prints, _raise_on_inference_errors
 
 
@@ -166,7 +170,13 @@ class ExternalCliTests(unittest.TestCase):
             model_dir = result_dir / "dry-model"
             model_dir.mkdir(parents=True)
             (model_dir / "BFCL_simple_result.json").write_text(
-                '{"id": "simple_1", "result": "Error during inference: Connection error."}\n',
+                json.dumps(
+                    {
+                        "id": "simple_1",
+                        "result": "Error during inference: Connection error.",
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
 
@@ -186,6 +196,16 @@ class ExternalCliTests(unittest.TestCase):
         self.assertNotIn("ID: base_5", output)
         self.assertNotIn("Empty response", output)
         self.assertIn("Error occurred", output)
+
+    def test_bfcl_project_root_env_uses_writable_output(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {}, clear=True):
+                _set_bfcl_project_root(Path(tmp) / "bfcl")
+
+                self.assertEqual(
+                    os.environ["BFCL_PROJECT_ROOT"],
+                    str(Path(tmp) / "bfcl"),
+                )
 
 
 if __name__ == "__main__":
