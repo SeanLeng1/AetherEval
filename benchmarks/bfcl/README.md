@@ -14,9 +14,11 @@ checkers. Faithfully reproducing it requires the official `bfcl_eval` package (i
 data, AST checker, and multi-turn runtime), not a re-implementation.
 
 So BFCL is wrapped here as an **external benchmark**: a self-contained extension under
-`benchmarks/bfcl/` with an explicit `run()` API. AetherEval's task discovery ignores it
-(no `task.py`/`metrics.py`), and it drives `bfcl_eval` in-process while writing an
-AetherEval-style `summary.json`. Any future external benchmark can follow the same
+`benchmarks/bfcl/` with an explicit `run()` API. It does not provide native
+`task.py`/`metrics.py` files, but the AetherEval CLI task router still accepts
+`--tasks bfcl` and dispatches to this external runner. It drives `bfcl_eval`
+in-process while writing an AetherEval-style `summary.json`. Any future external
+benchmark can follow the same
 `ExternalRunSpec` / `ExternalResult` / `run` shape.
 
 ## Requirements
@@ -35,20 +37,35 @@ local **sglang** OSS handler, and [`_compat.py`](_compat.py) stubs those unused 
 
 ```bash
 # base HF model (registry name == HF id):
-aethereval --external-benchmark bfcl \
+aethereval --tasks bfcl \
   --model Qwen/Qwen2.5-1.5B-Instruct \
-  --output-dir outputs/bfcl-base --categories all --num-gpus 1
+  --output-dir outputs --categories all --num-gpus 1
 
 # a GDPO/GRPO checkpoint (any registry name + a local dir):
-aethereval --external-benchmark bfcl \
+aethereval --tasks bfcl \
   --model rlla-gdpo --model-path /path/to/hf_ckpt \
-  --output-dir outputs/bfcl-gdpo --categories all --num-gpus 1
+  --output-dir outputs --categories all --num-gpus 1
 ```
 
 `--categories` accepts BFCL collections/categories: `all`, `non_live`, `live`,
 `multi_turn`, or individual ones (`live_simple`, `multi_turn_base`, …). Backend defaults
-to **sglang**. If `--num-gpus` is omitted, the AetherEval CLI uses `--tp-size` as the
-BFCL GPU count when it is provided.
+to **sglang**. If `--num-gpus` is omitted, the AetherEval CLI uses `--dp-size`, then
+`--tp-size`, as the BFCL GPU count.
+
+BFCL's local handler sends requests to the local SGLang server concurrently. The upstream
+package hardcodes 100 workers, which can overload local servers on long-generation runs;
+AetherEval caps that concurrency with `--num-threads` (default: 16). Lower it to `8` or
+`4` if you see local `Connection error` messages.
+
+Upstream BFCL also prints very verbose multi-turn step logs (`ID: ..., Turn: ..., Step:
+...`, empty-response notices, and separator lines). AetherEval filters those by default;
+use `--bfcl-verbose` only when debugging BFCL's internal turn loop.
+
+BFCL is launched via the normal AetherEval task path, so generation/backend settings are
+resolved from the same CLI/YAML config stack as native tasks. The SGLang server may still
+log the model's default `generation_config` at startup, but the BFCL request overrides the
+actual sampling parameters: `temperature`, `top_p`, `top_k`, `max_new_tokens`, and
+`context_length` are forwarded where applicable, with `repetition_penalty=1.0`.
 
 ### Python API
 
@@ -67,7 +84,7 @@ print(result.metrics, result.primary_score)   # primary_metric = "avg_acc"
 ## Output
 
 ```text
-outputs/<run>/
+outputs/<run_id>/bfcl/
   result/   # bfcl raw generations
   score/    # bfcl leaderboard csv (data_overall.csv, data_live.csv, …)
   summary.json   # AetherEval-style: {metrics, primary_metric, primary_score}
@@ -98,7 +115,6 @@ Qwen2.5-Instruct-1.5B  Live 37.89  Multi 0.12  Non-Live 15.63  Avg 17.88  Format
 - `register.py` — inject the handler into bfcl's `MODEL_CONFIG_MAPPING`.
 - `external.py` — `ExternalRunSpec` / `ExternalResult` / `run()` + score parsing.
 - `_compat.py` — stub drifted optional API SDKs so `bfcl_eval` imports under `--no-deps`.
-- `__main__.py` — compatibility CLI; prefer `aethereval --external-benchmark bfcl`.
 
 > Multi-turn note: BFCL's new handler API drops the per-call `turn_type`; the handler
 > infers multi-turn from tool-feedback in the message history. Single-turn (Non-Live /

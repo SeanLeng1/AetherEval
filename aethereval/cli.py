@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_yaml_config, resolve_run_arguments
+from .core.io import default_run_id_for_model, ensure_dir, write_json
 from .core.runner import inspect_prompts, run_evaluation
 from .core.task_register import list_task_default_gens, list_tasks
 
-EXTERNAL_BENCHMARKS = ("bfcl",)
+EXTERNAL_TASKS = ("bfcl",)
 
 
 def _info(message: str) -> None:
@@ -38,56 +39,304 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _parse_tasks_arg(tasks_arg: str) -> list[str]:
+    selected = [item.strip() for item in tasks_arg.split(",") if item.strip()]
+    if not selected:
+        raise ValueError("No tasks selected.")
+    return selected
+
+
+def _split_native_external_tasks(tasks_arg: str) -> tuple[list[str], list[str]]:
+    native_available = set(list_tasks())
+    if tasks_arg.strip() == "all":
+        return sorted(native_available), []
+
+    selected = _parse_tasks_arg(tasks_arg)
+    native_tasks: list[str] = []
+    external_tasks: list[str] = []
+    unknown: list[str] = []
+    for task_name in selected:
+        if task_name in native_available:
+            native_tasks.append(task_name)
+        elif task_name in EXTERNAL_TASKS:
+            external_tasks.append(task_name)
+        else:
+            unknown.append(task_name)
+
+    if unknown:
+        available = sorted(native_available | set(EXTERNAL_TASKS))
+        raise ValueError(
+            f"Unknown tasks: {', '.join(sorted(unknown))}. "
+            f"Available: {', '.join(available)}"
+        )
+    return native_tasks, external_tasks
+
+
 def _require_external_common(args: argparse.Namespace) -> None:
     if not args.model:
-        raise ValueError("--model is required with --external-benchmark.")
-    if not args.output_dir:
-        raise ValueError("--output-dir is required with --external-benchmark.")
+        raise ValueError("--model is required for external tasks.")
 
 
-def _build_external_spec(args: argparse.Namespace) -> tuple[Any, Any]:
+def _build_external_spec(
+    args: argparse.Namespace,
+    task_name: str,
+    output_dir: Path | None = None,
+) -> tuple[Any, Any]:
     _require_external_common(args)
     backend = args.backend or "sglang"
+    effective_output_dir = Path(output_dir) if output_dir is not None else Path(
+        args.output_dir or "outputs"
+    )
 
-    if args.external_benchmark == "bfcl":
+    if task_name == "bfcl":
         from benchmarks.bfcl.external import ExternalRunSpec, run
 
         num_gpus = (
             args.num_gpus
             if args.num_gpus is not None
+            else args.dp_size
+            if args.dp_size is not None
             else args.tp_size
             if args.tp_size is not None
             else 1
         )
         spec = ExternalRunSpec(
             model=args.model,
-            output_dir=Path(args.output_dir),
+            output_dir=effective_output_dir,
             model_path=args.model_path,
             categories=_split_csv(args.categories, ["all"]),
             backend=backend,
             num_gpus=num_gpus,
+            num_threads=args.num_threads if args.num_threads is not None else 16,
             gpu_memory_utilization=(
                 args.gpu_memory_utilization
                 if args.gpu_memory_utilization is not None
                 else 0.9
             ),
             temperature=args.temperature if args.temperature is not None else 0.001,
+            max_tokens=(
+                args.max_new_tokens if args.max_new_tokens is not None else 4096
+            ),
+            max_context_length=(
+                args.context_length
+                if args.context_length is not None
+                else args.max_model_len
+            ),
+            top_p=args.top_p if args.top_p is not None else 1.0,
+            top_k=args.top_k if args.top_k is not None else -1,
+            verbose=bool(args.bfcl_verbose),
             allow_overwrite=True if args.overwrite is None else bool(args.overwrite),
             run_generation=not args.skip_generation,
             run_evaluation=not args.skip_evaluation,
         )
         return spec, run
 
-    raise ValueError(f"Unknown external benchmark: {args.external_benchmark}")
+    raise ValueError(f"Unknown external task: {task_name}")
 
 
-def run_external_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    spec, run = _build_external_spec(args)
-    _info(
-        f"external_benchmark={args.external_benchmark} model={args.model} "
-        f"backend={spec.backend} output_dir={spec.output_dir}"
+def _mean_numeric_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[str, float]:
+    grouped: dict[str, list[float]] = {}
+    for summary in task_summaries.values():
+        metrics = summary.get("metrics", {})
+        if not isinstance(metrics, dict):
+            continue
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                grouped.setdefault(str(key), []).append(float(value))
+    return {
+        key: sum(values) / len(values)
+        for key, values in grouped.items()
+        if values
+    }
+
+
+def _mean_primary_score(task_summaries: dict[str, dict[str, Any]]) -> float | None:
+    values = [
+        float(summary["primary_score"])
+        for summary in task_summaries.values()
+        if isinstance(summary.get("primary_score"), (int, float))
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _load_existing_task_summaries(
+    run_root: Path,
+    skip_tasks: set[str],
+) -> dict[str, dict[str, Any]]:
+    if not run_root.exists():
+        return {}
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for child in sorted(run_root.iterdir()):
+        if not child.is_dir() or child.name in skip_tasks:
+            continue
+        summary_path = child / "summary.json"
+        if not summary_path.exists():
+            continue
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+        if not isinstance(summary, dict):
+            raise ValueError(f"Existing summary must be a JSON object: {summary_path}")
+        summaries[child.name] = summary
+    return summaries
+
+
+def _external_summary(task_name: str, task_output_dir: Path, result: Any) -> dict[str, Any]:
+    summary_path = task_output_dir / "summary.json"
+    if summary_path.exists():
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+        if not isinstance(summary, dict):
+            raise ValueError(f"External summary must be a JSON object: {summary_path}")
+    else:
+        summary = {}
+
+    result_json = _jsonable(result)
+    summary.setdefault("task", task_name)
+    summary.setdefault("benchmark", task_name)
+    summary.setdefault("external", True)
+    summary.setdefault("metrics", result_json.get("metrics", {}))
+    summary.setdefault("primary_metric", result_json.get("primary_metric"))
+    summary.setdefault("primary_score", result_json.get("primary_score"))
+    return summary
+
+
+def _write_combined_run_summary(
+    *,
+    run_root: Path,
+    run_id: str,
+    selected_tasks: list[str],
+    model: str,
+    backend: str,
+    task_summaries: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    primary_scores = {
+        task_name: {
+            "metric": summary.get("primary_metric"),
+            "score": summary.get("primary_score"),
+        }
+        for task_name, summary in task_summaries.items()
+    }
+    run_summary = {
+        "run_id": run_id,
+        "selected_tasks": selected_tasks,
+        "tasks": sorted(task_summaries.keys()),
+        "model": model,
+        "backend": backend,
+        "results": task_summaries,
+        "primary_scores": primary_scores,
+        "primary_score_aggregate": _mean_primary_score(task_summaries),
+        "summary": {
+            "num_tasks": len(task_summaries),
+            "metrics": _mean_numeric_metrics(task_summaries),
+        },
+    }
+    write_json(run_root / "run_summary.json", run_summary)
+    return run_summary
+
+
+def run_selected_tasks(
+    args: argparse.Namespace,
+    resolved: dict[str, Any],
+) -> dict[str, Any]:
+    native_tasks, external_tasks = _split_native_external_tasks(resolved["tasks"])
+    if not native_tasks and not external_tasks:
+        raise ValueError("No tasks selected.")
+    if resolved["inspect"] and external_tasks:
+        raise ValueError(
+            "--inspect is only supported for native tasks; external tasks requested: "
+            f"{', '.join(external_tasks)}"
+        )
+
+    if resolved["inspect"]:
+        inspected = inspect_prompts(
+            model=resolved["model"],
+            tasks=",".join(native_tasks),
+            model_kwargs=resolved["backend_kwargs"],
+        )
+        return {"inspect": inspected}
+
+    run_id = resolved["run_id"] or default_run_id_for_model(str(resolved["model"]))
+    run_root = Path(resolved["output_dir"]) / run_id
+    ensure_dir(run_root)
+
+    native_result: dict[str, Any] | None = None
+    if native_tasks:
+        native_result = run_evaluation(
+            model=resolved["model"],
+            tasks=",".join(native_tasks),
+            output_dir=resolved["output_dir"],
+            dp_size=resolved["dp_size"],
+            tensor_parallel_size=resolved["tp_size"],
+            gen_overrides=resolved["gen_overrides"],
+            bootstrap_resamples=resolved["bootstrap_resamples"],
+            bootstrap_seed=resolved["bootstrap_seed"],
+            bootstrap_confidence=resolved["bootstrap_confidence"],
+            metric_options=resolved["metric_options"],
+            overwrite=resolved["overwrite"],
+            run_id=resolved["run_id"],
+            backend_name=resolved["backend"],
+            backend_kwargs=resolved["backend_kwargs"],
+        )
+        task_summaries = dict(native_result["results"])
+    else:
+        task_summaries = _load_existing_task_summaries(
+            run_root,
+            skip_tasks=set(external_tasks),
+        )
+
+    for task_name in external_tasks:
+        task_output_dir = run_root / task_name
+        external_args = argparse.Namespace(**vars(args))
+        external_args.model = resolved["model"]
+        external_args.backend = resolved["backend"]
+        external_args.output_dir = str(task_output_dir)
+        external_args.dp_size = resolved["dp_size"]
+        external_args.tp_size = resolved["tp_size"]
+        external_args.overwrite = resolved["overwrite"]
+
+        gen_overrides = resolved["gen_overrides"]
+        external_args.max_new_tokens = gen_overrides["max_new_tokens"]
+        external_args.temperature = gen_overrides["temperature"]
+        external_args.top_p = gen_overrides["top_p"]
+        external_args.top_k = gen_overrides["top_k"]
+
+        backend_kwargs = resolved["backend_kwargs"]
+        external_args.gpu_memory_utilization = backend_kwargs.get(
+            "gpu_memory_utilization",
+            external_args.gpu_memory_utilization,
+        )
+        external_args.context_length = backend_kwargs.get("context_length")
+        external_args.max_model_len = backend_kwargs.get("max_model_len")
+        spec, run = _build_external_spec(
+            external_args,
+            task_name=task_name,
+            output_dir=task_output_dir,
+        )
+        _info(
+            f"external_task={task_name} model={external_args.model} "
+            f"backend={spec.backend} output_dir={spec.output_dir}"
+        )
+        result = run(spec)
+        task_summaries[task_name] = _external_summary(
+            task_name,
+            task_output_dir,
+            result,
+        )
+
+    if not external_tasks and native_result is not None:
+        return native_result
+
+    return _write_combined_run_summary(
+        run_root=run_root,
+        run_id=run_id,
+        selected_tasks=native_tasks + external_tasks,
+        model=str(resolved["model"]),
+        backend=str(resolved["backend"]),
+        task_summaries=task_summaries,
     )
-    return _jsonable(run(spec))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,12 +352,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print effective DEFAULT_GEN for all tasks and exit.",
     )
     parser.add_argument(
-        "--external-benchmark",
-        choices=EXTERNAL_BENCHMARKS,
-        default=None,
-        help="Run an external benchmark through AetherEval instead of native tasks.",
-    )
-    parser.add_argument(
         "--config", type=str, default=None, help="YAML config file path."
     )
     parser.add_argument(
@@ -119,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-path",
         type=str,
         default=None,
-        help="Local checkpoint path for external benchmarks.",
+        help="Local checkpoint path for external tasks.",
     )
     parser.add_argument(
         "--backend",
@@ -249,13 +492,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--categories",
         type=str,
         default=None,
-        help="BFCL categories/collections for --external-benchmark bfcl, comma-separated.",
+        help="BFCL categories/collections, comma-separated.",
     )
     parser.add_argument(
         "--num-gpus",
         type=int,
         default=None,
-        help="BFCL GPU count; defaults to --tp-size when provided.",
+        help="BFCL GPU count; defaults to --dp-size, then --tp-size.",
+    )
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=None,
+        help="BFCL local request concurrency; defaults to 16.",
+    )
+    parser.add_argument(
+        "--bfcl-verbose",
+        action="store_true",
+        help="Show verbose BFCL multi-turn step logs.",
     )
     parser.add_argument(
         "--sglang-generation-batch-size",
@@ -286,12 +540,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-generation",
         action="store_true",
-        help="External benchmarks: reuse existing raw generations.",
+        help="External tasks: reuse existing raw generations.",
     )
     parser.add_argument(
         "--skip-evaluation",
         action="store_true",
-        help="External benchmarks: generate only and skip scoring.",
+        help="External tasks: generate only and skip scoring.",
     )
     return parser
 
@@ -301,21 +555,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.list_tasks:
-        for task_name in list_tasks():
+        for task_name in sorted(set(list_tasks()) | set(EXTERNAL_TASKS)):
             print(task_name)
         return
     if args.list_task_defaults:
         payload = list_task_default_gens()
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
-    if args.external_benchmark:
-        try:
-            result = run_external_benchmark(args)
-        except ValueError as exc:
-            parser.error(str(exc))
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        return
-
     cfg = load_yaml_config(args.config)
     resolved = resolve_run_arguments(args, cfg)
 
@@ -340,12 +586,13 @@ def main() -> None:
     if resolved["backend_kwargs"]:
         _info(f"backend_model_kwargs={resolved['backend_kwargs']}")
 
-    if resolved["inspect"]:
-        inspected = inspect_prompts(
-            model=resolved["model"],
-            tasks=resolved["tasks"],
-            model_kwargs=resolved["backend_kwargs"],
-        )
+    try:
+        result = run_selected_tasks(args, resolved)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if "inspect" in result:
+        inspected = result["inspect"]
         for task_name in inspected["tasks"]:
             print(f"=== {task_name} ===")
             rows = inspected["results"].get(task_name, [])
@@ -359,22 +606,6 @@ def main() -> None:
                     print()
         return
 
-    result = run_evaluation(
-        model=resolved["model"],
-        tasks=resolved["tasks"],
-        output_dir=resolved["output_dir"],
-        dp_size=resolved["dp_size"],
-        tensor_parallel_size=resolved["tp_size"],
-        gen_overrides=resolved["gen_overrides"],
-        bootstrap_resamples=resolved["bootstrap_resamples"],
-        bootstrap_seed=resolved["bootstrap_seed"],
-        bootstrap_confidence=resolved["bootstrap_confidence"],
-        metric_options=resolved["metric_options"],
-        overwrite=resolved["overwrite"],
-        run_id=resolved["run_id"],
-        backend_name=resolved["backend"],
-        backend_kwargs=resolved["backend_kwargs"],
-    )
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

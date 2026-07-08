@@ -1,20 +1,10 @@
-"""External-benchmark API for BFCL-v3 in AetherEval.
+"""External-benchmark API for BFCL-v3 in AetherEval."""
 
-BFCL-v3 does not fit AetherEval's native single-shot ``task.py``/``metrics.py`` contract:
-it owns its own generation, multi-turn agentic execution loop, and AST/executable
-checkers. So it is wrapped here as an *external benchmark* with a small, explicit API:
-
-    spec = ExternalRunSpec(model="rlla-qwen", model_path="/ckpt", output_dir=Path("out"))
-    result = run(spec)         # -> ExternalResult(metrics, primary_metric, primary_score)
-
-``run`` registers the ToolRL/GDPO handler, drives ``bfcl_eval`` generate + evaluate
-in-process (sglang backend by default), parses the BFCL leaderboard into the GDPO Table 1
-metrics, and writes an AetherEval-style ``summary.json``. Any future external benchmark
-can follow the same ``ExternalRunSpec``/``ExternalResult``/``run`` shape.
-"""
-
+import builtins
+import contextlib
 import csv
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +23,10 @@ _FMT_PATTERNS = [
     r"^<think>.*?</think>\n<response>.*?</response>$",
     r"^<think>.*?</think>$",
 ]
+_NOISY_BFCL_MESSAGES = {
+    "Empty response from the model. Proceed to next turn.",
+    "Failed to decode the model response. Proceed to next turn.",
+}
 
 
 @dataclass
@@ -43,8 +37,15 @@ class ExternalRunSpec:
     categories: list[str] = field(default_factory=lambda: ["all"])
     backend: str = "sglang"  # tmux0 container ships sglang
     num_gpus: int = 1
+    num_threads: int = 16
     gpu_memory_utilization: float = 0.9
     temperature: float = 0.001  # near-greedy, BFCL tool-calling default
+    max_tokens: int = 4096
+    max_context_length: int | None = None
+    top_p: float = 1.0
+    top_k: int = -1
+    repetition_penalty: float = 1.0
+    verbose: bool = False
     allow_overwrite: bool = True
     run_generation: bool = True
     run_evaluation: bool = True
@@ -67,7 +68,7 @@ def _gen_args(spec: ExternalRunSpec, result_dir: Path) -> SimpleNamespace:
         include_input_log=False,
         exclude_state_log=False,
         num_gpus=spec.num_gpus,
-        num_threads=1,
+        num_threads=spec.num_threads,
         gpu_memory_utilization=spec.gpu_memory_utilization,
         backend=spec.backend,
         skip_server_setup=False,
@@ -81,6 +82,95 @@ def _gen_args(spec: ExternalRunSpec, result_dir: Path) -> SimpleNamespace:
     )
 
 
+@contextlib.contextmanager
+def _temporary_env(values: dict[str, str | None]):
+    previous = {key: os.environ.get(key) for key in values}
+    try:
+        for key, value in values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _handler_env(spec: ExternalRunSpec) -> dict[str, str | None]:
+    return {
+        "RLLA_BFCL_MAX_TOKENS": str(spec.max_tokens),
+        "RLLA_BFCL_MAX_CONTEXT_LENGTH": (
+            str(spec.max_context_length)
+            if spec.max_context_length is not None
+            else None
+        ),
+        "RLLA_BFCL_TOP_P": str(spec.top_p),
+        "RLLA_BFCL_TOP_K": str(spec.top_k),
+        "RLLA_BFCL_REPETITION_PENALTY": str(spec.repetition_penalty),
+    }
+
+
+@contextlib.contextmanager
+def _cap_bfcl_thread_pool(max_workers: int):
+    if max_workers <= 0:
+        raise ValueError("BFCL num_threads must be positive.")
+
+    from bfcl_eval.model_handler.local_inference import base_oss_handler
+
+    original = base_oss_handler.ThreadPoolExecutor
+
+    def capped_thread_pool_executor(*args, **kwargs):
+        requested = kwargs.get("max_workers")
+        if requested is None and args:
+            requested = args[0]
+
+        capped = max_workers if requested is None else min(int(requested), max_workers)
+        if args:
+            args = (capped, *args[1:])
+        else:
+            kwargs["max_workers"] = capped
+        return original(*args, **kwargs)
+
+    base_oss_handler.ThreadPoolExecutor = capped_thread_pool_executor
+    try:
+        yield
+    finally:
+        base_oss_handler.ThreadPoolExecutor = original
+
+
+def _is_noisy_bfcl_print(args: tuple[object, ...]) -> bool:
+    text = " ".join(str(arg) for arg in args).strip()
+    if text in _NOISY_BFCL_MESSAGES:
+        return True
+    if text.startswith("ID: ") and ", Turn: " in text and ", Step: " in text:
+        return True
+    return len(text) >= 80 and set(text) == {"-"}
+
+
+@contextlib.contextmanager
+def _filter_bfcl_prints(enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    original_print = builtins.print
+
+    def filtered_print(*args, **kwargs):
+        if _is_noisy_bfcl_print(args):
+            return
+        original_print(*args, **kwargs)
+
+    builtins.print = filtered_print
+    try:
+        yield
+    finally:
+        builtins.print = original_print
+
+
 def run(spec: ExternalRunSpec) -> ExternalResult:
     out = Path(spec.output_dir).resolve()
     result_dir = out / "result"
@@ -88,21 +178,28 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
     result_dir.mkdir(parents=True, exist_ok=True)
     score_dir.mkdir(parents=True, exist_ok=True)
 
-    if spec.run_generation or spec.run_evaluation:
-        register_rlla_model(spec.model)
+    with _temporary_env(_handler_env(spec)):
+        if spec.run_generation or spec.run_evaluation:
+            register_rlla_model(spec.model)
 
-    if spec.run_generation:
-        from bfcl_eval._llm_response_generation import main as generation_main
+        if spec.run_generation:
+            from bfcl_eval._llm_response_generation import main as generation_main
 
-        generation_main(_gen_args(spec, result_dir))
+            with _filter_bfcl_prints(not spec.verbose), _cap_bfcl_thread_pool(
+                spec.num_threads
+            ):
+                generation_main(_gen_args(spec, result_dir))
 
-    if spec.run_evaluation:
-        from bfcl_eval.eval_checker.eval_runner import main as evaluation_main
+        if spec.run_generation or spec.run_evaluation:
+            _raise_on_inference_errors(result_dir, spec.model)
 
-        # 4 positional args work on BFCL v3 (no partial_eval) and v4 (defaulted).
-        evaluation_main(
-            [spec.model], list(spec.categories), str(result_dir), str(score_dir)
-        )
+        if spec.run_evaluation:
+            from bfcl_eval.eval_checker.eval_runner import main as evaluation_main
+
+            # 4 positional args work on BFCL v3 (no partial_eval) and v4 (defaulted).
+            evaluation_main(
+                [spec.model], list(spec.categories), str(result_dir), str(score_dir)
+            )
 
     metrics = parse_scores(score_dir, spec.model)
     fmt = compute_format_rate(result_dir, spec.model)
@@ -191,6 +288,42 @@ def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
     return metrics
 
 
+def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
+    model_dir = result_dir / model.replace("/", "_")
+    result_files = list(model_dir.rglob("*_result.json")) if model_dir.exists() else []
+
+    count = 0
+    examples: list[str] = []
+    for jf in result_files:
+        with open(jf) as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                result = record["result"]
+                values = result if isinstance(result, list) else [result]
+                errors = [
+                    str(value)
+                    for value in values
+                    if str(value).startswith("Error during inference:")
+                ]
+                if not errors:
+                    continue
+
+                count += 1
+                if len(examples) < 5:
+                    examples.append(
+                        f"{record['id']} ({jf.name}:{line_no}): {errors[0]}"
+                    )
+
+    if count:
+        raise RuntimeError(
+            "BFCL generation produced inference errors instead of model outputs. "
+            f"count={count}; examples={'; '.join(examples)}"
+        )
+
+
 def compute_format_rate(result_dir: Path, model: str) -> float | None:
     """Fraction (%) of generated responses matching the ToolRL output format."""
     model_dir = result_dir / model.replace("/", "_")
@@ -228,6 +361,16 @@ def _write_summary(
         "model_path": spec.model_path,
         "backend": spec.backend,
         "categories": list(spec.categories),
+        "num_gpus": spec.num_gpus,
+        "num_threads": spec.num_threads,
+        "gpu_memory_utilization": spec.gpu_memory_utilization,
+        "temperature": spec.temperature,
+        "max_tokens": spec.max_tokens,
+        "max_context_length": spec.max_context_length,
+        "top_p": spec.top_p,
+        "top_k": spec.top_k,
+        "repetition_penalty": spec.repetition_penalty,
+        "verbose": spec.verbose,
         "metrics": metrics,
         "primary_metric": primary_metric,
         "primary_score": primary_score,

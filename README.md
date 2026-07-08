@@ -162,15 +162,15 @@ Optional RM metric flags include `--rm-batch-size`, `--rm-max-length`,
 
 Some benchmarks do not fit the native `task.py`/`metrics.py` contract because they own
 their own generation loop, agent runtime, or reference output layout. These live under
-`benchmarks/<name>/` with an `external.py` API and are not discovered by
-`aethereval --tasks`.
+`benchmarks/<name>/` with an `external.py` API. The CLI task router still lets you
+select them with `--tasks`; it dispatches them to their external runner internally.
 
 API-Bank is a native task and should be run with `--tasks apibank`.
 
 Current external benchmarks:
 
 - `benchmarks/bfcl` — BFCL-v3 wrapper:
-  `aethereval --external-benchmark bfcl --model <model> --output-dir outputs/bfcl`
+  `aethereval --tasks bfcl --model <model> --output-dir outputs`
 
 External runs use the regular `aethereval` CLI for shared runtime flags
 (`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
@@ -187,7 +187,7 @@ They still write an AetherEval-style `summary.json` with `metrics`,
 benchmark schema:
 
 ```text
-outputs/bfcl/
+outputs/<run_id>/bfcl/
   result/
   score/
   summary.json

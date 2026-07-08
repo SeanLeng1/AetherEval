@@ -57,7 +57,14 @@ Per-generation `meta` in `predictions.jsonl` includes `correct_score`,
 ## Metrics
 
 - `lv{1,2,3}_acc`, `overall_acc` — exact tool-name + parameter-dict match against the
-  gold answer.
+  gold answer, using the strict GD2PO tag parser (single `<tool_call>` block).
+- `loose_{lv1,lv2,lv3}_acc`, `loose_overall_acc` — same match, but tool calls are
+  parsed with **ToolRL's own `generate.py` parser** (last `<tool_call>` block, per-line
+  JSON, no closing-tag guard). This is the ToolRL-aligned number on the same
+  generations; it recovers calls in an unclosed last block but still misses a correct
+  call placed in a non-last block (exactly as ToolRL scores it). The residual to
+  ToolRL's paper number is the sglang-vs-vLLM engine gap, not scoring. Report alias:
+  `LooseCorrectAcc.`, `Loose Level {1,2,3} Acc.`.
 - `format_lv{1,2,3}_acc`, `overall_format_acc` — tag-structure check.
 - `length_avg_lv{1,2,3}`, `overall_length_avg` — mean of
   `min(round(think_word_count / 512, 2), 1.0)`.

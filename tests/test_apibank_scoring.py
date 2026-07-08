@@ -11,6 +11,7 @@ from benchmarks.apibank.scoring import (
     aggregate_scores,
     compute_correctness_score,
     compute_length_score,
+    extract_tool_calls_lenient,
     parse_assistant_output,
     score_record,
     validate_output_format,
@@ -46,6 +47,7 @@ class ApiBankScoringTests(unittest.TestCase):
     def test_exact_match(self) -> None:
         record = _scored(RAW_MATCH)
         self.assertEqual(record["score"], 1)
+        self.assertEqual(record["loose_score"], 1)
         self.assertEqual(record["format_score"], 1)
         self.assertEqual(record["format_errors"], [])
         self.assertEqual(record["length_score"], 0.01)  # round(4 / 512, 2)
@@ -54,16 +56,42 @@ class ApiBankScoringTests(unittest.TestCase):
     def test_wrong_params(self) -> None:
         record = _scored(RAW_WRONG_PARAMS)
         self.assertEqual(record["score"], 0)
+        self.assertEqual(record["loose_score"], 0)  # wrong params fail both parsers
         self.assertEqual(record["format_score"], 1)
         self.assertEqual(record["length_score"], 0.01)
 
     def test_missing_tags(self) -> None:
         record = _scored(RAW_MISSING_TAGS)
-        self.assertEqual(record["score"], 0)
+        self.assertEqual(record["score"], 0)  # strict: no tags -> dropped
+        self.assertEqual(record["loose_score"], 1)  # loose: bare JSON recovered
         self.assertEqual(record["format_score"], 0)
         self.assertEqual(record["format_errors"], ["missing_think"])
         self.assertEqual(record["length_score"], 0.0)
         self.assertEqual(record["think_word_count"], 0)
+
+    def test_lenient_extraction(self) -> None:
+        # ToolRL parser: last <tool_call> block, no closing-tag guard.
+        # Unclosed last block -> strict drops it, loose (ToolRL) recovers.
+        unclosed = (
+            "<think>t</think>\n<tool_call>\n"
+            '{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}'
+        )
+        self.assertEqual(parse_assistant_output(unclosed)[1], [])  # strict: no </tool_call>
+        self.assertEqual(
+            compute_correctness_score(extract_tool_calls_lenient(unclosed), ANSWER), 1
+        )
+        # Correct call in a NON-last block is still missed (ToolRL takes only the last).
+        non_last = (
+            "<think>t</think>\n<tool_call>\n"
+            '{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}\n'
+            "<tool_call>\n<response>done</response>"
+        )
+        self.assertEqual(extract_tool_calls_lenient(non_last), [])  # last block has no JSON
+        # Bare JSON with no tags at all -> whole output is the block -> recovered.
+        self.assertEqual(
+            extract_tool_calls_lenient(RAW_MISSING_TAGS),
+            [{"name": "SymptomSearch", "parameters": {"symptom": "rash"}}],
+        )
 
     def test_correctness_variants(self) -> None:
         # Bare parameter dict (no name/parameters keys) inherits the gold name.
@@ -121,6 +149,13 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(record["lv2_acc"], 0.0)
         self.assertIsNone(record["lv3_acc"])
         self.assertEqual(record["overall_acc"], 33.33)
+        # Loose recovers Level2_0 (bare-JSON) that strict dropped: overall 33.33 -> 66.67.
+        self.assertEqual(record["loose_lv1_acc"], 50.0)
+        self.assertEqual(record["loose_lv2_acc"], 100.0)
+        self.assertIsNone(record["loose_lv3_acc"])
+        self.assertEqual(record["loose_overall_acc"], 66.67)
+        self.assertEqual(record["LooseCorrectAcc."], 66.67)
+        self.assertEqual(record["Loose Level 2 Acc."], 100.0)
         self.assertEqual(record["format_lv1_acc"], 100.0)
         self.assertEqual(record["format_lv2_acc"], 0.0)
         self.assertEqual(record["overall_format_acc"], 66.67)

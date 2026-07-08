@@ -3,6 +3,9 @@
 Per-sample scores:
   - correctness: exact tool-name + parameter-dict match against the gold answer
     (``None`` when the gold answer itself is malformed -> excluded from acc).
+  - loose correctness: same match, but tool calls parsed with ToolRL's own
+    ``generate.py`` parser (last ``<tool_call>`` block, no closing-tag guard);
+    ``loose_*_acc`` is the ToolRL-aligned number on the same generations.
   - format: ``<think>``/``<tool_call>``/``<response>`` tag-structure check.
   - length: ``round(think_word_count / 512, 2)`` capped at 1.0.
 
@@ -172,14 +175,43 @@ def parse_assistant_output(assistant_output: str) -> tuple[str, list[Any]]:
     return thought, tool_calls
 
 
+def extract_tool_calls_lenient(raw_output: str) -> list[Any]:
+    """ToolRL-aligned parse (their ``generate.py``): LAST ``<tool_call>`` block,
+    per-line JSON, no closing-tag guard.
+
+    Looser than the strict first-block+guard parser -> recovers calls in the last
+    block even when ``</tool_call>`` is missing, or bare JSON when no tags at all.
+    NOT a capability ceiling: a correct call in a non-last block is still missed,
+    exactly as ToolRL scores it. Residual vs ToolRL's paper number is the
+    sglang-vs-vLLM engine gap, not scoring.
+    """
+    if not isinstance(raw_output, str):
+        return []
+    block = raw_output.split("<tool_call>")[-1].split("</tool_call>")[0].strip()
+    tool_calls: list[Any] = []
+    for line in block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            tool_calls.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return tool_calls
+
+
 def score_record(record: dict[str, Any]) -> dict[str, Any]:
     """Attach the ``evaluate_reward.py`` per-sample score fields to a generation record."""
-    score = compute_correctness_score(record["tool_calls"], record["data"]["answer"])
+    answer = record["data"]["answer"]
+    score = compute_correctness_score(record["tool_calls"], answer)
+    # Loose correctness: same match on ToolRL's own (last-block, no-guard) parser.
+    loose_score = compute_correctness_score(extract_tool_calls_lenient(record["raw_output"]), answer)
     format_score, format_errors = validate_output_format(record["raw_output"])
     length_score, think_word_count = compute_length_score(record["raw_output"])
 
     record["score"] = score
     record["correct_score"] = score
+    record["loose_score"] = loose_score
     record["format_score"] = format_score
     record["length_score"] = length_score
     record["think_word_count"] = think_word_count
@@ -213,6 +245,11 @@ def _add_report_metrics(record: dict[str, Any]) -> None:
     record["Level 1 Acc."] = record["lv1_acc"]
     record["Level 2 Acc."] = record["lv2_acc"]
     record["Level 3 Acc."] = record["lv3_acc"]
+
+    record["Loose Level 1 Acc."] = record["loose_lv1_acc"]
+    record["Loose Level 2 Acc."] = record["loose_lv2_acc"]
+    record["Loose Level 3 Acc."] = record["loose_lv3_acc"]
+    record["LooseCorrectAcc."] = record["loose_overall_acc"]
 
     record["lv1_format"] = record["format_lv1_acc"]
     record["lv2_format"] = record["format_lv2_acc"]
@@ -250,6 +287,8 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
     correct = {lv: 0 for lv in LEVELS}
     total_correct = {lv: 0 for lv in LEVELS}
 
+    loose_correct = {lv: 0 for lv in LEVELS}
+
     format_pass = {lv: 0 for lv in LEVELS}
     total_format = {lv: 0 for lv in LEVELS}
 
@@ -270,6 +309,8 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
         total_correct[lv] += 1
         if item["score"] == 1:
             correct[lv] += 1
+        if item["loose_score"] == 1:
+            loose_correct[lv] += 1
 
         total_format[lv] += 1
         if item["format_score"] == 1:
@@ -302,6 +343,18 @@ def aggregate_scores(scores: dict[str, dict[str, Any]]) -> dict[str, Any]:
     overall_acc = _safe_div(sum(correct.values()), sum(total_correct.values()))
     record["overall_acc"] = _round_or_none(
         (overall_acc * 100) if overall_acc is not None else None, 2
+    )
+
+    for lv in LEVELS:
+        record[f"loose_correct_{lv}"] = loose_correct[lv]
+    for lv in LEVELS:
+        acc = _safe_div(loose_correct[lv], total_correct[lv])
+        record[f"loose_{lv}_acc"] = _round_or_none(
+            (acc * 100) if acc is not None else None, 2
+        )
+    loose_overall_acc = _safe_div(sum(loose_correct.values()), sum(total_correct.values()))
+    record["loose_overall_acc"] = _round_or_none(
+        (loose_overall_acc * 100) if loose_overall_acc is not None else None, 2
     )
 
     for lv in LEVELS:

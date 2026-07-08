@@ -36,6 +36,7 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
         "meta": {
             "level": int(sample.meta["level"]),
             "correct_score": correct_score,
+            "loose_score": scored["loose_score"],
             "format_score": scored["format_score"],
             "length_score": scored["length_score"],
             "think_word_count": scored["think_word_count"],
@@ -68,6 +69,7 @@ def aggregate(
         record = records[0]
         scores[record.sample_id] = {
             "score": record.meta["correct_score"],
+            "loose_score": record.meta["loose_score"],
             "format_score": record.meta["format_score"],
             "length_score": record.meta["length_score"],
             "think_word_count": record.meta["think_word_count"],

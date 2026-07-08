@@ -24,6 +24,20 @@ def _lenient_decode() -> bool:
     return os.getenv("RLLA_BFCL_LENIENT_DECODE", "0") == "1"
 
 
+def _env_int(name: str, default: int | None = None) -> int | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 def _iter_json_objects(text):
     """Yield brace-balanced ``{...}`` substrings (handles multi-line / pretty JSON)."""
     depth = 0
@@ -170,6 +184,11 @@ class RLLAHandler(OSSHandler):
         # strips them under the default skip_special_tokens=True, leaving bare JSON the
         # decoder can't find. Keep them (same as bfcl's FC handlers, e.g. minicpm_fc).
         self.skip_special_tokens = False
+        max_context_length = _env_int("RLLA_BFCL_MAX_CONTEXT_LENGTH")
+        if max_context_length is not None:
+            if max_context_length <= 0:
+                raise ValueError("RLLA_BFCL_MAX_CONTEXT_LENGTH must be positive.")
+            self.max_context_length = max_context_length
 
     @override
     def _format_prompt(self, messages, function):
@@ -217,15 +236,25 @@ class RLLAHandler(OSSHandler):
         formatted_prompt = self._format_prompt(message, function)
         inference_data["inference_input_log"] = {"formatted_prompt": formatted_prompt}
 
-        input_token_count = len(self.tokenizer.tokenize(formatted_prompt))
-        if self.max_context_length < input_token_count + 2:
-            leftover_tokens_count = 1000
-        else:
-            leftover_tokens_count = min(
-                4096, self.max_context_length - input_token_count - 2
-            )
+        max_tokens = _env_int("RLLA_BFCL_MAX_TOKENS", 4096)
+        if max_tokens is None or max_tokens <= 0:
+            raise ValueError("RLLA_BFCL_MAX_TOKENS must be positive.")
 
-        extra_body = {"repetition_penalty": 1.0, "top_p": 1.0, "top_k": -1}
+        input_token_count = len(self.tokenizer.tokenize(formatted_prompt))
+        available_tokens = self.max_context_length - input_token_count - 2
+        if available_tokens <= 0:
+            raise ValueError(
+                "BFCL prompt exceeds max context length: "
+                f"input_tokens={input_token_count}, "
+                f"max_context_length={self.max_context_length}."
+            )
+        leftover_tokens_count = min(max_tokens, available_tokens)
+
+        extra_body = {
+            "repetition_penalty": _env_float("RLLA_BFCL_REPETITION_PENALTY", 1.0),
+            "top_p": _env_float("RLLA_BFCL_TOP_P", 1.0),
+            "top_k": _env_int("RLLA_BFCL_TOP_K", -1),
+        }
         if hasattr(self, "stop_token_ids"):
             extra_body["stop_token_ids"] = self.stop_token_ids
         if hasattr(self, "skip_special_tokens"):
