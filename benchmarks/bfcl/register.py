@@ -31,7 +31,7 @@ def register_rlla_model(
 
     from .handler import RLLAHandler
 
-    MODEL_CONFIG_MAPPING[registry_name] = ModelConfig(
+    config = ModelConfig(
         model_name=registry_name,
         display_name=f"{registry_name} (ToolRL/GDPO)",
         url="https://github.com/SeanLeng1/AetherEval",
@@ -43,4 +43,16 @@ def register_rlla_model(
         is_fc_model=is_fc_model,
         underscore_to_dot=False,
     )
+    MODEL_CONFIG_MAPPING[registry_name] = config
+
+    # BFCL's eval runner reconstructs the handler key from the result-folder name by reversing
+    # '/'->'_' (eval_runner.runner: `model_name_escaped = model_name.replace("_", "/")`), assuming
+    # every '_' in the folder came from a '/'. A checkpoint whose leaf legitimately contains '_'
+    # (e.g. ...-olora_l1_0.5-l2_0.0-parts3_200_huggingface) round-trips to a *different* string with
+    # those '_' turned into '/', which was never registered -> KeyError in get_handler at eval time
+    # (generation is unaffected). Alias the config under that reconstructed key; it only builds the
+    # eval handler, whose model_name is inert (decode_ast/decode_execute never read it).
+    runner_key = registry_name.replace("/", "_").replace("_", "/")
+    if runner_key != registry_name:
+        MODEL_CONFIG_MAPPING[runner_key] = config
     return registry_name
