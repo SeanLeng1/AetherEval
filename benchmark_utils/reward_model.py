@@ -239,3 +239,79 @@ class RewardModelScorer:
         del self.model
         if self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
+
+
+def _score_shard_on_device(
+    args: tuple[list[str], list[list[dict[str, str]]], str, dict[str, Any]],
+) -> dict[str, list[float]]:
+    # Module-level so multiprocessing spawn workers can pickle it.
+    model_paths, conversations, device, scorer_kwargs = args
+    results: dict[str, list[float]] = {}
+    for model_path in dict.fromkeys(model_paths):
+        scorer = RewardModelScorer(
+            model_path=model_path, device=device, **scorer_kwargs
+        )
+        try:
+            results[model_path] = scorer.score(conversations)
+        finally:
+            scorer.close()
+    return results
+
+
+def score_conversations_sharded(
+    *,
+    model_paths: list[str],
+    conversations: list[list[dict[str, str]]],
+    devices: list[str],
+    scorer_kwargs: dict[str, Any],
+) -> dict[str, list[float]]:
+    """Score every conversation with each model, data-parallel across devices.
+
+    Contiguous shards, one spawn worker per device; each worker keeps one reward
+    model resident at a time (models scored sequentially within a shard).
+    """
+    unique_paths = list(dict.fromkeys(model_paths))
+    if not unique_paths:
+        raise ValueError("model_paths must not be empty")
+    if not devices:
+        raise ValueError("devices must not be empty")
+    if not conversations:
+        return {path: [] for path in unique_paths}
+
+    num_workers = min(len(devices), len(conversations))
+    if num_workers == 1:
+        return _score_shard_on_device(
+            (unique_paths, conversations, devices[0], scorer_kwargs)
+        )
+
+    base, extra = divmod(len(conversations), num_workers)
+    shards: list[list[list[dict[str, str]]]] = []
+    start = 0
+    for worker_index in range(num_workers):
+        size = base + (1 if worker_index < extra else 0)
+        shards.append(conversations[start : start + size])
+        start += size
+
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    with context.Pool(processes=num_workers) as pool:
+        shard_results = pool.map(
+            _score_shard_on_device,
+            [
+                (unique_paths, shard, devices[worker_index], scorer_kwargs)
+                for worker_index, shard in enumerate(shards)
+            ],
+        )
+
+    merged: dict[str, list[float]] = {path: [] for path in unique_paths}
+    for shard_result in shard_results:
+        for path in unique_paths:
+            merged[path].extend(shard_result[path])
+    for path in unique_paths:
+        if len(merged[path]) != len(conversations):
+            raise ValueError(
+                f"sharded scoring returned {len(merged[path])} scores for {path}, "
+                f"expected {len(conversations)}"
+            )
+    return merged

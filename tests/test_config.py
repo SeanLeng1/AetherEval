@@ -112,7 +112,6 @@ class ConfigTests(unittest.TestCase):
             cm_model_path=None,
             rm_batch_size=None,
             rm_max_length=None,
-            rm_device=None,
             rm_dtype=None,
             rm_trust_remote_code=None,
             vllm_arg=["trust_remote_code=true", "max_num_seqs=64"],

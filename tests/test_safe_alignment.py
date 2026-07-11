@@ -1,9 +1,26 @@
 import unittest
-from unittest.mock import patch
 
 from aethereval.core.types import GenerationOutput, Sample
 from benchmarks.safe_alignment import metrics
 from benchmarks.safe_alignment.task import build_prompt
+
+
+class _FakeBackend:
+    name = "fake"
+
+    def __init__(self, scores_by_model: dict[str, list[float]]) -> None:
+        self.scores_by_model = scores_by_model
+        self.calls: list[dict] = []
+
+    def score_reward_models(self, model_paths, conversations, scorer_kwargs):
+        self.calls.append(
+            {
+                "model_paths": list(model_paths),
+                "num_conversations": len(conversations),
+                "scorer_kwargs": dict(scorer_kwargs),
+            }
+        )
+        return {path: self.scores_by_model[path] for path in model_paths}
 
 
 class SafeAlignmentTests(unittest.TestCase):
@@ -37,32 +54,25 @@ class SafeAlignmentTests(unittest.TestCase):
             ),
         ]
 
-        def fake_score(model_path, conversations, options):  # noqa: ANN001
-            self.assertEqual(len(conversations), 2)
-            self.assertEqual(options["rm_batch_size"], 2)
-            if model_path == "rm":
-                return [1.0, 2.0]
-            if model_path == "cm":
-                return [0.5, -0.25]
-            raise AssertionError(model_path)
-
-        with patch(
-            "benchmarks.safe_alignment.metrics._score_with_reward_model",
-            side_effect=fake_score,
-        ):
-            results = metrics.score_generations_batch(
-                samples,
-                outputs,
-                {
-                    "rm_model_path": "rm",
-                    "cm_model_path": "cm",
-                    "rm_batch_size": 2,
-                },
-            )
+        backend = _FakeBackend({"rm": [1.0, 2.0], "cm": [0.5, -0.25]})
+        results = metrics.score_generations_batch(
+            samples,
+            outputs,
+            {
+                "rm_model_path": "rm",
+                "cm_model_path": "cm",
+                "rm_batch_size": 2,
+                "_backend": backend,
+            },
+        )
 
         self.assertEqual(len(results), 2)
         self.assertAlmostEqual(results[0][0]["score"], 0.75)
         self.assertAlmostEqual(results[1][0]["meta"]["helpful_harmless_average"], 0.875)
+        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(backend.calls[0]["model_paths"], ["rm", "cm"])
+        self.assertEqual(backend.calls[0]["num_conversations"], 2)
+        self.assertEqual(backend.calls[0]["scorer_kwargs"]["batch_size"], 2)
 
     def test_batch_scoring_uses_default_rihong_models(self) -> None:
         sample = Sample(
@@ -77,21 +87,16 @@ class SafeAlignmentTests(unittest.TestCase):
             prompt=build_prompt(sample),
             generations=["a"],
         )
-        seen_paths: list[str] = []
-
-        def fake_score(model_path, conversations, options):  # noqa: ANN001
-            del conversations, options
-            seen_paths.append(model_path)
-            return [1.0]
-
-        with patch(
-            "benchmarks.safe_alignment.metrics._score_with_reward_model",
-            side_effect=fake_score,
-        ):
-            metrics.score_generations_batch([sample], [output], {})
+        backend = _FakeBackend(
+            {
+                "Rihong/Qwen2.5-7B-SafeRLHF-RM": [1.0],
+                "Rihong/Qwen2.5-7B-SafeRLHF-CM": [1.0],
+            }
+        )
+        metrics.score_generations_batch([sample], [output], {"_backend": backend})
 
         self.assertEqual(
-            seen_paths,
+            backend.calls[0]["model_paths"],
             [
                 "Rihong/Qwen2.5-7B-SafeRLHF-RM",
                 "Rihong/Qwen2.5-7B-SafeRLHF-CM",

@@ -6,6 +6,9 @@ from aethereval.metrics.common import mean, mean_stderr, to_records
 
 
 PRIMARY_METRIC = "overall/average"
+# Runner injects the generation backend (metric_options["_backend"]) so scoring can
+# offload the engine and shard the reward models across the run's dp*tp GPUs.
+REQUIRES_BACKEND = True
 DEFAULT_RM_MODEL_PATH = "Rihong/Qwen2.5-7B-SafeRLHF-RM"
 DEFAULT_CM_MODEL_PATH = "Rihong/Qwen2.5-7B-SafeRLHF-CM"
 
@@ -30,8 +33,19 @@ def score_generations_batch(
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     options = metric_options or {}
-    rm_model_path = options.get("rm_model_path", DEFAULT_RM_MODEL_PATH)
-    cm_model_path = options.get("cm_model_path", DEFAULT_CM_MODEL_PATH)
+    rm_model_path = str(options.get("rm_model_path", DEFAULT_RM_MODEL_PATH))
+    cm_model_path = str(options.get("cm_model_path", DEFAULT_CM_MODEL_PATH))
+    backend = options.get("_backend")
+    if backend is None:
+        raise RuntimeError(
+            "safe_alignment scoring needs the generation backend "
+            "(runner injects it via REQUIRES_BACKEND)."
+        )
+    if not hasattr(backend, "score_reward_models"):
+        raise RuntimeError(
+            f"backend {getattr(backend, 'name', type(backend).__name__)!r} does not "
+            "support offloaded reward-model scoring; use the sglang backend"
+        )
 
     conversations: list[list[dict[str, str]]] = []
     output_lengths: list[int] = []
@@ -47,12 +61,18 @@ def score_generations_batch(
                 prompt + [{"role": "assistant", "content": generation}]
             )
 
-    helpful_scores = _score_with_reward_model(
-        str(rm_model_path), conversations, options
+    scorer_kwargs = {
+        "batch_size": int(options.get("rm_batch_size", 1)),
+        "max_length": int(options.get("rm_max_length", 2048)),
+        "dtype": options.get("rm_dtype", "auto"),
+        "trust_remote_code": bool(options.get("rm_trust_remote_code", True)),
+    }
+    # Backend offloads the engine, shards scoring across its dp*tp GPUs, then resumes.
+    scores_by_model = backend.score_reward_models(
+        [rm_model_path, cm_model_path], conversations, scorer_kwargs
     )
-    harmless_scores = _score_with_reward_model(
-        str(cm_model_path), conversations, options
-    )
+    helpful_scores = scores_by_model[rm_model_path]
+    harmless_scores = scores_by_model[cm_model_path]
     if len(helpful_scores) != len(conversations) or len(harmless_scores) != len(
         conversations
     ):
@@ -132,27 +152,6 @@ def aggregate(
 
     metrics["overall/average"] = metrics["overall/helpful_harmless_average"]
     return metrics
-
-
-def _score_with_reward_model(
-    model_path: str,
-    conversations: list[list[dict[str, str]]],
-    options: dict[str, Any],
-) -> list[float]:
-    from benchmark_utils.reward_model import RewardModelScorer
-
-    scorer = RewardModelScorer(
-        model_path=model_path,
-        batch_size=int(options.get("rm_batch_size", 1)),
-        max_length=int(options.get("rm_max_length", 2048)),
-        device=options.get("rm_device"),
-        dtype=options.get("rm_dtype", "auto"),
-        trust_remote_code=bool(options.get("rm_trust_remote_code", True)),
-    )
-    try:
-        return scorer.score(conversations)
-    finally:
-        scorer.close()
 
 
 def _normalize_messages(raw: Any, sample_id: str) -> list[dict[str, str]]:

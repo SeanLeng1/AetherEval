@@ -658,6 +658,8 @@ def _run_single_task(
         runtime_metric_options = {}
         if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
             runtime_metric_options["_tokenizer"] = tokenizer_getter()
+        if getattr(metrics_module, "REQUIRES_BACKEND", False):
+            runtime_metric_options["_backend"] = backend
         existing_scores = _score_generation_outputs(
             metrics_module=metrics_module,
             samples_by_id=samples_by_id,
@@ -772,6 +774,8 @@ def _run_single_task(
         runtime_metric_options = {}
         if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
             runtime_metric_options["_tokenizer"] = tokenizer_getter()
+        if getattr(metrics_module, "REQUIRES_BACKEND", False):
+            runtime_metric_options["_backend"] = backend
 
         generated_scores = _score_generation_outputs(
             metrics_module=metrics_module,

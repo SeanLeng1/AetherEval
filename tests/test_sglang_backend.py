@@ -23,9 +23,10 @@ class _ShortEngine(_FakeEngine):
 
 
 class SGLangBackendTests(unittest.TestCase):
-    def test_engine_args_do_not_include_aethereval_dp_size(self) -> None:
+    def test_engine_args_use_native_dp_and_default_memory_saver(self) -> None:
         backend = sglang_backend.SGLangBackend.__new__(sglang_backend.SGLangBackend)
         backend.model = "test/model"
+        backend.dp_size = 4
         backend.tensor_parallel_size = 2
         backend.model_kwargs = {"dtype": "bfloat16", "generation_batch_size": 64}
 
@@ -36,11 +37,23 @@ class SGLangBackendTests(unittest.TestCase):
             {
                 "model_path": "test/model",
                 "tp_size": 2,
+                "dp_size": 4,
                 "dtype": "bfloat16",
+                "enable_memory_saver": True,
             },
         )
-        self.assertNotIn("dp_size", args)
         self.assertNotIn("generation_batch_size", args)
+
+    def test_engine_args_memory_saver_overridable(self) -> None:
+        backend = sglang_backend.SGLangBackend.__new__(sglang_backend.SGLangBackend)
+        backend.model = "test/model"
+        backend.dp_size = 1
+        backend.tensor_parallel_size = 1
+        backend.model_kwargs = {"enable_memory_saver": False}
+
+        args = backend._engine_args()
+
+        self.assertIs(args["enable_memory_saver"], False)
 
     def test_sampling_params_skip_disabled_top_k(self) -> None:
         params = sglang_backend._build_sampling_params(
@@ -59,15 +72,6 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(params["min_p"], 0.05)
         self.assertEqual(params["seed"], 123)
         self.assertNotIn("top_k", params)
-
-    def test_split_payloads_round_robins_across_workers(self) -> None:
-        payloads = [{"idx": idx} for idx in range(5)]
-
-        split = sglang_backend._split_payloads(payloads, num_workers=2)
-
-        self.assertEqual(
-            [[item["idx"] for item in worker] for worker in split], [[0, 2, 4], [1, 3]]
-        )
 
     def test_run_generation_expands_n_and_regroups_outputs(self) -> None:
         engine = _FakeEngine()

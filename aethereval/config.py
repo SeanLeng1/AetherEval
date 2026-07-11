@@ -170,10 +170,6 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             getattr(args, "rm_max_length", None),
             _cfg_get(cfg, "rm_max_length", "metrics"),
         ),
-        "rm_device": _pick(
-            getattr(args, "rm_device", None),
-            _cfg_get(cfg, "rm_device", "metrics"),
-        ),
         "rm_dtype": _pick(
             getattr(args, "rm_dtype", None),
             _cfg_get(cfg, "rm_dtype", "metrics"),

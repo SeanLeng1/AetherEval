@@ -184,16 +184,6 @@ def _make_progress_bar(total: int, desc: str, enabled: bool) -> Any:
     return tqdm(total=total, desc=desc, unit="gen", dynamic_ncols=True)
 
 
-def _split_payloads(
-    payloads: list[dict[str, Any]],
-    num_workers: int,
-) -> list[list[dict[str, Any]]]:
-    worker_payloads: list[list[dict[str, Any]]] = [[] for _ in range(num_workers)]
-    for idx, payload in enumerate(payloads):
-        worker_payloads[idx % num_workers].append(payload)
-    return worker_payloads
-
-
 def _outputs_from_dicts(output_dicts: list[dict[str, Any]]) -> list[GenerationOutput]:
     return [
         GenerationOutput(
@@ -295,8 +285,9 @@ def _run_generation(
 class SGLangBackend:
     """SGLang offline backend.
 
-    - dp_size = 1: single SGLang Engine.
-    - dp_size > 1: Ray data-parallel SGLang Engine workers.
+    One SGLang Engine; dp_size > 1 uses sglang's native data parallelism
+    (dp schedulers inside the engine), so release/resume covers every GPU
+    with a single call and RM scoring can borrow all dp*tp devices.
     """
 
     name = "sglang"
@@ -317,10 +308,9 @@ class SGLangBackend:
         )
 
         self._sglang = None
-        self._ray = None
         self._engine = None
         self._tokenizer = None
-        self._workers: list[Any] = []
+        self._memory_saver_enabled = False
 
         if self.dp_size < 1:
             raise ValueError(f"dp_size must be >= 1, got {self.dp_size}")
@@ -329,10 +319,11 @@ class SGLangBackend:
                 f"tensor_parallel_size must be >= 1, got {self.tensor_parallel_size}"
             )
 
-        if self.dp_size == 1:
-            self._init_single()
-        else:
-            self._init_ray()
+        sglang = self._import_sglang()
+        engine_args = self._engine_args()
+        self._memory_saver_enabled = bool(engine_args.get("enable_memory_saver", False))
+        self._engine = sglang.Engine(**engine_args)
+        self._tokenizer = load_chat_tokenizer(self.model, self.model_kwargs)
 
     def _import_sglang(self) -> Any:
         try:
@@ -348,6 +339,7 @@ class SGLangBackend:
         engine_args: dict[str, Any] = {
             "model_path": self.model,
             "tp_size": self.tensor_parallel_size,
+            "dp_size": self.dp_size,
         }
         engine_args.update(
             {
@@ -356,80 +348,9 @@ class SGLangBackend:
                 if key != "generation_batch_size"
             }
         )
+        # release/resume (RM-scoring offload) needs the memory saver; overridable via model_kwargs.
+        engine_args.setdefault("enable_memory_saver", True)
         return engine_args
-
-    def _init_single(self) -> None:
-        sglang = self._import_sglang()
-        self._engine = sglang.Engine(**self._engine_args())
-        self._tokenizer = load_chat_tokenizer(self.model, self.model_kwargs)
-
-    def _init_ray(self) -> None:
-        self._import_sglang()
-        try:
-            import ray
-        except ImportError as exc:
-            raise RuntimeError(
-                "ray is not installed. Install dependencies first (`pip install -e .`)."
-            ) from exc
-
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
-
-        self._ray = ray
-        engine_args = self._engine_args()
-        model = self.model
-        model_kwargs = self.model_kwargs
-        generation_batch_size = self.generation_batch_size
-
-        @ray.remote(num_gpus=self.tensor_parallel_size)
-        class _Worker:
-            def __init__(
-                self,
-                _engine_args: dict[str, Any],
-                _model: str,
-                _model_kwargs: dict[str, Any],
-                _generation_batch_size: int,
-            ) -> None:
-                import sglang as _sglang
-
-                from aethereval.backends.prompt import (
-                    load_chat_tokenizer as _load_chat_tokenizer,
-                )
-
-                self._engine = _sglang.Engine(**_engine_args)
-                self._tokenizer = _load_chat_tokenizer(_model, _model_kwargs)
-                self._generation_batch_size = _generation_batch_size
-
-            def generate(
-                self,
-                payloads: list[dict[str, Any]],
-                gen_cfg: dict[str, Any],
-            ) -> list[dict[str, Any]]:
-                return _run_generation(
-                    engine=self._engine,
-                    tokenizer=self._tokenizer,
-                    payloads=payloads,
-                    gen_cfg=gen_cfg,
-                    batch_size=self._generation_batch_size,
-                )
-
-            def close(self) -> None:
-                if self._engine is None:
-                    return
-                shutdown = getattr(self._engine, "shutdown", None)
-                if callable(shutdown):
-                    shutdown()
-                else:
-                    close = getattr(self._engine, "close", None)
-                    if callable(close):
-                        close()
-                self._engine = None
-                self._tokenizer = None
-
-        self._workers = [
-            _Worker.remote(engine_args, model, model_kwargs, generation_batch_size)
-            for _ in range(self.dp_size)
-        ]
 
     def generate(
         self,
@@ -448,26 +369,72 @@ class SGLangBackend:
         if not payloads:
             return []
 
-        if self.dp_size == 1:
-            assert self._engine is not None
-            output_dicts = _run_generation(
-                engine=self._engine,
-                tokenizer=self._tokenizer,
-                payloads=payloads,
-                gen_cfg=gen_cfg,
-                batch_size=self.generation_batch_size,
-            )
-        else:
-            assert self._ray is not None
-            worker_payloads = _split_payloads(payloads, len(self._workers))
-            refs = []
-            for worker, worker_items in zip(self._workers, worker_payloads):
-                refs.append(worker.generate.remote(worker_items, gen_cfg))
-            nested = self._ray.get(refs)
-            output_dicts = [item for sublist in nested for item in sublist]
-            output_dicts.sort(key=lambda x: x["idx"])
-
+        assert self._engine is not None
+        output_dicts = _run_generation(
+            engine=self._engine,
+            tokenizer=self._tokenizer,
+            payloads=payloads,
+            gen_cfg=gen_cfg,
+            batch_size=self.generation_batch_size,
+        )
         return _outputs_from_dicts(output_dicts)
+
+    def release_memory(self) -> None:
+        """Free the engine's weights + KV cache so scoring models can use the GPUs."""
+        assert self._engine is not None
+        if not self._memory_saver_enabled:
+            raise RuntimeError(
+                "engine memory offload requires enable_memory_saver=true "
+                "(default; was overridden via model_kwargs)"
+            )
+        release = getattr(self._engine, "release_memory_occupation", None)
+        if not callable(release):
+            raise RuntimeError(
+                "sglang Engine has no release_memory_occupation(); this sglang build "
+                "cannot offload for RM scoring"
+            )
+        release()
+
+    def resume_memory(self) -> None:
+        """Re-occupy GPU memory and reload weights (release does not preserve their contents)."""
+        assert self._engine is not None
+        resume = getattr(self._engine, "resume_memory_occupation", None)
+        update_weights = getattr(self._engine, "update_weights_from_disk", None)
+        if not callable(resume) or not callable(update_weights):
+            raise RuntimeError(
+                "sglang Engine lacks resume_memory_occupation()/update_weights_from_disk(); "
+                "cannot restore the engine after RM scoring"
+            )
+        resume()
+        update_weights(self.model)
+
+    def score_reward_models(
+        self,
+        model_paths: list[str],
+        conversations: list[list[dict[str, str]]],
+        scorer_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, list[float]]:
+        """Offload the engine, score with each reward model data-parallel, resume.
+
+        Scoring parallelism reuses the run's GPU budget (dp_size * tp_size): one
+        scoring process per device, each holding one reward model at a time over
+        its contiguous shard.
+        """
+        from benchmark_utils.reward_model import score_conversations_sharded
+
+        devices = [
+            f"cuda:{i}" for i in range(self.dp_size * self.tensor_parallel_size)
+        ]
+        self.release_memory()
+        try:
+            return score_conversations_sharded(
+                model_paths=model_paths,
+                conversations=conversations,
+                devices=devices,
+                scorer_kwargs=dict(scorer_kwargs or {}),
+            )
+        finally:
+            self.resume_memory()
 
     def close(self) -> None:
         if self._engine is not None:
@@ -480,8 +447,3 @@ class SGLangBackend:
                     close()
         self._engine = None
         self._tokenizer = None
-        if self._ray is not None and self._workers:
-            self._ray.get([worker.close.remote() for worker in self._workers])
-        if self._ray is not None and self._ray.is_initialized():
-            self._ray.shutdown()
-        self._workers = []
