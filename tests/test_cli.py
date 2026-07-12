@@ -193,7 +193,9 @@ class ExternalCliTests(unittest.TestCase):
                 "--bfcl-sglang-arg",
                 "schedule_conservativeness=0.3",
                 "--bfcl-sglang-arg",
-                'json_model_override_args={"max_position_embeddings":131072}',
+                'json_model_override_args={"max_position_embeddings":131072,'
+                '"rope_parameters":{"rope_theta":1000000.0,"rope_type":"yarn",'
+                '"factor":4.0,"original_max_position_embeddings":32768}}',
             ]
         )
         resolved = resolve_run_arguments(args, {})
@@ -210,7 +212,15 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.sglang_server_args["schedule_conservativeness"], 0.3)
         self.assertEqual(
             spec.sglang_server_args["json_model_override_args"],
-            {"max_position_embeddings": 131072},
+            {
+                "max_position_embeddings": 131072,
+                "rope_parameters": {
+                    "rope_theta": 1000000.0,
+                    "rope_type": "yarn",
+                    "factor": 4.0,
+                    "original_max_position_embeddings": 32768,
+                },
+            },
         )
 
     def test_bfcl_legacy_num_gpus_means_sglang_dp(self) -> None:

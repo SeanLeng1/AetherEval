@@ -93,8 +93,12 @@ affect APIBank or other native tasks. For example, an explicit static-YaRN exper
 aethereval --tasks apibank,bfcl --backend sglang --dp-size 8 --tp-size 1 \
   --bfcl-context-length 131072 \
   --bfcl-sglang-arg \
-  'json_model_override_args={"max_position_embeddings":131072,"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+  'json_model_override_args={"max_position_embeddings":131072,"rope_parameters":{"rope_theta":1000000.0,"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
 ```
+
+The checkpoint uses the Transformers-v5 `rope_parameters` schema. Keep its original
+`rope_theta=1000000.0` in the override; passing the older `rope_scaling` object replaces
+`rope_parameters` without `rope_theta` and makes current SGLang fail during model startup.
 
 This override is never enabled automatically: static YaRN changes position encoding for
 short inputs too, and a tokenizer's `model_max_length` does not establish that the model
