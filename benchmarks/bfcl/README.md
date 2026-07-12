@@ -50,13 +50,24 @@ aethereval --tasks bfcl \
 
 `--categories` accepts BFCL collections/categories: `all`, `non_live`, `live`,
 `multi_turn`, or individual ones (`live_simple`, `multi_turn_base`, …). Backend defaults
-to **sglang**. If `--num-gpus` is omitted, the AetherEval CLI uses `--dp-size`, then
-`--tp-size`, as the BFCL GPU count.
+to **sglang**. BFCL inherits AetherEval's normal parallelism semantics: `--dp-size` is
+the replica count and `--tp-size` is the tensor-parallel size of each replica. When
+`dp_size > 1`, AetherEval replaces BFCL's upstream TP-only launch command with SGLang
+Model Gateway (SMG), using `cache_aware` routing by default:
+
+```bash
+aethereval --tasks bfcl --model rlla-gdpo --model-path /path/to/hf_ckpt \
+  --backend sglang --dp-size 8 --tp-size 1
+```
+
+Use `--bfcl-router-policy` to change the policy or
+`--no-bfcl-use-sglang-router` only for an explicit comparison. Legacy `--num-gpus N`
+means DP=N, TP=1 for SGLang when DP/TP are not otherwise supplied.
 
 BFCL's local handler sends requests to the local SGLang server concurrently. The upstream
-package hardcodes 100 workers, which can overload local servers on long-generation runs;
-AetherEval caps that concurrency with `--num-threads` (default: 16). Lower it to `8` or
-`4` if you see local `Connection error` messages.
+package hardcodes 100 workers. AetherEval defaults to `max(16, 16 * dp_size)`, capped at
+100, so every replica receives useful batching pressure. Override with `--num-threads`;
+lower it if server logs show frequent KV-cache retractions or connection errors.
 
 Upstream BFCL also prints very verbose multi-turn step logs (`ID: ..., Turn: ..., Step:
 ...`, empty-response notices, and separator lines). AetherEval filters those by default;
@@ -67,6 +78,24 @@ resolved from the same CLI/YAML config stack as native tasks. The SGLang server 
 log the model's default `generation_config` at startup, but the BFCL request overrides the
 actual sampling parameters: `temperature`, `top_p`, `top_k`, `max_new_tokens`, and
 `context_length` are forwarded where applicable, with `repetition_penalty=1.0`.
+An explicit `--seed` is forwarded too, for reproducible local sampling.
+`--mem-fraction-static`, `--dtype`, and compatible repeatable `--sglang-arg` values are
+also forwarded to SMG workers; offline-only `generation_batch_size` is intentionally not.
+
+BFCL runs after native tasks and starts its own server. Use `--bfcl-context-length` and
+repeatable `--bfcl-sglang-arg` values when BFCL needs a server setting that must not
+affect APIBank or other native tasks. For example, an explicit static-YaRN experiment is:
+
+```bash
+aethereval --tasks apibank,bfcl --backend sglang --dp-size 8 --tp-size 1 \
+  --bfcl-context-length 131072 \
+  --bfcl-sglang-arg \
+  'json_model_override_args={"max_position_embeddings":131072,"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+```
+
+This override is never enabled automatically: static YaRN changes position encoding for
+short inputs too, and a tokenizer's `model_max_length` does not establish that the model
+was trained or validated at that length. Compare benchmark accuracy before adopting it.
 
 ### Python API
 
@@ -77,7 +106,7 @@ from benchmarks.bfcl.external import ExternalRunSpec, run
 result = run(ExternalRunSpec(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     output_dir=Path("outputs/bfcl-base"),
-    categories=["all"], backend="sglang", num_gpus=1,
+    categories=["all"], backend="sglang", num_gpus=1, dp_size=1, tp_size=1,
 ))
 print(result.metrics, result.primary_score)   # primary_metric = "OverallAcc"
 ```

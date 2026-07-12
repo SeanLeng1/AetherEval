@@ -91,15 +91,47 @@ def _build_external_spec(
     if task_name == "bfcl":
         from benchmarks.bfcl.external import ExternalRunSpec, run
 
-        num_gpus = (
-            args.num_gpus
-            if args.num_gpus is not None
-            else args.dp_size
-            if args.dp_size is not None
-            else args.tp_size
-            if args.tp_size is not None
-            else 1
+        from .config import _parse_sglang_args
+
+        if backend == "sglang":
+            tp_size = int(args.tp_size if args.tp_size is not None else 1)
+            if args.num_gpus is not None and args.dp_size is None:
+                if int(args.num_gpus) % tp_size:
+                    raise ValueError("--num-gpus must be divisible by --tp-size")
+                dp_size = int(args.num_gpus) // tp_size
+            else:
+                dp_size = int(args.dp_size if args.dp_size is not None else 1)
+        else:
+            dp_size = int(args.dp_size if args.dp_size is not None else 1)
+            tp_size = int(
+                args.tp_size
+                if args.tp_size is not None
+                else args.num_gpus
+                if args.num_gpus is not None
+                else 1
+            )
+        num_gpus = dp_size * tp_size
+        if args.num_gpus is not None and int(args.num_gpus) != num_gpus:
+            raise ValueError(
+                "--num-gpus must equal --dp-size * --tp-size when combined"
+            )
+
+        use_sglang_router = (
+            True
+            if getattr(args, "bfcl_use_sglang_router", None) is None
+            else bool(args.bfcl_use_sglang_router)
         )
+        backend_kwargs = dict(getattr(args, "backend_kwargs", {}) or {})
+        bfcl_sglang_kwargs = _parse_sglang_args(
+            getattr(args, "bfcl_sglang_arg", None)
+        )
+        bfcl_backend_kwargs = {**backend_kwargs, **bfcl_sglang_kwargs}
+        mem_fraction_static = backend_kwargs.get(
+            "mem_fraction_static",
+            getattr(args, "mem_fraction_static", None),
+        )
+        dtype = backend_kwargs.get("dtype", getattr(args, "dtype", None))
+        default_num_threads = min(100, max(16, 16 * dp_size))
         spec = ExternalRunSpec(
             model=args.model,
             output_dir=effective_output_dir,
@@ -107,23 +139,44 @@ def _build_external_spec(
             categories=_split_csv(args.categories, ["all"]),
             backend=backend,
             num_gpus=num_gpus,
-            num_threads=args.num_threads if args.num_threads is not None else 16,
+            dp_size=dp_size,
+            tp_size=tp_size,
+            use_sglang_router=use_sglang_router,
+            router_policy=(
+                args.bfcl_router_policy
+                if getattr(args, "bfcl_router_policy", None) is not None
+                else "cache_aware"
+            ),
+            num_threads=(
+                args.num_threads
+                if args.num_threads is not None
+                else default_num_threads
+            ),
             gpu_memory_utilization=(
-                args.gpu_memory_utilization
+                mem_fraction_static
+                if backend == "sglang" and mem_fraction_static is not None
+                else args.gpu_memory_utilization
                 if args.gpu_memory_utilization is not None
                 else 0.9
+            ),
+            dtype=str(dtype if dtype is not None else "bfloat16"),
+            sglang_server_args=(
+                bfcl_backend_kwargs if backend == "sglang" else {}
             ),
             temperature=args.temperature if args.temperature is not None else 0.001,
             max_tokens=(
                 args.max_new_tokens if args.max_new_tokens is not None else 4096
             ),
             max_context_length=(
-                args.context_length
+                args.bfcl_context_length
+                if getattr(args, "bfcl_context_length", None) is not None
+                else args.context_length
                 if args.context_length is not None
                 else args.max_model_len
             ),
             top_p=args.top_p if args.top_p is not None else 1.0,
             top_k=args.top_k if args.top_k is not None else -1,
+            seed=args.seed,
             verbose=bool(args.bfcl_verbose),
             allow_overwrite=True if args.overwrite is None else bool(args.overwrite),
             run_generation=not args.skip_generation,
@@ -295,6 +348,10 @@ def run_selected_tasks(
         external_args.output_dir = str(task_output_dir)
         external_args.dp_size = resolved["dp_size"]
         external_args.tp_size = resolved["tp_size"]
+        if args.num_gpus is not None and args.dp_size is None:
+            # Preserve the legacy BFCL-only override instead of replacing it with
+            # resolve_run_arguments()'s generic dp_size default.
+            external_args.dp_size = None
         external_args.overwrite = resolved["overwrite"]
 
         gen_overrides = resolved["gen_overrides"]
@@ -302,6 +359,7 @@ def run_selected_tasks(
         external_args.temperature = gen_overrides["temperature"]
         external_args.top_p = gen_overrides["top_p"]
         external_args.top_k = gen_overrides["top_k"]
+        external_args.seed = gen_overrides["seed"]
 
         backend_kwargs = resolved["backend_kwargs"]
         external_args.gpu_memory_utilization = backend_kwargs.get(
@@ -310,6 +368,7 @@ def run_selected_tasks(
         )
         external_args.context_length = backend_kwargs.get("context_length")
         external_args.max_model_len = backend_kwargs.get("max_model_len")
+        external_args.backend_kwargs = backend_kwargs
         spec, run = _build_external_spec(
             external_args,
             task_name=task_name,
@@ -317,7 +376,8 @@ def run_selected_tasks(
         )
         _info(
             f"external_task={task_name} model={external_args.model} "
-            f"backend={spec.backend} output_dir={spec.output_dir}"
+            f"backend={spec.backend} dp_size={spec.dp_size} tp_size={spec.tp_size} "
+            f"router={spec.use_sglang_router} output_dir={spec.output_dir}"
         )
         result = run(spec)
         task_summaries[task_name] = _external_summary(
@@ -498,13 +558,54 @@ def build_parser() -> argparse.ArgumentParser:
         "--num-gpus",
         type=int,
         default=None,
-        help="BFCL GPU count; defaults to --dp-size, then --tp-size.",
+        help=(
+            "Legacy BFCL total GPU count; for SGLang it maps to DP replicas when "
+            "--dp-size/--tp-size are omitted."
+        ),
     )
     parser.add_argument(
         "--num-threads",
         type=int,
         default=None,
-        help="BFCL local request concurrency; defaults to 16.",
+        help="BFCL local request concurrency; defaults to max(16, 16 * dp_size), capped at 100.",
+    )
+    parser.add_argument(
+        "--bfcl-use-sglang-router",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use SGLang Model Gateway for BFCL when dp_size > 1 (default: enabled).",
+    )
+    parser.add_argument(
+        "--bfcl-router-policy",
+        choices=(
+            "random",
+            "round_robin",
+            "cache_aware",
+            "power_of_two",
+            "manual",
+            "consistent_hashing",
+            "prefix_hash",
+        ),
+        default=None,
+        help="SGLang Model Gateway routing policy for BFCL (default: cache_aware).",
+    )
+    parser.add_argument(
+        "--bfcl-context-length",
+        type=int,
+        default=None,
+        help=(
+            "BFCL-only SGLang context length; overrides --context-length after "
+            "native tasks have finished."
+        ),
+    )
+    parser.add_argument(
+        "--bfcl-sglang-arg",
+        action="append",
+        default=None,
+        help=(
+            "Extra BFCL-only SGLang server argument (repeatable), format: key=value. "
+            "Overrides the matching global --sglang-arg."
+        ),
     )
     parser.add_argument(
         "--bfcl-verbose",

@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,15 +38,25 @@ class ExternalRunSpec:
     model_path: str | None = None  # local checkpoint dir (None => load `model` from HF)
     categories: list[str] = field(default_factory=lambda: ["all"])
     backend: str = "sglang"  # tmux0 container ships sglang
+    # BFCL upstream exposes one ``num_gpus`` knob and incorrectly maps it to TP.
+    # Keep it for result compatibility, but use the explicit AetherEval DP/TP
+    # values when patching the SGLang server command.
     num_gpus: int = 1
+    dp_size: int = 1
+    tp_size: int = 1
+    use_sglang_router: bool = True
+    router_policy: str = "cache_aware"
     num_threads: int = 16
     gpu_memory_utilization: float = 0.9
+    dtype: str = "bfloat16"
+    sglang_server_args: dict[str, Any] = field(default_factory=dict)
     temperature: float = 0.001  # near-greedy, BFCL tool-calling default
     max_tokens: int = 4096
     max_context_length: int | None = None
     top_p: float = 1.0
     top_k: int = -1
     repetition_penalty: float = 1.0
+    seed: int | None = None
     verbose: bool = False
     allow_overwrite: bool = True
     run_generation: bool = True
@@ -112,6 +123,7 @@ def _handler_env(spec: ExternalRunSpec) -> dict[str, str | None]:
         "RLLA_BFCL_TOP_P": str(spec.top_p),
         "RLLA_BFCL_TOP_K": str(spec.top_k),
         "RLLA_BFCL_REPETITION_PENALTY": str(spec.repetition_penalty),
+        "RLLA_BFCL_SEED": str(spec.seed) if spec.seed is not None else None,
     }
 
 
@@ -143,52 +155,210 @@ def _cap_bfcl_thread_pool(max_workers: int):
         base_oss_handler.ThreadPoolExecutor = original
 
 
-def _server_command_with_context(
-    command,
-    max_context_length: int | None,
-):
-    if max_context_length is None:
-        return command
+def _remove_command_options(command: list[str], option_names: set[str]) -> list[str]:
+    cleaned: list[str] = []
+    skip_value = False
+    for item in command:
+        if skip_value:
+            skip_value = False
+            continue
+        if item in option_names:
+            skip_value = True
+            continue
+        if any(item.startswith(f"{name}=") for name in option_names):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _as_cli_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [json.dumps(value, separators=(",", ":"))]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def _sglang_extra_cli_args(values: dict[str, Any]) -> list[str]:
+    # These are owned by ExternalRunSpec or are offline-Engine-only settings.
+    controlled = {
+        "model_path",
+        "host",
+        "port",
+        "tp_size",
+        "tensor_parallel_size",
+        "dp_size",
+        "data_parallel_size",
+        "context_length",
+        "mem_fraction_static",
+        "dtype",
+        "trust_remote_code",
+        "generation_batch_size",
+        "router_policy",
+    }
+    cli_args: list[str] = []
+    for key, value in values.items():
+        normalized = str(key).strip().replace("-", "_")
+        if not normalized or normalized in controlled or value is None:
+            continue
+        flag = f"--{normalized.replace('_', '-')}"
+        if isinstance(value, bool):
+            if value:
+                cli_args.append(flag)
+            continue
+        cli_args.append(flag)
+        cli_args.extend(_as_cli_values(value))
+    return cli_args
+
+
+def _server_command_for_spec(command, spec: ExternalRunSpec):
     if not isinstance(command, (list, tuple)):
         return command
 
     patched = list(command)
-    if "sglang.launch_server" in patched and "--context-length" not in patched:
-        patched.extend(["--context-length", str(max_context_length)])
-    elif patched[:2] == ["vllm", "serve"] and "--max-model-len" not in patched:
-        patched.extend(["--max-model-len", str(max_context_length)])
+    if "sglang.launch_server" in patched:
+        if spec.dp_size < 1 or spec.tp_size < 1:
+            raise ValueError("BFCL dp_size and tp_size must both be positive.")
+        if spec.num_gpus != spec.dp_size * spec.tp_size:
+            raise ValueError(
+                "BFCL num_gpus must equal dp_size * tp_size: "
+                f"{spec.num_gpus} != {spec.dp_size} * {spec.tp_size}."
+            )
+
+        if spec.use_sglang_router and spec.dp_size > 1:
+            module_index = patched.index("sglang.launch_server")
+            patched[module_index] = "sglang_router.launch_server"
+
+        patched = _remove_command_options(
+            patched,
+            {
+                "--tp",
+                "--tp-size",
+                "--tensor-parallel-size",
+                "--dp",
+                "--dp-size",
+                "--data-parallel-size",
+                "--mem-fraction-static",
+                "--dtype",
+                "--context-length",
+                "--router-policy",
+            },
+        )
+        patched.extend(["--tp-size", str(spec.tp_size)])
+        if spec.use_sglang_router and spec.dp_size > 1:
+            patched.extend(["--dp-size", str(spec.dp_size)])
+            patched.extend(["--router-policy", spec.router_policy])
+        elif spec.dp_size > 1:
+            # Explicit comparison/debug path: native SGLang DP, not TP fallback.
+            patched.extend(["--dp-size", str(spec.dp_size)])
+        patched.extend(["--mem-fraction-static", str(spec.gpu_memory_utilization)])
+        patched.extend(["--dtype", spec.dtype])
+        if spec.max_context_length is not None:
+            patched.extend(["--context-length", str(spec.max_context_length)])
+        patched.extend(_sglang_extra_cli_args(spec.sglang_server_args))
+    elif patched[:2] == ["vllm", "serve"] and spec.max_context_length is not None:
+        patched = _remove_command_options(patched, {"--max-model-len"})
+        patched.extend(["--max-model-len", str(spec.max_context_length)])
 
     return type(command)(patched) if isinstance(command, tuple) else patched
 
 
-@contextlib.contextmanager
-def _patch_bfcl_server_context(max_context_length: int | None):
-    if max_context_length is None:
-        yield
-        return
+class _DrainServerLogsUntilEOFEvent:
+    """BFCL sets this event as soon as one endpoint is ready.
 
+    SMG starts workers asynchronously, so closing its stdout/stderr pipes at that point
+    can terminate workers that are still logging startup. Keep the drain threads alive;
+    they naturally finish at EOF after BFCL terminates the server in its finally block.
+    """
+
+    def set(self) -> None:
+        return None
+
+    def is_set(self) -> bool:
+        return False
+
+
+class _ThreadingDrainProxy:
+    def __init__(self, module: Any) -> None:
+        self._module = module
+
+    def Event(self) -> _DrainServerLogsUntilEOFEvent:  # noqa: N802
+        return _DrainServerLogsUntilEOFEvent()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._module, name)
+
+
+class _RouterReadyRequestsProxy:
+    def __init__(self, module: Any, expected_workers: int, timeout: float = 900.0):
+        self._module = module
+        self._expected_workers = expected_workers
+        self._deadline = time.monotonic() + timeout
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._module, name)
+
+    def get(self, url: str, *args, **kwargs):
+        response = self._module.get(url, *args, **kwargs)
+        normalized_url = str(url).rstrip("/")
+        if not normalized_url.endswith("/v1/models"):
+            return response
+
+        healthy_workers = 0
+        if response.status_code == 200:
+            workers_url = f"{normalized_url[: -len('/v1/models')]}/workers"
+            workers_response = self._module.get(workers_url, timeout=10)
+            if workers_response.status_code == 200:
+                workers = workers_response.json().get("workers", [])
+                healthy_workers = sum(
+                    1 for worker in workers if worker.get("is_healthy") is True
+                )
+            if healthy_workers >= self._expected_workers:
+                return response
+            response.status_code = 503
+
+        if time.monotonic() >= self._deadline:
+            raise RuntimeError(
+                "Timed out waiting for all BFCL SMG workers: "
+                f"healthy={healthy_workers}, expected={self._expected_workers}."
+            )
+        # BFCL's upstream loop only sleeps on ConnectionError, not HTTP 503.
+        time.sleep(1)
+        return response
+
+
+@contextlib.contextmanager
+def _patch_bfcl_server_command(spec: ExternalRunSpec):
     from bfcl_eval.model_handler.local_inference import base_oss_handler
 
     original = base_oss_handler.subprocess.Popen
+    original_requests = base_oss_handler.requests
+    original_threading = base_oss_handler.threading
+    use_router = spec.use_sglang_router and spec.dp_size > 1
 
-    def context_popen(*args, **kwargs):
+    def patched_popen(*args, **kwargs):
         if args:
             args = (
-                _server_command_with_context(args[0], max_context_length),
+                _server_command_for_spec(args[0], spec),
                 *args[1:],
             )
         elif "args" in kwargs:
-            kwargs["args"] = _server_command_with_context(
-                kwargs["args"],
-                max_context_length,
-            )
+            kwargs["args"] = _server_command_for_spec(kwargs["args"], spec)
         return original(*args, **kwargs)
 
-    base_oss_handler.subprocess.Popen = context_popen
+    base_oss_handler.subprocess.Popen = patched_popen
+    if use_router:
+        base_oss_handler.requests = _RouterReadyRequestsProxy(
+            original_requests,
+            expected_workers=spec.dp_size,
+        )
+        base_oss_handler.threading = _ThreadingDrainProxy(original_threading)
     try:
         yield
     finally:
         base_oss_handler.subprocess.Popen = original
+        base_oss_handler.requests = original_requests
+        base_oss_handler.threading = original_threading
 
 
 def _is_noisy_bfcl_print(args: tuple[object, ...]) -> bool:
@@ -237,7 +407,7 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
             with (
                 _filter_bfcl_prints(not spec.verbose),
                 _cap_bfcl_thread_pool(spec.num_threads),
-                _patch_bfcl_server_context(spec.max_context_length),
+                _patch_bfcl_server_command(spec),
             ):
                 generation_main(_gen_args(spec, result_dir))
 
@@ -388,7 +558,13 @@ def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
 
 
 def _is_allowed_zero_score_error(error: str) -> bool:
-    return "BFCL prompt exceeds max context length:" in error
+    return (
+        "BFCL prompt exceeds max context length:" in error
+        or (
+            "Input length (" in error
+            and "exceeds the maximum allowed length" in error
+        )
+    )
 
 
 def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
@@ -616,14 +792,21 @@ def _write_summary(
         "backend": spec.backend,
         "categories": list(spec.categories),
         "num_gpus": spec.num_gpus,
+        "dp_size": spec.dp_size,
+        "tp_size": spec.tp_size,
+        "use_sglang_router": spec.use_sglang_router,
+        "router_policy": spec.router_policy,
         "num_threads": spec.num_threads,
         "gpu_memory_utilization": spec.gpu_memory_utilization,
+        "dtype": spec.dtype,
+        "sglang_server_args": spec.sglang_server_args,
         "temperature": spec.temperature,
         "max_tokens": spec.max_tokens,
         "max_context_length": spec.max_context_length,
         "top_p": spec.top_p,
         "top_k": spec.top_k,
         "repetition_penalty": spec.repetition_penalty,
+        "seed": spec.seed,
         "verbose": spec.verbose,
         "metrics": metrics,
         **prediction_stats,

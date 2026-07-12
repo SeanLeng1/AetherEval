@@ -161,6 +161,12 @@ _RETRY_SUFFIX = (
     "missing, and how to achieve the task goal from now on."
 )
 
+# SGLang reserves a few positions for request bookkeeping/special tokens and rejects
+# input at its advertised maximum-input boundary. Keep enough room for one generated
+# token plus that server-side margin so unsupported BFCL cases become deterministic
+# zero-score context overflows instead of HTTP 400 inference failures.
+_SERVER_CONTEXT_MARGIN = 8
+
 
 def _convert_to_format_tool(tools, count=1):
     if isinstance(tools, dict):
@@ -248,7 +254,9 @@ class RLLAHandler(OSSHandler):
             raise ValueError("BFCL max context length must be positive.")
 
         input_token_count = len(self.tokenizer.tokenize(formatted_prompt))
-        available_tokens = max_context_length - input_token_count - 2
+        available_tokens = (
+            max_context_length - input_token_count - _SERVER_CONTEXT_MARGIN
+        )
         if available_tokens <= 0:
             raise ValueError(
                 "BFCL prompt exceeds max context length: "
@@ -262,6 +270,9 @@ class RLLAHandler(OSSHandler):
             "top_p": _env_float("RLLA_BFCL_TOP_P", 1.0),
             "top_k": _env_int("RLLA_BFCL_TOP_K", -1),
         }
+        seed = _env_int("RLLA_BFCL_SEED")
+        if seed is not None:
+            extra_body["seed"] = seed
         if hasattr(self, "stop_token_ids"):
             extra_body["stop_token_ids"] = self.stop_token_ids
         if hasattr(self, "skip_special_tokens"):

@@ -176,6 +176,10 @@ External runs use the regular `aethereval` CLI for shared runtime flags
 (`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
 benchmark-specific selectors such as `--categories` for BFCL.
 
+For BFCL with SGLang, `--dp-size > 1` uses SGLang Model Gateway with cache-aware
+routing; `--tp-size` remains the tensor-parallel size per replica. This avoids the
+upstream BFCL behavior that treats the total GPU count as tensor parallelism.
+
 External benchmark modules use the same shape:
 
 - `ExternalRunSpec`

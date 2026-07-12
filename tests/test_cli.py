@@ -17,16 +17,77 @@ from aethereval.cli import (
 from aethereval.config import resolve_run_arguments
 from benchmarks.bfcl._compat import _set_bfcl_project_root
 from benchmarks.bfcl.external import (
+    ExternalRunSpec,
+    _RouterReadyRequestsProxy,
+    _ThreadingDrainProxy,
     _filter_bfcl_prints,
     _is_allowed_zero_score_error,
     _raise_on_inference_errors,
-    _server_command_with_context,
+    _server_command_for_spec,
     parse_scores,
     write_predictions_jsonl,
 )
 
 
 class ExternalCliTests(unittest.TestCase):
+    def test_bfcl_smg_readiness_waits_for_all_workers(self) -> None:
+        class Response:
+            def __init__(self, status_code, payload=None):  # noqa: ANN001
+                self.status_code = status_code
+                self._payload = payload or {}
+
+            def json(self):
+                return self._payload
+
+        class Requests:
+            class exceptions:
+                ConnectionError = ConnectionError
+
+            def get(self, url, *args, **kwargs):  # noqa: ANN001
+                del args, kwargs
+                if url.endswith("/workers"):
+                    return Response(
+                        200,
+                        {
+                            "workers": [
+                                {"is_healthy": True},
+                                {"is_healthy": True},
+                            ]
+                        },
+                    )
+                return Response(200)
+
+        proxy = _RouterReadyRequestsProxy(Requests(), expected_workers=8)
+
+        with mock.patch("benchmarks.bfcl.external.time.sleep"):
+            response = proxy.get("http://127.0.0.1:1053/v1/models")
+
+        self.assertEqual(response.status_code, 503)
+
+    def test_bfcl_smg_readiness_accepts_all_healthy_workers(self) -> None:
+        response = mock.Mock(status_code=200)
+        workers_response = mock.Mock(status_code=200)
+        workers_response.json.return_value = {
+            "workers": [{"is_healthy": True} for _ in range(8)]
+        }
+        requests = mock.Mock()
+        requests.get.side_effect = [response, workers_response]
+        proxy = _RouterReadyRequestsProxy(requests, expected_workers=8)
+
+        actual = proxy.get("http://127.0.0.1:1053/v1/models")
+
+        self.assertIs(actual, response)
+        self.assertEqual(actual.status_code, 200)
+
+    def test_bfcl_smg_log_event_drains_until_process_eof(self) -> None:
+        threading_module = mock.Mock()
+        proxy = _ThreadingDrainProxy(threading_module)
+
+        event = proxy.Event()
+        event.set()
+
+        self.assertFalse(event.is_set())
+
     def test_split_tasks_accepts_external_name(self) -> None:
         native_tasks, external_tasks = _split_native_external_tasks("ifeval,bfcl")
 
@@ -56,6 +117,8 @@ class ExternalCliTests(unittest.TestCase):
                 "0.9",
                 "--top-k",
                 "50",
+                "--seed",
+                "123",
                 "--num-threads",
                 "8",
                 "--bfcl-verbose",
@@ -68,12 +131,15 @@ class ExternalCliTests(unittest.TestCase):
 
         self.assertEqual(spec.categories, ["non_live", "live"])
         self.assertEqual(spec.num_gpus, 4)
+        self.assertEqual(spec.dp_size, 1)
+        self.assertEqual(spec.tp_size, 4)
         self.assertEqual(spec.num_threads, 8)
         self.assertEqual(spec.temperature, 0.2)
         self.assertEqual(spec.max_tokens, 2048)
         self.assertEqual(spec.max_context_length, 8192)
         self.assertEqual(spec.top_p, 0.9)
         self.assertEqual(spec.top_k, 50)
+        self.assertEqual(spec.seed, 123)
         self.assertTrue(spec.verbose)
         self.assertFalse(spec.allow_overwrite)
         self.assertTrue(spec.run_generation)
@@ -98,6 +164,68 @@ class ExternalCliTests(unittest.TestCase):
         spec, _run = _build_external_spec(args, task_name="bfcl")
 
         self.assertEqual(spec.num_gpus, 8)
+        self.assertEqual(spec.dp_size, 8)
+        self.assertEqual(spec.tp_size, 1)
+        self.assertTrue(spec.use_sglang_router)
+        self.assertEqual(spec.router_policy, "cache_aware")
+
+    def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--tasks",
+                "apibank,bfcl",
+                "--model",
+                "rlla-gdpo",
+                "--backend",
+                "sglang",
+                "--context-length",
+                "32768",
+                "--sglang-arg",
+                "chunked_prefill_size=4096",
+                "--sglang-arg",
+                "schedule_conservativeness=1.0",
+                "--bfcl-context-length",
+                "131072",
+                "--bfcl-sglang-arg",
+                "schedule_conservativeness=0.3",
+                "--bfcl-sglang-arg",
+                'json_model_override_args={"max_position_embeddings":131072}',
+            ]
+        )
+        resolved = resolve_run_arguments(args, {})
+        args.backend_kwargs = resolved["backend_kwargs"]
+
+        spec, _run = _build_external_spec(args, task_name="bfcl")
+
+        self.assertEqual(resolved["backend_kwargs"]["context_length"], 32768)
+        self.assertNotIn(
+            "json_model_override_args", resolved["backend_kwargs"]
+        )
+        self.assertEqual(spec.max_context_length, 131072)
+        self.assertEqual(spec.sglang_server_args["chunked_prefill_size"], 4096)
+        self.assertEqual(spec.sglang_server_args["schedule_conservativeness"], 0.3)
+        self.assertEqual(
+            spec.sglang_server_args["json_model_override_args"],
+            {"max_position_embeddings": 131072},
+        )
+
+    def test_bfcl_legacy_num_gpus_means_sglang_dp(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--tasks",
+                "bfcl",
+                "--model",
+                "rlla-gdpo",
+                "--num-gpus",
+                "8",
+            ]
+        )
+
+        spec, _run = _build_external_spec(args, task_name="bfcl")
+
+        self.assertEqual(spec.num_gpus, 8)
+        self.assertEqual(spec.dp_size, 8)
+        self.assertEqual(spec.tp_size, 1)
 
     def test_external_benchmark_flag_is_removed(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
@@ -275,7 +403,11 @@ class ExternalCliTests(unittest.TestCase):
 
             self.assertEqual(summary["backend"], "sglang")
             self.assertEqual(summary["num_gpus"], 3)
-            self.assertEqual(summary["num_threads"], 16)
+            self.assertEqual(summary["dp_size"], 3)
+            self.assertEqual(summary["tp_size"], 1)
+            self.assertTrue(summary["use_sglang_router"])
+            self.assertEqual(summary["router_policy"], "cache_aware")
+            self.assertEqual(summary["num_threads"], 48)
             self.assertEqual(summary["temperature"], 0.25)
             self.assertEqual(summary["max_tokens"], 1234)
             self.assertEqual(summary["max_context_length"], 9999)
@@ -311,6 +443,11 @@ class ExternalCliTests(unittest.TestCase):
             (
                 "Error during inference: BFCL prompt exceeds max context length: "
                 "input_tokens=32817, max_context_length=32768."
+            ),
+            (
+                "Error during inference: Error code: 400 - {'message': "
+                "'Input length (32764 tokens) exceeds the maximum allowed length "
+                "(32762 tokens). Use a shorter input.'}"
             ),
         ]
         with TemporaryDirectory() as tmp:
@@ -365,22 +502,92 @@ class ExternalCliTests(unittest.TestCase):
                     str(Path(tmp) / "bfcl"),
                 )
 
-    def test_bfcl_server_command_receives_context_length(self) -> None:
+    def test_bfcl_server_command_uses_smg_dp_and_inherits_args(self) -> None:
         sglang_cmd = [
             "python",
             "-m",
             "sglang.launch_server",
             "--model-path",
             "model",
+            "--tp",
+            "8",
+            "--mem-fraction-static",
+            "0.9",
         ]
+        spec = ExternalRunSpec(
+            model="model",
+            output_dir=Path("outputs"),
+            num_gpus=8,
+            dp_size=8,
+            tp_size=1,
+            gpu_memory_utilization=0.86,
+            dtype="bfloat16",
+            max_context_length=32768,
+            sglang_server_args={
+                "chunked_prefill_size": 4096,
+                "enable_tokenizer_batch_encode": True,
+                "generation_batch_size": 64,
+            },
+        )
+
+        patched = _server_command_for_spec(sglang_cmd, spec)
+
+        self.assertIn("sglang_router.launch_server", patched)
+        self.assertNotIn("sglang.launch_server", patched)
+        self.assertEqual(patched[patched.index("--dp-size") + 1], "8")
+        self.assertEqual(patched[patched.index("--tp-size") + 1], "1")
+        self.assertEqual(patched[patched.index("--router-policy") + 1], "cache_aware")
+        self.assertEqual(patched[patched.index("--context-length") + 1], "32768")
+        self.assertEqual(patched[patched.index("--mem-fraction-static") + 1], "0.86")
+        self.assertEqual(patched[patched.index("--chunked-prefill-size") + 1], "4096")
+        self.assertIn("--enable-tokenizer-batch-encode", patched)
+        self.assertNotIn("--generation-batch-size", patched)
+
+    def test_bfcl_server_command_keeps_single_replica_sglang(self) -> None:
+        command = ["python", "-m", "sglang.launch_server", "--model-path", "model"]
+        spec = ExternalRunSpec(
+            model="model",
+            output_dir=Path("outputs"),
+            num_gpus=2,
+            dp_size=1,
+            tp_size=2,
+        )
+
+        patched = _server_command_for_spec(command, spec)
+
+        self.assertIn("sglang.launch_server", patched)
+        self.assertNotIn("sglang_router.launch_server", patched)
+        self.assertEqual(patched[patched.index("--tp-size") + 1], "2")
+        self.assertNotIn("--dp-size", patched)
+
+    def test_bfcl_server_command_can_use_native_dp_for_comparison(self) -> None:
+        command = ["python", "-m", "sglang.launch_server", "--model-path", "model"]
+        spec = ExternalRunSpec(
+            model="model",
+            output_dir=Path("outputs"),
+            num_gpus=8,
+            dp_size=8,
+            tp_size=1,
+            use_sglang_router=False,
+        )
+
+        patched = _server_command_for_spec(command, spec)
+
+        self.assertIn("sglang.launch_server", patched)
+        self.assertNotIn("sglang_router.launch_server", patched)
+        self.assertEqual(patched[patched.index("--dp-size") + 1], "8")
+
+    def test_bfcl_vllm_server_command_receives_context_length(self) -> None:
         vllm_cmd = ["vllm", "serve", "model"]
+        spec = ExternalRunSpec(
+            model="model",
+            output_dir=Path("outputs"),
+            backend="vllm",
+            max_context_length=65536,
+        )
 
         self.assertEqual(
-            _server_command_with_context(sglang_cmd, 131072)[-2:],
-            ["--context-length", "131072"],
-        )
-        self.assertEqual(
-            _server_command_with_context(vllm_cmd, 65536)[-2:],
+            _server_command_for_spec(vllm_cmd, spec)[-2:],
             ["--max-model-len", "65536"],
         )
 
