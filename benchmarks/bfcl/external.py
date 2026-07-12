@@ -33,9 +33,8 @@ _NOISY_BFCL_MESSAGES = {
 
 @dataclass
 class ExternalRunSpec:
-    model: str  # registry name = HF id, or any name with model_path
+    model: str  # Hugging Face id or local checkpoint path
     output_dir: Path  # AetherEval run dir; result/ + score/ go under it
-    model_path: str | None = None  # local checkpoint dir (None => load `model` from HF)
     categories: list[str] = field(default_factory=lambda: ["all"])
     backend: str = "sglang"  # tmux0 container ships sglang
     # BFCL upstream exposes one ``num_gpus`` knob and incorrectly maps it to TP.
@@ -84,7 +83,7 @@ def _gen_args(spec: ExternalRunSpec, result_dir: Path) -> SimpleNamespace:
         gpu_memory_utilization=spec.gpu_memory_utilization,
         backend=spec.backend,
         skip_server_setup=False,
-        local_model_path=spec.model_path,
+        local_model_path=spec.model,
         result_dir=result_dir,  # absolute -> PROJECT_ROOT / abs == abs
         allow_overwrite=spec.allow_overwrite,
         run_ids=False,
@@ -299,23 +298,20 @@ class _RouterReadyRequestsProxy:
         return getattr(self._module, name)
 
     def get(self, url: str, *args, **kwargs):
-        response = self._module.get(url, *args, **kwargs)
         normalized_url = str(url).rstrip("/")
         if not normalized_url.endswith("/v1/models"):
-            return response
+            return self._module.get(url, *args, **kwargs)
 
         healthy_workers = 0
-        if response.status_code == 200:
-            workers_url = f"{normalized_url[: -len('/v1/models')]}/workers"
-            workers_response = self._module.get(workers_url, timeout=10)
-            if workers_response.status_code == 200:
-                workers = workers_response.json().get("workers", [])
-                healthy_workers = sum(
-                    1 for worker in workers if worker.get("is_healthy") is True
-                )
-            if healthy_workers >= self._expected_workers:
-                return response
-            response.status_code = 503
+        workers_url = f"{normalized_url[: -len('/v1/models')]}/workers"
+        workers_response = self._module.get(workers_url, timeout=10)
+        if workers_response.status_code == 200:
+            workers = workers_response.json().get("workers", [])
+            healthy_workers = sum(
+                1 for worker in workers if worker.get("is_healthy") is True
+            )
+        if healthy_workers >= self._expected_workers:
+            return self._module.get(url, *args, **kwargs)
 
         if time.monotonic() >= self._deadline:
             raise RuntimeError(
@@ -324,7 +320,7 @@ class _RouterReadyRequestsProxy:
             )
         # BFCL's upstream loop only sleeps on ConnectionError, not HTTP 503.
         time.sleep(1)
-        return response
+        return SimpleNamespace(status_code=503)
 
 
 @contextlib.contextmanager
@@ -788,7 +784,6 @@ def _write_summary(
         "benchmark": "bfcl",
         "external": True,
         "model": spec.model,
-        "model_path": spec.model_path,
         "backend": spec.backend,
         "categories": list(spec.categories),
         "num_gpus": spec.num_gpus,

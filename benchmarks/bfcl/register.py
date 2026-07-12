@@ -19,11 +19,9 @@ def register_rlla_model(
 ) -> str:
     """Add ``registry_name`` -> RLLAHandler to MODEL_CONFIG_MAPPING (idempotent).
 
-    bfcl loads weights from ``registry_name`` itself (it becomes the handler's
-    ``model_name_huggingface``) unless a local checkpoint dir is passed via
-    ``--local-model-path``. So use the HF id as ``registry_name`` for HF models, or any
-    name together with ``model_path`` for a local checkpoint. (``ModelConfig.model_name``
-    is unused by the OSS handler in BFCL v3.)
+    ``registry_name`` is the same Hugging Face id or local checkpoint path supplied via
+    AetherEval's standard ``--model`` flag. ``ModelConfig.model_name`` is unused by the
+    OSS handler in BFCL v3.
     """
     ensure_bfcl_importable(project_root=project_root)
 

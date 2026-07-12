@@ -52,6 +52,10 @@ If `--run-id` is not provided, the default is:
 `<model_suffix_lower>`, for example:
 `qwen3-0.6b-base`.
 
+Outputs are grouped by model. Without `--run-id`, results are written to
+`<output-dir>/<model_suffix>/`; an explicit run id is written to
+`<output-dir>/<model_suffix>/<run-id>/`.
+
 If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
 Use `--overwrite` to discard old predictions and rerun from scratch.
 

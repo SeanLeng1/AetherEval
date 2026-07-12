@@ -44,7 +44,7 @@ aethereval --tasks bfcl \
 
 # a GDPO/GRPO checkpoint (any registry name + a local dir):
 aethereval --tasks bfcl \
-  --model rlla-gdpo --model-path /path/to/hf_ckpt \
+  --model /path/to/hf_ckpt \
   --output-dir outputs --categories all --num-gpus 1
 ```
 
@@ -56,7 +56,7 @@ the replica count and `--tp-size` is the tensor-parallel size of each replica. W
 Model Gateway (SMG), using `cache_aware` routing by default:
 
 ```bash
-aethereval --tasks bfcl --model rlla-gdpo --model-path /path/to/hf_ckpt \
+aethereval --tasks bfcl --model /path/to/hf_ckpt \
   --backend sglang --dp-size 8 --tp-size 1
 ```
 
@@ -81,6 +81,9 @@ actual sampling parameters: `temperature`, `top_p`, `top_k`, `max_new_tokens`, a
 An explicit `--seed` is forwarded too, for reproducible local sampling.
 `--mem-fraction-static`, `--dtype`, and compatible repeatable `--sglang-arg` values are
 also forwarded to SMG workers; offline-only `generation_batch_size` is intentionally not.
+BFCL defaults SGLang worker logging to `warning` and SMG router logging to `warn`; use
+`--bfcl-sglang-arg log_level=info --bfcl-sglang-arg router_log_level=info` for detailed
+server diagnostics.
 
 BFCL runs after native tasks and starts its own server. Use `--bfcl-context-length` and
 repeatable `--bfcl-sglang-arg` values when BFCL needs a server setting that must not

@@ -8,6 +8,7 @@ from .io import (
     default_run_id_for_model,
     ensure_dir,
     read_jsonl,
+    run_output_dir,
     write_json,
 )
 from .task_register import BENCHMARKS_DIR, discover_tasks, load_task
@@ -906,7 +907,7 @@ def run_evaluation(
     selected = _parse_tasks_arg(tasks, available)
     out_dir = Path(output_dir)
     this_run_id = run_id or default_run_id_for_model(model)
-    run_root = out_dir / this_run_id
+    run_root = run_output_dir(out_dir, model, run_id)
     ensure_dir(run_root)
     _info(f"benchmark_root={task_root}")
     _info(f"discovered_tasks={len(available)} selected={selected}")

@@ -21,12 +21,14 @@ from benchmarks.bfcl.external import (
     _RouterReadyRequestsProxy,
     _ThreadingDrainProxy,
     _filter_bfcl_prints,
+    _gen_args,
     _is_allowed_zero_score_error,
     _raise_on_inference_errors,
     _server_command_for_spec,
     parse_scores,
     write_predictions_jsonl,
 )
+from benchmarks.bfcl.register import register_rlla_model
 
 
 class ExternalCliTests(unittest.TestCase):
@@ -55,7 +57,7 @@ class ExternalCliTests(unittest.TestCase):
                             ]
                         },
                     )
-                return Response(200)
+                raise AssertionError("models endpoint must wait for every worker")
 
         proxy = _RouterReadyRequestsProxy(Requests(), expected_workers=8)
 
@@ -71,7 +73,7 @@ class ExternalCliTests(unittest.TestCase):
             "workers": [{"is_healthy": True} for _ in range(8)]
         }
         requests = mock.Mock()
-        requests.get.side_effect = [response, workers_response]
+        requests.get.side_effect = [workers_response, response]
         proxy = _RouterReadyRequestsProxy(requests, expected_workers=8)
 
         actual = proxy.get("http://127.0.0.1:1053/v1/models")
@@ -168,6 +170,8 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.tp_size, 1)
         self.assertTrue(spec.use_sglang_router)
         self.assertEqual(spec.router_policy, "cache_aware")
+        self.assertEqual(spec.sglang_server_args["log_level"], "warning")
+        self.assertEqual(spec.sglang_server_args["router_log_level"], "warn")
 
     def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
         args = build_parser().parse_args(
@@ -232,6 +236,11 @@ class ExternalCliTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 build_parser().parse_args(["--external-benchmark", "bfcl"])
 
+    def test_model_path_flag_is_removed(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args(["--model-path", "/tmp/model"])
+
     def test_bfcl_can_run_from_tasks_skip_only(self) -> None:
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "outputs"
@@ -262,6 +271,56 @@ class ExternalCliTests(unittest.TestCase):
                 (out / "dry-model" / "bfcl" / "predictions.jsonl").exists()
             )
             self.assertTrue((out / "dry-model" / "run_summary.json").exists())
+
+    def test_bfcl_model_path_and_explicit_run_id_match_native_layout(self) -> None:
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "outputs"
+            model = "/scratch/checkpoints/my_model"
+            args = build_parser().parse_args(
+                [
+                    "--tasks",
+                    "bfcl",
+                    "--model",
+                    model,
+                    "--output-dir",
+                    str(out),
+                    "--run-id",
+                    "production-1",
+                    "--skip-generation",
+                    "--skip-evaluation",
+                ]
+            )
+
+            result = run_selected_tasks(args, resolve_run_arguments(args, {}))
+
+            self.assertEqual(result["model"], model)
+            self.assertTrue(
+                (
+                    out
+                    / "my_model"
+                    / "production-1"
+                    / "bfcl"
+                    / "summary.json"
+                ).exists()
+            )
+
+            spec, _run = _build_external_spec(args, task_name="bfcl")
+            generation_args = _gen_args(spec, out / "raw")
+            self.assertEqual(generation_args.model, [model])
+            self.assertEqual(generation_args.local_model_path, model)
+
+    def test_bfcl_registry_handles_slashes_and_underscores(self) -> None:
+        model = "/scratch/checkpoints/my_model_v2"
+        with TemporaryDirectory() as tmp:
+            register_rlla_model(model, project_root=tmp)
+
+        from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING
+
+        # BFCL escapes '/' to '_' for its result folder, then its evaluator turns
+        # every '_' back into '/'. Both keys must resolve to the same handler config.
+        evaluator_key = model.replace("/", "_").replace("_", "/")
+        self.assertIs(MODEL_CONFIG_MAPPING[model], MODEL_CONFIG_MAPPING[evaluator_key])
+        self.assertEqual(MODEL_CONFIG_MAPPING[model].model_name, model)
 
     def test_bfcl_predictions_jsonl_uses_aethereval_schema(self) -> None:
         with TemporaryDirectory() as tmp:

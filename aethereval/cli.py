@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_yaml_config, resolve_run_arguments
-from .core.io import default_run_id_for_model, ensure_dir, write_json
+from .core.io import default_run_id_for_model, ensure_dir, run_output_dir, write_json
 from .core.runner import inspect_prompts, run_evaluation
 from .core.task_register import list_task_default_gens, list_tasks
 
@@ -126,6 +126,10 @@ def _build_external_spec(
             getattr(args, "bfcl_sglang_arg", None)
         )
         bfcl_backend_kwargs = {**backend_kwargs, **bfcl_sglang_kwargs}
+        if backend == "sglang":
+            bfcl_backend_kwargs.setdefault("log_level", "warning")
+            if use_sglang_router and dp_size > 1:
+                bfcl_backend_kwargs.setdefault("router_log_level", "warn")
         mem_fraction_static = backend_kwargs.get(
             "mem_fraction_static",
             getattr(args, "mem_fraction_static", None),
@@ -135,7 +139,6 @@ def _build_external_spec(
         spec = ExternalRunSpec(
             model=args.model,
             output_dir=effective_output_dir,
-            model_path=args.model_path,
             categories=_split_csv(args.categories, ["all"]),
             backend=backend,
             num_gpus=num_gpus,
@@ -312,7 +315,11 @@ def run_selected_tasks(
         return {"inspect": inspected}
 
     run_id = resolved["run_id"] or default_run_id_for_model(str(resolved["model"]))
-    run_root = Path(resolved["output_dir"]) / run_id
+    run_root = run_output_dir(
+        resolved["output_dir"],
+        str(resolved["model"]),
+        resolved["run_id"],
+    )
     ensure_dir(run_root)
 
     native_result: dict[str, Any] | None = None
@@ -418,12 +425,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--tasks", type=str, default=None, help="Task names: all or comma-separated."
     )
     parser.add_argument("--model", type=str, default=None, help="Model name/path.")
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        default=None,
-        help="Local checkpoint path for external tasks.",
-    )
     parser.add_argument(
         "--backend",
         type=str,

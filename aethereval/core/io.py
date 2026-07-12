@@ -12,6 +12,16 @@ def default_run_id_for_model(model: str) -> str:
     return safe_suffix
 
 
+def run_output_dir(
+    output_dir: str | Path,
+    model: str,
+    run_id: str | None,
+) -> Path:
+    """Return ``output/model_name[/run_id]`` without duplicating the default id."""
+    model_dir = Path(output_dir) / default_run_id_for_model(model)
+    return model_dir / str(run_id) if run_id else model_dir
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 

@@ -272,7 +272,9 @@ class RunnerTests(unittest.TestCase):
             self.assertAlmostEqual(
                 float(first["primary_score_aggregate"]), 1.0, places=6
             )
-            predictions_path = out / "run1" / "toy" / "predictions.jsonl"
+            predictions_path = (
+                out / "fake-model" / "run1" / "toy" / "predictions.jsonl"
+            )
             with predictions_path.open("r", encoding="utf-8") as f:
                 first_row = json.loads(f.readline())
             self.assertIsInstance(first_row["prompt"], list)
@@ -311,7 +313,13 @@ class RunnerTests(unittest.TestCase):
 
             summary = result["results"]["batch_toy"]
             self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0, places=6)
-            predictions_path = out / "batch_run" / "batch_toy" / "predictions.jsonl"
+            predictions_path = (
+                out
+                / "fake-model"
+                / "batch_run"
+                / "batch_toy"
+                / "predictions.jsonl"
+            )
             with predictions_path.open("r", encoding="utf-8") as f:
                 rows = [json.loads(line) for line in f if line.strip()]
             self.assertEqual(len(rows), 2)
@@ -357,7 +365,13 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary["new_records"], 0)
             self.assertAlmostEqual(summary["metrics"]["accuracy_first"], 0.0, places=6)
 
-            predictions_path = out / "run_rescore" / "toy" / "predictions.jsonl"
+            predictions_path = (
+                out
+                / "fake-model"
+                / "run_rescore"
+                / "toy"
+                / "predictions.jsonl"
+            )
             with predictions_path.open("r", encoding="utf-8") as f:
                 rows = [json.loads(line) for line in f if line.strip()]
             self.assertEqual(len(rows), 2)
