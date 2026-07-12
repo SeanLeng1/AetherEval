@@ -282,16 +282,19 @@ class ExternalCliTests(unittest.TestCase):
             )
             self.assertTrue((out / "dry-model" / "run_summary.json").exists())
 
-    def test_bfcl_model_path_and_explicit_run_id_match_native_layout(self) -> None:
+    def test_bfcl_model_name_and_explicit_run_id_match_native_layout(self) -> None:
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "outputs"
-            model = "/scratch/checkpoints/my_model"
+            model = "qwen2.5/huggingface"
+            model_name = "qwen2.5_huggingface"
             args = build_parser().parse_args(
                 [
                     "--tasks",
                     "bfcl",
                     "--model",
                     model,
+                    "--model-name",
+                    model_name,
                     "--output-dir",
                     str(out),
                     "--run-id",
@@ -304,10 +307,11 @@ class ExternalCliTests(unittest.TestCase):
             result = run_selected_tasks(args, resolve_run_arguments(args, {}))
 
             self.assertEqual(result["model"], model)
+            self.assertEqual(result["model_name"], model_name)
             self.assertTrue(
                 (
                     out
-                    / "my_model"
+                    / model_name
                     / "production-1"
                     / "bfcl"
                     / "summary.json"
@@ -316,6 +320,7 @@ class ExternalCliTests(unittest.TestCase):
 
             spec, _run = _build_external_spec(args, task_name="bfcl")
             generation_args = _gen_args(spec, out / "raw")
+            self.assertEqual(spec.model_name, model_name)
             self.assertEqual(generation_args.model, [model])
             self.assertEqual(generation_args.local_model_path, model)
 

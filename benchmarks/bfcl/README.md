@@ -45,8 +45,13 @@ aethereval --tasks bfcl \
 # a GDPO/GRPO checkpoint (any registry name + a local dir):
 aethereval --tasks bfcl \
   --model /path/to/hf_ckpt \
+  --model-name optional-output-label \
   --output-dir outputs --categories all --num-gpus 1
 ```
+
+`--model` is always the actual Hugging Face ID or local checkpoint used for loading.
+Optional `--model-name` only controls the shared AetherEval output label, including for
+IDs such as `qwen2.5/huggingface`; it does not alter BFCL model registration or serving.
 
 `--categories` accepts BFCL collections/categories: `all`, `non_live`, `live`,
 `multi_turn`, or individual ones (`live_simple`, `multi_turn_base`, …). Backend defaults

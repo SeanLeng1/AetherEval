@@ -4,21 +4,33 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+def model_output_name(model: str, model_name: str | None = None) -> str:
+    """Return the safe output-directory name for a model.
+
+    An explicit model name is treated as a logical label, not as a path, so slashes
+    are sanitized instead of dropping everything before the final component.
+    """
+    raw_name = (
+        str(model).rstrip("/").split("/")[-1]
+        if model_name is None
+        else str(model_name)
+    )
+    safe_name = re.sub(r"[^a-z0-9._-]+", "-", raw_name.strip().lower()).strip("-")
+    return safe_name or "model"
+
+
 def default_run_id_for_model(model: str) -> str:
-    raw_suffix = str(model).split("/")[-1].strip().lower()
-    safe_suffix = re.sub(r"[^a-z0-9._-]+", "-", raw_suffix).strip("-")
-    if not safe_suffix:
-        safe_suffix = "model"
-    return safe_suffix
+    return model_output_name(model)
 
 
 def run_output_dir(
     output_dir: str | Path,
     model: str,
     run_id: str | None,
+    model_name: str | None = None,
 ) -> Path:
     """Return ``output/model_name[/run_id]`` without duplicating the default id."""
-    model_dir = Path(output_dir) / default_run_id_for_model(model)
+    model_dir = Path(output_dir) / model_output_name(model, model_name)
     return model_dir / str(run_id) if run_id else model_dir
 
 

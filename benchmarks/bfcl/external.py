@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from aethereval.core.io import model_output_name
+
 from .register import register_rlla_model
 
 # BFCL category collections -> GDPO Table 1 columns.
@@ -35,6 +37,7 @@ _NOISY_BFCL_MESSAGES = {
 class ExternalRunSpec:
     model: str  # Hugging Face id or local checkpoint path
     output_dir: Path  # AetherEval run dir; result/ + score/ go under it
+    model_name: str | None = None  # Logical/output label; never used for loading
     categories: list[str] = field(default_factory=lambda: ["all"])
     backend: str = "sglang"  # tmux0 container ships sglang
     # BFCL upstream exposes one ``num_gpus`` knob and incorrectly maps it to TP.
@@ -784,6 +787,7 @@ def _write_summary(
         "benchmark": "bfcl",
         "external": True,
         "model": spec.model,
+        "model_name": model_output_name(spec.model, spec.model_name),
         "backend": spec.backend,
         "categories": list(spec.categories),
         "num_gpus": spec.num_gpus,

@@ -52,9 +52,21 @@ If `--run-id` is not provided, the default is:
 `<model_suffix_lower>`, for example:
 `qwen3-0.6b-base`.
 
+Use `--model-name` when the model ID/path suffix is not a useful output label. It
+changes only the logical/output name; `--model` is still passed unchanged to the
+backend for loading:
+
+```bash
+aethereval \
+  --model qwen2.5/huggingface \
+  --model-name qwen2.5_huggingface \
+  --tasks <task_name> \
+  --output-dir outputs
+```
+
 Outputs are grouped by model. Without `--run-id`, results are written to
-`<output-dir>/<model_suffix>/`; an explicit run id is written to
-`<output-dir>/<model_suffix>/<run-id>/`.
+`<output-dir>/<model-name-or-model-suffix>/`; an explicit run id is written to
+`<output-dir>/<model-name-or-model-suffix>/<run-id>/`.
 
 If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
 Use `--overwrite` to discard old predictions and rerun from scratch.

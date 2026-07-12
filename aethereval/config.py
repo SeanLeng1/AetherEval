@@ -85,6 +85,10 @@ def load_yaml_config(path: str | None) -> dict[str, Any]:
 
 def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     model = _pick(args.model, _cfg_get(cfg, "model", "run"))
+    model_name = _pick(
+        getattr(args, "model_name", None),
+        _cfg_get(cfg, "model_name", "run"),
+    )
     backend = str(
         _pick(
             getattr(args, "backend", None),
@@ -233,6 +237,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "model": model,
+        "model_name": model_name,
         "backend": backend,
         "tasks": tasks,
         "inspect": inspect,

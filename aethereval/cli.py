@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_yaml_config, resolve_run_arguments
-from .core.io import default_run_id_for_model, ensure_dir, run_output_dir, write_json
+from .core.io import ensure_dir, model_output_name, run_output_dir, write_json
 from .core.runner import inspect_prompts, run_evaluation
 from .core.task_register import list_task_default_gens, list_tasks
 
@@ -139,6 +139,7 @@ def _build_external_spec(
         spec = ExternalRunSpec(
             model=args.model,
             output_dir=effective_output_dir,
+            model_name=getattr(args, "model_name", None),
             categories=_split_csv(args.categories, ["all"]),
             backend=backend,
             num_gpus=num_gpus,
@@ -265,6 +266,7 @@ def _write_combined_run_summary(
     run_id: str,
     selected_tasks: list[str],
     model: str,
+    model_name: str,
     backend: str,
     task_summaries: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
@@ -280,6 +282,7 @@ def _write_combined_run_summary(
         "selected_tasks": selected_tasks,
         "tasks": sorted(task_summaries.keys()),
         "model": model,
+        "model_name": model_name,
         "backend": backend,
         "results": task_summaries,
         "primary_scores": primary_scores,
@@ -314,11 +317,15 @@ def run_selected_tasks(
         )
         return {"inspect": inspected}
 
-    run_id = resolved["run_id"] or default_run_id_for_model(str(resolved["model"]))
+    effective_model_name = model_output_name(
+        str(resolved["model"]), resolved["model_name"]
+    )
+    run_id = resolved["run_id"] or effective_model_name
     run_root = run_output_dir(
         resolved["output_dir"],
         str(resolved["model"]),
         resolved["run_id"],
+        resolved["model_name"],
     )
     ensure_dir(run_root)
 
@@ -326,6 +333,7 @@ def run_selected_tasks(
     if native_tasks:
         native_result = run_evaluation(
             model=resolved["model"],
+            model_name=resolved["model_name"],
             tasks=",".join(native_tasks),
             output_dir=resolved["output_dir"],
             dp_size=resolved["dp_size"],
@@ -351,6 +359,7 @@ def run_selected_tasks(
         task_output_dir = run_root / task_name
         external_args = argparse.Namespace(**vars(args))
         external_args.model = resolved["model"]
+        external_args.model_name = resolved["model_name"]
         external_args.backend = resolved["backend"]
         external_args.output_dir = str(task_output_dir)
         external_args.dp_size = resolved["dp_size"]
@@ -401,6 +410,7 @@ def run_selected_tasks(
         run_id=run_id,
         selected_tasks=native_tasks + external_tasks,
         model=str(resolved["model"]),
+        model_name=effective_model_name,
         backend=str(resolved["backend"]),
         task_summaries=task_summaries,
     )
@@ -424,7 +434,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tasks", type=str, default=None, help="Task names: all or comma-separated."
     )
-    parser.add_argument("--model", type=str, default=None, help="Model name/path.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Actual Hugging Face model ID or local checkpoint path.",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Optional logical/output name; does not affect model loading.",
+    )
     parser.add_argument(
         "--backend",
         type=str,
@@ -672,13 +693,15 @@ def main() -> None:
 
     _info(f"config={args.config if args.config else '(none)'}")
     _info(
-        f"model={resolved['model']} backend={resolved['backend']} tasks={resolved['tasks']} "
+        f"model={resolved['model']} "
+        f"model_name={model_output_name(str(resolved['model']), resolved['model_name'])} "
+        f"backend={resolved['backend']} tasks={resolved['tasks']} "
         f"dp_size={resolved['dp_size']} tp_size={resolved['tp_size']} "
         f"overwrite={resolved['overwrite']}"
     )
     _info(
         f"output_dir={resolved['output_dir']} "
-        f"run_id={resolved['run_id'] if resolved['run_id'] else '(auto:model_suffix)'}"
+        f"run_id={resolved['run_id'] if resolved['run_id'] else '(auto:model_name)'}"
     )
     explicit_gen_overrides = {
         k: v for k, v in resolved["gen_overrides"].items() if v is not None

@@ -235,6 +235,31 @@ def _write_batch_benchmark(root: Path) -> None:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_model_name_controls_output_without_changing_model_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            result = run_evaluation(
+                model="qwen2.5/huggingface",
+                model_name="Qwen2.5/custom_model",
+                tasks="toy",
+                output_dir=out,
+                run_id="production-1",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+            )
+
+            self.assertEqual(result["model"], "qwen2.5/huggingface")
+            self.assertEqual(result["model_name"], "qwen2.5-custom_model")
+            task_dir = out / "qwen2.5-custom_model" / "production-1" / "toy"
+            self.assertTrue((task_dir / "predictions.jsonl").exists())
+            with (task_dir / "run_config.json").open(encoding="utf-8") as f:
+                run_config = json.load(f)
+            self.assertEqual(run_config["model"], "qwen2.5/huggingface")
+            self.assertEqual(run_config["model_name"], "qwen2.5-custom_model")
+
     def test_end_to_end_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"

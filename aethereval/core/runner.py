@@ -5,8 +5,8 @@ from typing import Any, Callable
 
 from .io import (
     append_jsonl,
-    default_run_id_for_model,
     ensure_dir,
+    model_output_name,
     read_jsonl,
     run_output_dir,
     write_json,
@@ -880,6 +880,7 @@ def run_evaluation(
     model: str,
     tasks: str,
     output_dir: str | Path,
+    model_name: str | None = None,
     dp_size: int = 1,
     tensor_parallel_size: int = 1,
     gen_overrides: dict[str, Any] | None = None,
@@ -906,13 +907,15 @@ def run_evaluation(
 
     selected = _parse_tasks_arg(tasks, available)
     out_dir = Path(output_dir)
-    this_run_id = run_id or default_run_id_for_model(model)
-    run_root = run_output_dir(out_dir, model, run_id)
+    effective_model_name = model_output_name(model, model_name)
+    this_run_id = run_id or effective_model_name
+    run_root = run_output_dir(out_dir, model, run_id, model_name)
     ensure_dir(run_root)
     _info(f"benchmark_root={task_root}")
     _info(f"discovered_tasks={len(available)} selected={selected}")
     _info(
-        f"model={model} backend={backend_name} dp_size={int(dp_size)} "
+        f"model={model} model_name={effective_model_name} "
+        f"backend={backend_name} dp_size={int(dp_size)} "
         f"tp_size={int(tensor_parallel_size)} output_dir={out_dir} run_id={this_run_id}"
     )
     if effective_model_kwargs:
@@ -939,6 +942,7 @@ def run_evaluation(
     try:
         run_config_common = {
             "model": model,
+            "model_name": effective_model_name,
             "backend": backend_label,
             "dp_size": int(dp_size),
             "tp_size": int(tensor_parallel_size),
@@ -998,6 +1002,7 @@ def run_evaluation(
             "selected_tasks": selected,
             "tasks": sorted(all_task_summaries.keys()),
             "model": model,
+            "model_name": effective_model_name,
             "backend": backend_label,
             "results": all_task_summaries,
             "primary_scores": all_primary_scores,

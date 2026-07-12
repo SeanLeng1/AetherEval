@@ -13,6 +13,7 @@ class ConfigTests(unittest.TestCase):
             cfg_path.write_text(
                 "run:\n"
                 "  model: test/model\n"
+                "  model_name: test-model-label\n"
                 "  tasks: [ifeval]\n"
                 "runtime:\n"
                 "  dp_size: 2\n"
@@ -61,6 +62,7 @@ class ConfigTests(unittest.TestCase):
             )
             resolved = resolve_run_arguments(args, cfg)
             self.assertEqual(resolved["model"], "test/model")
+            self.assertEqual(resolved["model_name"], "test-model-label")
             self.assertEqual(resolved["backend"], "vllm")
             self.assertEqual(resolved["tasks"], "ifeval")
             self.assertFalse(resolved["inspect"])
@@ -76,7 +78,11 @@ class ConfigTests(unittest.TestCase):
 
     def test_cli_overrides_yaml(self) -> None:
         cfg = {
-            "run": {"model": "cfg/model", "tasks": ["ifeval"]},
+            "run": {
+                "model": "cfg/model",
+                "model_name": "cfg-model-label",
+                "tasks": ["ifeval"],
+            },
             "runtime": {"dp_size": 2, "tp_size": 1},
             "generation": {"max_new_tokens": 128},
             "metrics": {"bootstrap_seed": 11},
@@ -84,6 +90,7 @@ class ConfigTests(unittest.TestCase):
         }
         args = argparse.Namespace(
             model="cli/model",
+            model_name="cli-model-label",
             backend=None,
             tasks="ifeval",
             inspect=True,
@@ -119,6 +126,7 @@ class ConfigTests(unittest.TestCase):
         )
         resolved = resolve_run_arguments(args, cfg)
         self.assertEqual(resolved["model"], "cli/model")
+        self.assertEqual(resolved["model_name"], "cli-model-label")
         self.assertTrue(resolved["inspect"])
         self.assertEqual(resolved["dp_size"], 4)
         self.assertEqual(resolved["tp_size"], 1)
