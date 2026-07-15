@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aethereval.core.runner import inspect_prompts, run_evaluation
 from aethereval.core.types import GenerationInput, GenerationOutput
@@ -235,6 +236,255 @@ def _write_batch_benchmark(root: Path) -> None:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_generate_only_then_eval_only_without_candidate_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            metrics_path = root / "toy" / "metrics.py"
+            metrics_source = metrics_path.read_text(encoding="utf-8")
+            metrics_path.write_text(
+                "def validate_metric_options(options):\n"
+                "    raise AssertionError('generate-only must not validate metrics')\n"
+                + metrics_source,
+                encoding="utf-8",
+            )
+            out = Path(tmp) / "outputs"
+
+            backend = FakeBackend()
+            backend.name = "offline-test-backend"
+            generated = run_evaluation(
+                model="offline/model",
+                model_name="candidate",
+                tasks="toy",
+                output_dir=out,
+                run_id="split_run",
+                backend=backend,
+                benchmarks_dir=root,
+                generate_only=True,
+                gen_overrides={"n": 2, "temperature": 0.7},
+            )
+
+            generated_summary = generated["results"]["toy"]
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(generated["phase"], "generate_only")
+            self.assertTrue(generated_summary["generation_complete"])
+            self.assertFalse(generated_summary["evaluation_complete"])
+            self.assertEqual(generated_summary["n"], 2)
+            self.assertEqual(generated_summary["unscored_records"], 4)
+            self.assertEqual(generated_summary["metrics"], {})
+
+            predictions_path = (
+                out / "candidate" / "split_run" / "toy" / "predictions.jsonl"
+            )
+            with predictions_path.open(encoding="utf-8") as f:
+                raw_rows = [json.loads(line) for line in f if line.strip()]
+            self.assertTrue(
+                all(row["meta"]["_aethereval_unscored"] is True for row in raw_rows)
+            )
+
+            metrics_path.write_text(metrics_source, encoding="utf-8")
+            with mock.patch(
+                "aethereval.core.runner.create_backend",
+                side_effect=AssertionError("eval-only must not create a backend"),
+            ) as create_backend:
+                evaluated = run_evaluation(
+                    model="offline/model",
+                    model_name="candidate",
+                    tasks="toy",
+                    output_dir=out,
+                    run_id="split_run",
+                    benchmarks_dir=root,
+                    eval_only=True,
+                )
+
+            create_backend.assert_not_called()
+            evaluated_summary = evaluated["results"]["toy"]
+            self.assertEqual(evaluated["phase"], "eval_only")
+            self.assertEqual(evaluated["backend"], "offline-test-backend")
+            self.assertEqual(evaluated_summary["new_records"], 0)
+            self.assertEqual(evaluated_summary["n"], 2)
+            self.assertEqual(evaluated_summary["rescored_records"], 4)
+            self.assertEqual(evaluated_summary["unscored_records"], 0)
+            self.assertTrue(evaluated_summary["evaluation_complete"])
+            self.assertAlmostEqual(
+                evaluated_summary["metrics"]["accuracy_first"], 1.0
+            )
+
+            with predictions_path.open(encoding="utf-8") as f:
+                scored_rows = [json.loads(line) for line in f if line.strip()]
+            self.assertTrue(
+                all("_aethereval_unscored" not in row["meta"] for row in scored_rows)
+            )
+            run_config_path = predictions_path.parent / "run_config.json"
+            with run_config_path.open(encoding="utf-8") as f:
+                run_config = json.load(f)
+            self.assertEqual(run_config["generation_config"]["n"], 2)
+            self.assertEqual(run_config["generation_config"]["temperature"], 0.7)
+
+            with self.assertRaisesRegex(ValueError, "overrides conflict"):
+                run_evaluation(
+                    model="offline/model",
+                    model_name="candidate",
+                    tasks="toy",
+                    output_dir=out,
+                    run_id="split_run",
+                    benchmarks_dir=root,
+                    eval_only=True,
+                    gen_overrides={"n": 1},
+                )
+
+    def test_eval_only_rejects_incomplete_predictions_before_scoring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="incomplete",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+                generate_only=True,
+            )
+            predictions_path = (
+                out / "fake-model" / "incomplete" / "toy" / "predictions.jsonl"
+            )
+            rows = predictions_path.read_text(encoding="utf-8").splitlines()
+            predictions_path.write_text(rows[0] + "\n", encoding="utf-8")
+
+            metrics_path = root / "toy" / "metrics.py"
+            metrics_path.write_text(
+                "def validate_metric_options(options):\n"
+                "    raise AssertionError('completeness must be checked first')\n"
+                "def score_generation(sample, generation):\n"
+                "    raise AssertionError('scoring must not start')\n"
+                "def aggregate(sample_results, metric_options=None):\n"
+                "    return {'accuracy': 0.0}\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch("aethereval.core.runner.create_backend") as create_backend:
+                with self.assertRaisesRegex(
+                    ValueError, "eval-only requires complete existing predictions"
+                ):
+                    run_evaluation(
+                        model="fake-model",
+                        tasks="toy",
+                        output_dir=out,
+                        run_id="incomplete",
+                        benchmarks_dir=root,
+                        eval_only=True,
+                    )
+            create_backend.assert_not_called()
+
+    def test_eval_only_supports_batch_judge_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_batch_benchmark(root)
+            out = Path(tmp) / "outputs"
+
+            run_evaluation(
+                model="fake-model",
+                tasks="batch_toy",
+                output_dir=out,
+                run_id="batch_split",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+                generate_only=True,
+            )
+            with mock.patch(
+                "aethereval.core.runner.create_backend",
+                side_effect=AssertionError("eval-only must not create a backend"),
+            ):
+                result = run_evaluation(
+                    model="fake-model",
+                    tasks="batch_toy",
+                    output_dir=out,
+                    run_id="batch_split",
+                    benchmarks_dir=root,
+                    metric_options={"batch_offset": 1.0},
+                    eval_only=True,
+                )
+
+            summary = result["results"]["batch_toy"]
+            self.assertEqual(summary["rescored_records"], 2)
+            self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0)
+
+    def test_eval_only_creates_and_closes_metric_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_batch_benchmark(root)
+            out = Path(tmp) / "outputs"
+            close_marker = Path(tmp) / "metric_backend_closed"
+
+            run_evaluation(
+                model="fake-model",
+                tasks="batch_toy",
+                output_dir=out,
+                run_id="backend_split",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+                generate_only=True,
+            )
+
+            (root / "batch_toy" / "metrics.py").write_text(
+                "from pathlib import Path\n"
+                "PRIMARY_METRIC='metric_score'\n"
+                "REQUIRES_BACKEND=True\n"
+                "class MetricBackend:\n"
+                "    name='metric-only'\n"
+                "    def __init__(self, marker): self.marker=marker\n"
+                "    def close(self): Path(self.marker).write_text('closed')\n"
+                "def create_evaluation_backend(options, *, dp_size, "
+                "tensor_parallel_size):\n"
+                "    assert dp_size == 2 and tensor_parallel_size == 2\n"
+                "    return MetricBackend(options['close_marker'])\n"
+                "def score_generation(sample, generation):\n"
+                "    raise AssertionError('batch scorer required')\n"
+                "def score_generations_batch(samples, outputs, options=None):\n"
+                "    assert options['_backend'].name == 'metric-only'\n"
+                "    return [[{'score': 1.0}] for output in outputs "
+                "for _ in [output.generations]]\n"
+                "def aggregate(results, options=None):\n"
+                "    return {'metric_score': sum(r['scores'][0] for r in results) "
+                "/ len(results)}\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "aethereval.core.runner.create_backend",
+                side_effect=AssertionError("candidate backend must not be created"),
+            ):
+                result = run_evaluation(
+                    model="fake-model",
+                    tasks="batch_toy",
+                    output_dir=out,
+                    run_id="backend_split",
+                    dp_size=2,
+                    tensor_parallel_size=2,
+                    metric_options={"close_marker": str(close_marker)},
+                    benchmarks_dir=root,
+                    eval_only=True,
+                )
+
+            self.assertTrue(close_marker.exists())
+            self.assertEqual(
+                result["results"]["batch_toy"]["primary_score"],
+                1.0,
+            )
+
+    def test_eval_only_rejects_overwrite(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be combined with overwrite"):
+            run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir="unused",
+                overwrite=True,
+                eval_only=True,
+            )
+
     def test_model_name_controls_output_without_changing_model_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"

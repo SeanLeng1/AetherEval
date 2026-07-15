@@ -66,6 +66,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolved["backend"], "vllm")
             self.assertEqual(resolved["tasks"], "ifeval")
             self.assertFalse(resolved["inspect"])
+            self.assertFalse(resolved["generate_only"])
+            self.assertFalse(resolved["eval_only"])
             self.assertEqual(resolved["dp_size"], 2)
             self.assertEqual(resolved["tp_size"], 1)
             self.assertEqual(resolved["gen_overrides"]["max_new_tokens"], 123)
@@ -186,6 +188,51 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(resolved["backend_kwargs"]["dtype"], "bfloat16")
         self.assertEqual(resolved["backend_kwargs"]["trust_remote_code"], True)
         self.assertEqual(resolved["backend_kwargs"]["chunked_prefill_size"], 4096)
+
+    def test_phase_can_be_selected_from_yaml(self) -> None:
+        cfg = {
+            "run": {
+                "model": "cfg/model",
+                "tasks": ["ifeval"],
+                "generate_only": True,
+            }
+        }
+        args = argparse.Namespace(
+            model=None,
+            backend=None,
+            tasks=None,
+            inspect=None,
+            generate_only=None,
+            eval_only=None,
+            output_dir=None,
+            run_id=None,
+            overwrite=None,
+            dp_size=None,
+            tp_size=None,
+            n=None,
+            max_new_tokens=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            min_p=None,
+            seed=None,
+            bootstrap_resamples=None,
+            bootstrap_seed=None,
+            bootstrap_confidence=None,
+            gpu_memory_utilization=None,
+            max_model_len=None,
+            mem_fraction_static=None,
+            context_length=None,
+            sglang_generation_batch_size=None,
+            dtype=None,
+            vllm_arg=None,
+            sglang_arg=None,
+        )
+
+        resolved = resolve_run_arguments(args, cfg)
+
+        self.assertTrue(resolved["generate_only"])
+        self.assertFalse(resolved["eval_only"])
 
 
 if __name__ == "__main__":

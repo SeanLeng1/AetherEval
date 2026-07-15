@@ -71,6 +71,58 @@ Outputs are grouped by model. Without `--run-id`, results are written to
 If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
 Use `--overwrite` to discard old predictions and rerun from scratch.
 
+### Split offline generation from online evaluation
+
+Use `--generate-only` when the inference machine has no network access. This
+starts the candidate backend and writes complete, explicitly unscored
+`predictions.jsonl` files without initializing metrics or LLM judges:
+
+```bash
+aethereval \
+  --backend sglang \
+  --model /path/to/candidate \
+  --model-name candidate \
+  --tasks llmeval_med,healthbench,writingbench,creative_writing_v3,researchqa,arena_hard_v2 \
+  --output-dir /output \
+  --run-id production-1 \
+  --dp-size 8 \
+  --tp-size 1 \
+  --generate-only
+```
+
+On a machine with judge API access, mount or copy the output directory and run
+`--eval-only`. It validates that every expected `(sample_id, gen_idx)` exists,
+then scores and atomically replaces the unscored records. It does not create a
+vLLM/SGLang candidate backend, and the `--model` path does not need to exist on
+that machine; it is still required to locate the same output directory.
+
+```bash
+export AETHEREVAL_JUDGE_API_KEY=<key>
+export AETHEREVAL_JUDGE_BASE_URL=https://api.openai.com/v1
+
+aethereval \
+  --model /path/to/candidate \
+  --model-name candidate \
+  --tasks llmeval_med,healthbench,researchqa,arena_hard_v2 \
+  --output-dir /output \
+  --run-id production-1 \
+  --eval-only
+```
+
+The model/model-name, output directory, and run id must identify the generation
+run. Eval-only automatically inherits its saved generation settings (including
+`n`) and rejects conflicting explicit generation overrides. It is intentionally
+incompatible with `--overwrite`, and always re-evaluates all existing records
+for the selected tasks. Both modes can also be set as `run.generate_only` or
+`run.eval_only` in YAML. BFCL maps these flags to its existing generation and
+evaluation phases as well.
+
+`safe_alignment` also supports this split. In eval-only mode it creates a
+standalone Transformers reward-model scorer over `dp_size * tp_size` GPUs and
+loads only the RM/CM models; the candidate model and SGLang engine are never
+started, so no offload/resume cycle is needed. `--rm-device` can select one
+explicit device instead.
+
 To use SGLang:
 
 ```bash
@@ -173,6 +225,71 @@ only when overriding with local checkpoints.
 
 Optional RM metric flags include `--rm-batch-size`, `--rm-max-length`,
 `--rm-device`, `--rm-dtype`, and `--rm-trust-remote-code`.
+
+## Native LLM-Judge Benchmarks
+
+These benchmarks use the regular offline backend for candidate generation and an
+OpenAI-compatible chat-completions endpoint only for judging:
+
+- `llmeval_med` — 667 items, multi-turn generation, GPT-4o judge, primary `OP`.
+- `healthbench` — 5,000 items, GPT-4.1 judge, primary rubric `score`.
+- `writingbench` — 1,000 items, Claude Sonnet 4.5 judge, primary `overall_score`.
+- `creative_writing_v3` — 96 pieces, Claude Sonnet 4.6 judge, primary
+  `eqbench_creative_score`.
+- `researchqa` — 3,750 items, GPT-4.1-mini judge, primary rubric `coverage`.
+- `arena_hard_v2` — 500 hard prompts, GPT-4.1 judge, primary
+  `style_controlled_win_rate`.
+
+The official per-task judge model defaults live under each task's `metrics`
+section in `configs/task_defaults.yaml`. `--judge-model` overrides that value
+for every task selected in the current invocation; omitting it preserves the
+official task-specific defaults. Metric defaults are kept separate from the
+candidate generation kwargs.
+
+Set the judge endpoint independently from the candidate backend:
+
+```bash
+export AETHEREVAL_JUDGE_API_KEY=<key>
+export AETHEREVAL_JUDGE_BASE_URL=https://api.openai.com/v1
+
+aethereval \
+  --backend sglang \
+  --model /path/to/candidate \
+  --tasks healthbench \
+  --output-dir outputs
+```
+
+For an unauthenticated local endpoint, set `AETHEREVAL_JUDGE_API_KEY=-`. Optional
+overrides are `--judge-model`, `--judge-base-url`, `--judge-api-key-env`,
+`--judge-workers`, `--judge-timeout`, `--judge-max-retries`, and
+`--judge-repeats` (the last one controls LLMEval-Med's three-run protocol).
+
+The benchmark folders document the pinned candidate and judge decoding settings.
+CLI generation flags still override candidate defaults, so avoid global
+`--temperature`, `--max-new-tokens`, or `--n` overrides when protocol-aligned
+scores are required.
+
+Anthropic's official OpenAI-SDK compatibility endpoint can judge the two Claude
+tasks directly. Because the judge endpoint is shared by one invocation, use a
+second eval-only command unless a unified gateway routes both providers:
+
+```bash
+export AETHEREVAL_JUDGE_BASE_URL=https://api.anthropic.com/v1
+export ANTHROPIC_API_KEY=<key>
+
+aethereval \
+  --model /path/to/candidate \
+  --model-name candidate \
+  --tasks writingbench,creative_writing_v3 \
+  --output-dir /output \
+  --run-id production-1 \
+  --judge-api-key-env ANTHROPIC_API_KEY \
+  --eval-only
+```
+
+Resuming these tasks preserves completed judge results and judges only newly
+generated rows. Use a new `--run-id` or `--overwrite` when changing the judge
+model, endpoint behavior, or judging protocol.
 
 ## External Benchmarks
 

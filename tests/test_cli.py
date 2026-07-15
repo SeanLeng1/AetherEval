@@ -147,6 +147,26 @@ class ExternalCliTests(unittest.TestCase):
         self.assertTrue(spec.run_generation)
         self.assertFalse(spec.run_evaluation)
 
+    def test_bfcl_external_spec_supports_unified_phase_flags(self) -> None:
+        generate_args = build_parser().parse_args(
+            ["--tasks", "bfcl", "--model", "model", "--generate-only"]
+        )
+        generate_spec, _run = _build_external_spec(generate_args, task_name="bfcl")
+        self.assertTrue(generate_spec.run_generation)
+        self.assertFalse(generate_spec.run_evaluation)
+
+        eval_args = build_parser().parse_args(
+            ["--tasks", "bfcl", "--model", "model", "--eval-only"]
+        )
+        eval_spec, _run = _build_external_spec(eval_args, task_name="bfcl")
+        self.assertFalse(eval_spec.run_generation)
+        self.assertTrue(eval_spec.run_evaluation)
+
+    def test_phase_flags_are_mutually_exclusive(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args(["--generate-only", "--eval-only"])
+
     def test_bfcl_external_spec_prefers_dp_size_for_num_gpus(self) -> None:
         args = build_parser().parse_args(
             [

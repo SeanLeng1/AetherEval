@@ -19,6 +19,8 @@ dependencies = [
   "immutabledict",
   "absl-py",
   "math-verify",
+  "tiktoken",
+  "numpy",
 ]
 
 [project.optional-dependencies]

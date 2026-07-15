@@ -3,11 +3,12 @@ from typing import Any
 
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.metrics.common import mean, mean_stderr, to_records
+from benchmark_utils.reward_model import StandaloneRewardModelBackend
 
 
 PRIMARY_METRIC = "overall/average"
-# Runner injects the generation backend (metric_options["_backend"]) so scoring can
-# offload the engine and shard the reward models across the run's dp*tp GPUs.
+# A normal combined run reuses/offloads the generation backend. Eval-only creates
+# a standalone RM runtime and never loads the candidate model.
 REQUIRES_BACKEND = True
 DEFAULT_RM_MODEL_PATH = "Rihong/Qwen2.5-7B-SafeRLHF-RM"
 DEFAULT_CM_MODEL_PATH = "Rihong/Qwen2.5-7B-SafeRLHF-CM"
@@ -17,6 +18,21 @@ SOURCE_SLUGS = {
     "Anthropic/hh-rlhf": "hh_rlhf",
     "PKU-Alignment/PKU-SafeRLHF": "pku",
 }
+
+
+def create_evaluation_backend(
+    metric_options: dict[str, Any],
+    *,
+    dp_size: int,
+    tensor_parallel_size: int,
+) -> StandaloneRewardModelBackend:
+    explicit_device = metric_options.get("rm_device")
+    if explicit_device is not None:
+        devices = [str(explicit_device)]
+    else:
+        num_devices = int(dp_size) * int(tensor_parallel_size)
+        devices = [f"cuda:{index}" for index in range(num_devices)]
+    return StandaloneRewardModelBackend(devices)
 
 
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
@@ -44,7 +60,8 @@ def score_generations_batch(
     if not hasattr(backend, "score_reward_models"):
         raise RuntimeError(
             f"backend {getattr(backend, 'name', type(backend).__name__)!r} does not "
-            "support offloaded reward-model scoring; use the sglang backend"
+            "support reward-model scoring; use SGLang for a combined run or "
+            "--eval-only for standalone scoring"
         )
 
     conversations: list[list[dict[str, str]]] = []
@@ -67,7 +84,7 @@ def score_generations_batch(
         "dtype": options.get("rm_dtype", "auto"),
         "trust_remote_code": bool(options.get("rm_trust_remote_code", True)),
     }
-    # Backend offloads the engine, shards scoring across its dp*tp GPUs, then resumes.
+    # Combined runs offload the SGLang engine; eval-only uses the standalone scorer.
     scores_by_model = backend.score_reward_models(
         [rm_model_path, cm_model_path], conversations, scorer_kwargs
     )

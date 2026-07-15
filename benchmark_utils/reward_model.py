@@ -4,6 +4,35 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class StandaloneRewardModelBackend:
+    """Reward-model scoring runtime that does not load a candidate LLM engine."""
+
+    name = "standalone-reward-model"
+
+    def __init__(self, devices: list[str]) -> None:
+        normalized = [str(device).strip() for device in devices if str(device).strip()]
+        if not normalized:
+            raise ValueError("Standalone reward-model scoring requires a device")
+        self.devices = normalized
+
+    def score_reward_models(
+        self,
+        model_paths: list[str],
+        conversations: list[list[dict[str, str]]],
+        scorer_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, list[float]]:
+        return score_conversations_sharded(
+            model_paths=model_paths,
+            conversations=conversations,
+            devices=self.devices,
+            scorer_kwargs=dict(scorer_kwargs or {}),
+        )
+
+    def close(self) -> None:
+        # score_conversations_sharded owns and releases each model process.
+        return None
+
+
 def _torch_dtype(dtype_name: str | None, torch: Any) -> Any:
     if dtype_name is None or dtype_name == "auto":
         return torch.bfloat16 if torch.cuda.is_available() else torch.float32

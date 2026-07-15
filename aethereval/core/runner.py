@@ -10,8 +10,10 @@ from .io import (
     read_jsonl,
     run_output_dir,
     write_json,
+    write_jsonl,
 )
 from .task_register import BENCHMARKS_DIR, discover_tasks, load_task
+from .task_defaults import resolve_task_default_metrics
 from .types import (
     GenerationInput,
     GenerationOutput,
@@ -26,6 +28,9 @@ from aethereval.backends import (
     load_chat_tokenizer,
     render_prompt_with_chat_template,
 )
+
+
+_UNSCORED_META_KEY = "_aethereval_unscored"
 
 
 def _info(message: str) -> None:
@@ -166,7 +171,7 @@ def _is_token_count(value: Any) -> bool:
 
 def _tokenizer_getter(
     *,
-    backend: GenerationBackend,
+    backend: GenerationBackend | None,
     model: str,
     model_kwargs: dict[str, Any] | None,
 ) -> Callable[[], Any]:
@@ -180,6 +185,10 @@ def _tokenizer_getter(
         return tokenizer
 
     return _get
+
+
+def _record_is_unscored(record: GenerationRecord) -> bool:
+    return record.meta.get(_UNSCORED_META_KEY) is True
 
 
 def _token_count_from_text(text: str, tokenizer_getter: Callable[[], Any]) -> int:
@@ -588,14 +597,24 @@ def _run_single_task(
     task_module: Any,
     metrics_module: Any,
     task_dir: Path,
-    backend: GenerationBackend,
+    backend: GenerationBackend | None,
     task_output_dir: Path,
     gen_overrides: dict[str, Any],
     metric_options: dict[str, Any],
     overwrite: bool,
     run_config_common: dict[str, Any],
     tokenizer_getter: Callable[[], Any],
+    generate_only: bool,
+    eval_only: bool,
 ) -> dict[str, Any]:
+    phase = (
+        "generate_only"
+        if generate_only
+        else "eval_only"
+        if eval_only
+        else "generate_and_eval"
+    )
+    metric_options = resolve_task_default_metrics(task_name, metric_options)
     _info(f"[{task_name}] loading task from {task_dir}")
     samples_raw = task_module.load_samples(task_dir)
     samples = [_to_sample(item) for item in samples_raw]
@@ -606,17 +625,45 @@ def _run_single_task(
             raise ValueError(f"Duplicate sample id in task '{task_name}': {sample.id}")
         sample_id_set.add(sample.id)
 
-    gen_cfg = _merge_generation_config(task_module.DEFAULT_GEN, gen_overrides)
-    n = int(gen_cfg["n"])
-    _info(
-        f"[{task_name}] samples={len(samples)} n={n} overwrite={overwrite} "
-        f"data_file={getattr(task_module, 'DATA_FILE', '(unknown)')}"
-    )
-
     ensure_dir(task_output_dir)
     predictions_path = task_output_dir / "predictions.jsonl"
     summary_path = task_output_dir / "summary.json"
     run_config_path = task_output_dir / "run_config.json"
+
+    prior_run_config: dict[str, Any] = {}
+    if eval_only and run_config_path.exists():
+        with run_config_path.open("r", encoding="utf-8") as f:
+            loaded_run_config = json.load(f)
+        if not isinstance(loaded_run_config, dict):
+            raise ValueError(
+                f"[{task_name}] existing run_config must be a JSON object: "
+                f"{run_config_path}"
+            )
+        prior_run_config = loaded_run_config
+
+    saved_gen_cfg = prior_run_config.get("generation_config")
+    if eval_only and isinstance(saved_gen_cfg, dict):
+        gen_cfg = _merge_generation_config(saved_gen_cfg, {})
+        requested_gen_cfg = _merge_generation_config(saved_gen_cfg, gen_overrides)
+        conflicts = {
+            key: {"saved": gen_cfg.get(key), "requested": requested_gen_cfg.get(key)}
+            for key, value in gen_overrides.items()
+            if value is not None and requested_gen_cfg.get(key) != gen_cfg.get(key)
+        }
+        if conflicts:
+            raise ValueError(
+                f"[{task_name}] eval-only generation overrides conflict with the "
+                f"saved run config: {conflicts}"
+            )
+    else:
+        gen_cfg = _merge_generation_config(task_module.DEFAULT_GEN, gen_overrides)
+
+    n = int(gen_cfg["n"])
+    _info(
+        f"[{task_name}] samples={len(samples)} n={n} phase={phase} "
+        f"overwrite={overwrite} "
+        f"data_file={getattr(task_module, 'DATA_FILE', '(unknown)')}"
+    )
 
     if overwrite and predictions_path.exists():
         _info(f"[{task_name}] overwrite enabled: removing {predictions_path}")
@@ -647,67 +694,6 @@ def _run_single_task(
             dedup[(record.sample_id, record.gen_idx)] = record
         existing_records = list(dedup.values())
 
-    if existing_records:
-        _info(
-            f"[{task_name}] resume: rescoring existing records ({len(existing_records)})"
-        )
-        rescored_existing: list[GenerationRecord] = []
-        existing_outputs, existing_gen_indices = _records_to_generation_outputs(
-            existing_records
-        )
-        _ensure_outputs_token_metadata(existing_outputs, tokenizer_getter)
-        runtime_metric_options = {}
-        if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
-            runtime_metric_options["_tokenizer"] = tokenizer_getter()
-        if getattr(metrics_module, "REQUIRES_BACKEND", False):
-            runtime_metric_options["_backend"] = backend
-        existing_scores = _score_generation_outputs(
-            metrics_module=metrics_module,
-            samples_by_id=samples_by_id,
-            outputs=existing_outputs,
-            metric_options={**metric_options, "n": n},
-            runtime_metric_options=runtime_metric_options,
-            total_records=len(existing_records),
-            progress_desc=f"[{task_name}] rescoring",
-        )
-        existing_records_by_id = _group_records_by_sample(existing_records)
-        for output in existing_outputs:
-            sample = samples_by_id[output.sample_id]
-            original_records = existing_records_by_id[output.sample_id]
-            scores = existing_scores[output.sample_id]
-            gen_indices = existing_gen_indices[output.sample_id]
-            for local_idx, (record, gen_idx, scored) in enumerate(
-                zip(original_records, gen_indices, scores, strict=True)
-            ):
-                score, is_pass, parsed, meta = scored
-                record_meta = dict(meta)
-                record_meta.update(_generation_token_meta(output, local_idx))
-                rescored_existing.append(
-                    GenerationRecord(
-                        sample_id=record.sample_id,
-                        gen_idx=gen_idx,
-                        prompt=record.prompt,
-                        generation=record.generation,
-                        score=score,
-                        is_pass=is_pass,
-                        parsed=parsed,
-                        gold=sample.gold,
-                        error=record.error,
-                        meta=record_meta,
-                    )
-                )
-
-        existing_records = rescored_existing
-        _info(f"[{task_name}] resume rescoring finished")
-        if predictions_path.exists():
-            predictions_path.unlink()
-        append_jsonl(
-            predictions_path, (_record_to_json(record) for record in existing_records)
-        )
-    elif predictions_path.exists():
-        # If resume file has no reusable rows under current settings, rebuild it from pending outputs only.
-        predictions_path.unlink()
-
     existing_lookup: dict[str, set[int]] = defaultdict(set)
     for record in existing_records:
         existing_lookup[record.sample_id].add(record.gen_idx)
@@ -736,12 +722,139 @@ def _run_single_task(
         f"pending_records={pending_record_count}"
     )
 
+    if eval_only and pending_record_count:
+        missing_examples = [
+            f"{sample.id}:{gen_idx}"
+            for sample in samples
+            for gen_idx in pending_indices[sample.id]
+        ][:10]
+        raise ValueError(
+            f"[{task_name}] eval-only requires complete existing predictions; "
+            f"missing_records={pending_record_count} "
+            f"missing_samples={len(pending_inputs)} "
+            f"examples={missing_examples}. Run --generate-only first with the "
+            "same --model/--model-name, --output-dir, --run-id, tasks, and n."
+        )
+
+    if not generate_only:
+        if getattr(metrics_module, "REQUIRES_BACKEND", False) and backend is None:
+            raise ValueError(
+                f"[{task_name}] eval-only is not supported because its metrics "
+                "require the candidate backend."
+            )
+        validate_metrics = getattr(metrics_module, "validate_metric_options", None)
+        if callable(validate_metrics):
+            validate_metrics({**metric_options, "n": n})
+
+    preserve_existing_scores = bool(
+        getattr(metrics_module, "PRESERVE_EXISTING_SCORES_ON_RESUME", False)
+    )
+    rescored_record_count = 0
+    if existing_records and not generate_only:
+        if eval_only:
+            records_to_rescore = list(existing_records)
+            preserved_records: list[GenerationRecord] = []
+        elif preserve_existing_scores:
+            records_to_rescore = [
+                record for record in existing_records if _record_is_unscored(record)
+            ]
+            preserved_records = [
+                record for record in existing_records if not _record_is_unscored(record)
+            ]
+        else:
+            records_to_rescore = list(existing_records)
+            preserved_records = []
+
+        if records_to_rescore:
+            _info(
+                f"[{task_name}] rescoring existing records "
+                f"({len(records_to_rescore)})"
+            )
+            existing_outputs, existing_gen_indices = _records_to_generation_outputs(
+                records_to_rescore
+            )
+            _ensure_outputs_token_metadata(existing_outputs, tokenizer_getter)
+            runtime_metric_options = {}
+            if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
+                runtime_metric_options["_tokenizer"] = tokenizer_getter()
+            if getattr(metrics_module, "REQUIRES_BACKEND", False):
+                runtime_metric_options["_backend"] = backend
+            existing_scores = _score_generation_outputs(
+                metrics_module=metrics_module,
+                samples_by_id=samples_by_id,
+                outputs=existing_outputs,
+                metric_options={**metric_options, "n": n},
+                runtime_metric_options=runtime_metric_options,
+                total_records=len(records_to_rescore),
+                progress_desc=f"[{task_name}] rescoring",
+            )
+            rescored_existing: list[GenerationRecord] = []
+            existing_records_by_id = _group_records_by_sample(records_to_rescore)
+            for output in existing_outputs:
+                sample = samples_by_id[output.sample_id]
+                original_records = existing_records_by_id[output.sample_id]
+                scores = existing_scores[output.sample_id]
+                gen_indices = existing_gen_indices[output.sample_id]
+                for local_idx, (record, gen_idx, scored) in enumerate(
+                    zip(original_records, gen_indices, scores, strict=True)
+                ):
+                    score, is_pass, parsed, meta = scored
+                    record_meta = dict(meta)
+                    record_meta.update(_generation_token_meta(output, local_idx))
+                    rescored_existing.append(
+                        GenerationRecord(
+                            sample_id=record.sample_id,
+                            gen_idx=gen_idx,
+                            prompt=record.prompt,
+                            generation=record.generation,
+                            score=score,
+                            is_pass=is_pass,
+                            parsed=parsed,
+                            gold=sample.gold,
+                            error=record.error,
+                            meta=record_meta,
+                        )
+                    )
+
+            sample_order = {sample.id: idx for idx, sample in enumerate(samples)}
+            existing_records = sorted(
+                preserved_records + rescored_existing,
+                key=lambda record: (sample_order[record.sample_id], record.gen_idx),
+            )
+            rescored_record_count = len(rescored_existing)
+            write_jsonl(
+                predictions_path,
+                (_record_to_json(record) for record in existing_records),
+            )
+            _info(f"[{task_name}] existing-record scoring finished")
+        else:
+            _info(
+                f"[{task_name}] resume: preserving existing scores "
+                f"({len(existing_records)})"
+            )
+    elif not existing_records and predictions_path.exists() and not eval_only:
+        predictions_path.unlink()
+
     new_records: list[GenerationRecord] = []
 
     if pending_inputs:
+        if backend is None:
+            raise RuntimeError(
+                f"[{task_name}] generation requested without an inference backend"
+            )
         backend_label = getattr(backend, "name", "backend")
         _info(f"[{task_name}] starting {backend_label} generation")
-        generated_outputs = backend.generate(pending_inputs, gen_cfg)
+        custom_generate = getattr(task_module, "generate_outputs", None)
+        if callable(custom_generate):
+            generated_outputs = custom_generate(
+                backend=backend,
+                samples=samples,
+                pending_indices=pending_indices,
+                existing_records=existing_records,
+                gen_cfg=gen_cfg,
+            )
+        else:
+            generated_outputs = backend.generate(pending_inputs, gen_cfg)
         outputs_by_sample: dict[str, Any] = {}
         for output in generated_outputs:
             if output.sample_id in outputs_by_sample:
@@ -772,31 +885,38 @@ def _run_single_task(
                 )
 
         _ensure_outputs_token_metadata(generated_outputs, tokenizer_getter)
-        runtime_metric_options = {}
-        if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
-            runtime_metric_options["_tokenizer"] = tokenizer_getter()
-        if getattr(metrics_module, "REQUIRES_BACKEND", False):
-            runtime_metric_options["_backend"] = backend
+        generated_scores = None
+        if not generate_only:
+            runtime_metric_options = {}
+            if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
+                runtime_metric_options["_tokenizer"] = tokenizer_getter()
+            if getattr(metrics_module, "REQUIRES_BACKEND", False):
+                runtime_metric_options["_backend"] = backend
 
-        generated_scores = _score_generation_outputs(
-            metrics_module=metrics_module,
-            samples_by_id=samples_by_id,
-            outputs=generated_outputs,
-            metric_options={**metric_options, "n": n},
-            runtime_metric_options=runtime_metric_options,
-            total_records=pending_record_count,
-            progress_desc=f"[{task_name}] scoring",
-        )
+            generated_scores = _score_generation_outputs(
+                metrics_module=metrics_module,
+                samples_by_id=samples_by_id,
+                outputs=generated_outputs,
+                metric_options={**metric_options, "n": n},
+                runtime_metric_options=runtime_metric_options,
+                total_records=pending_record_count,
+                progress_desc=f"[{task_name}] scoring",
+            )
 
         rows_to_write: list[dict[str, Any]] = []
         for output in generated_outputs:
             sample = samples_by_id[output.sample_id]
             missing = pending_indices[output.sample_id]
             generations = list(output.generations)
-            scores = generated_scores[output.sample_id]
             for local_idx, gen_idx in enumerate(missing):
-                score, is_pass, parsed, meta = scores[local_idx]
-                record_meta = dict(meta)
+                if generated_scores is None:
+                    score, is_pass, parsed = 0.0, False, None
+                    record_meta = {_UNSCORED_META_KEY: True}
+                else:
+                    score, is_pass, parsed, meta = generated_scores[
+                        output.sample_id
+                    ][local_idx]
+                    record_meta = dict(meta)
                 record_meta.update(_generation_token_meta(output, local_idx))
                 record = GenerationRecord(
                     sample_id=sample.id,
@@ -814,38 +934,70 @@ def _run_single_task(
                 rows_to_write.append(_record_to_json(record))
 
         append_jsonl(predictions_path, rows_to_write)
-        _info(f"[{task_name}] generation finished: new_records={len(new_records)}")
+        _info(
+            f"[{task_name}] generation finished: new_records={len(new_records)} "
+            f"scored={not generate_only}"
+        )
     else:
         _info(f"[{task_name}] no pending generations; skip inference")
 
     all_records = existing_records + new_records
     grouped_records = _group_records_by_sample(all_records)
     sample_results = _build_sample_results(samples, grouped_records)
+    generation_complete = len(all_records) == len(samples) * n
+    unscored_record_count = sum(_record_is_unscored(record) for record in all_records)
 
-    aggregate_result = _call_task_aggregate(
-        metrics_module.aggregate,
-        sample_results,
-        {**metric_options, "n": n},
-    )
-    warnings = aggregate_result.pop("__warnings__", [])
-    if not isinstance(warnings, list):
-        warnings = [str(warnings)]
+    if generate_only:
+        metrics: dict[str, Any] = {}
+        warnings: list[str] = []
+        primary_metric, primary_score = None, None
+    else:
+        if not generation_complete:
+            raise RuntimeError(
+                f"[{task_name}] internal error: evaluation reached aggregation with "
+                "incomplete generations"
+            )
+        if unscored_record_count:
+            raise RuntimeError(
+                f"[{task_name}] internal error: {unscored_record_count} records "
+                "remain unscored"
+            )
+        aggregate_result = _call_task_aggregate(
+            metrics_module.aggregate,
+            sample_results,
+            {**metric_options, "n": n},
+        )
+        raw_warnings = aggregate_result.pop("__warnings__", [])
+        warnings = (
+            [str(item) for item in raw_warnings]
+            if isinstance(raw_warnings, list)
+            else [str(raw_warnings)]
+        )
+        metrics = aggregate_result
+        primary_metric, primary_score = _resolve_primary_metric(
+            metrics_module, metrics
+        )
 
-    metrics = aggregate_result
     token_usage = _token_usage_summary(all_records)
-    if token_usage["avg_prompt_tokens"] is not None:
+    if not generate_only and token_usage["avg_prompt_tokens"] is not None:
         metrics["avg_prompt_tokens"] = token_usage["avg_prompt_tokens"]
-    if token_usage["avg_response_tokens"] is not None:
+    if not generate_only and token_usage["avg_response_tokens"] is not None:
         metrics["avg_response_tokens"] = token_usage["avg_response_tokens"]
-    primary_metric, primary_score = _resolve_primary_metric(metrics_module, metrics)
 
     summary = {
         "task": task_name,
+        "phase": phase,
         "num_samples": len(samples),
         "n": n,
         "existing_records": len(existing_records),
         "new_records": len(new_records),
+        "rescored_records": rescored_record_count,
         "total_records": len(all_records),
+        "unscored_records": unscored_record_count,
+        "generation_complete": generation_complete,
+        "evaluation_complete": generation_complete
+        and unscored_record_count == 0
+        and not generate_only,
         "metrics": metrics,
         "token_usage": token_usage,
         "primary_metric": primary_metric,
@@ -853,13 +1005,16 @@ def _run_single_task(
         "warnings": warnings,
     }
     _info(
-        f"[{task_name}] aggregate done: total_records={len(all_records)} "
+        f"[{task_name}] phase done: total_records={len(all_records)} "
+        f"unscored_records={unscored_record_count} "
         f"metrics=[{_metric_keys_preview(metrics)}]"
     )
     if warnings:
         _info(f"[{task_name}] warnings={warnings}")
 
-    task_run_config = dict(run_config_common)
+    task_run_config = (
+        dict(prior_run_config) if eval_only and prior_run_config else dict(run_config_common)
+    )
     task_run_config.update(
         {
             "task": task_name,
@@ -867,6 +1022,7 @@ def _run_single_task(
             "generation_config": gen_cfg,
             "metric_options": {**metric_options, "n": n},
             "overwrite": overwrite,
+            "phase": phase,
         }
     )
 
@@ -895,7 +1051,20 @@ def run_evaluation(
     model_kwargs: dict[str, Any] | None = None,
     backend: GenerationBackend | None = None,
     benchmarks_dir: Path | None = None,
+    generate_only: bool = False,
+    eval_only: bool = False,
 ) -> dict[str, Any]:
+    if generate_only and eval_only:
+        raise ValueError("generate_only and eval_only are mutually exclusive")
+    if eval_only and overwrite:
+        raise ValueError("eval_only cannot be combined with overwrite")
+    phase = (
+        "generate_only"
+        if generate_only
+        else "eval_only"
+        if eval_only
+        else "generate_and_eval"
+    )
     effective_model_kwargs = (
         backend_kwargs if backend_kwargs is not None else model_kwargs
     )
@@ -911,19 +1080,31 @@ def run_evaluation(
     this_run_id = run_id or effective_model_name
     run_root = run_output_dir(out_dir, model, run_id, model_name)
     ensure_dir(run_root)
+    prior_run_summary: dict[str, Any] = {}
+    prior_run_summary_path = run_root / "run_summary.json"
+    if eval_only and prior_run_summary_path.exists():
+        with prior_run_summary_path.open("r", encoding="utf-8") as f:
+            loaded_run_summary = json.load(f)
+        if not isinstance(loaded_run_summary, dict):
+            raise ValueError(
+                f"Existing run summary must be a JSON object: "
+                f"{prior_run_summary_path}"
+            )
+        prior_run_summary = loaded_run_summary
     _info(f"benchmark_root={task_root}")
     _info(f"discovered_tasks={len(available)} selected={selected}")
     _info(
         f"model={model} model_name={effective_model_name} "
         f"backend={backend_name} dp_size={int(dp_size)} "
-        f"tp_size={int(tensor_parallel_size)} output_dir={out_dir} run_id={this_run_id}"
+        f"tp_size={int(tensor_parallel_size)} phase={phase} "
+        f"output_dir={out_dir} run_id={this_run_id}"
     )
     if effective_model_kwargs:
         _info(f"backend_model_kwargs={effective_model_kwargs}")
     _info(f"run_output_dir={run_root}")
 
     created_backend = False
-    if backend is None:
+    if backend is None and not eval_only:
         backend = create_backend(
             backend_name=backend_name,
             model=model,
@@ -933,6 +1114,10 @@ def run_evaluation(
         )
         created_backend = True
     backend_label = getattr(backend, "name", backend_name)
+    if eval_only and backend is None:
+        saved_backend = prior_run_summary.get("backend")
+        if isinstance(saved_backend, str) and saved_backend.strip():
+            backend_label = saved_backend
     get_tokenizer = _tokenizer_getter(
         backend=backend,
         model=model,
@@ -947,6 +1132,7 @@ def run_evaluation(
             "dp_size": int(dp_size),
             "tp_size": int(tensor_parallel_size),
             "model_kwargs": effective_model_kwargs or {},
+            "phase": phase,
         }
         resolved_metric_options = {
             "bootstrap_resamples": int(bootstrap_resamples),
@@ -961,19 +1147,53 @@ def run_evaluation(
             bundle = load_task(task_name, task_root)
             task_spec = tasks_map[task_name]
             task_output_dir = run_root / task_name
-            summary = _run_single_task(
-                task_name=task_name,
-                task_module=bundle.task_module,
-                metrics_module=bundle.metrics_module,
-                task_dir=task_spec.task_dir,
-                backend=backend,
-                task_output_dir=task_output_dir,
-                gen_overrides=gen_overrides or {},
-                metric_options=resolved_metric_options,
-                overwrite=overwrite,
-                run_config_common=run_config_common,
-                tokenizer_getter=get_tokenizer,
-            )
+            task_backend = backend
+            created_evaluation_backend = False
+            if (
+                eval_only
+                and task_backend is None
+                and getattr(bundle.metrics_module, "REQUIRES_BACKEND", False)
+            ):
+                create_evaluation_backend = getattr(
+                    bundle.metrics_module, "create_evaluation_backend", None
+                )
+                if not callable(create_evaluation_backend):
+                    raise ValueError(
+                        f"[{task_name}] eval-only metrics require a backend but do "
+                        "not provide create_evaluation_backend()."
+                    )
+                task_metric_options = resolve_task_default_metrics(
+                    task_name, resolved_metric_options
+                )
+                task_backend = create_evaluation_backend(
+                    task_metric_options,
+                    dp_size=int(dp_size),
+                    tensor_parallel_size=int(tensor_parallel_size),
+                )
+                created_evaluation_backend = True
+                _info(
+                    f"[{task_name}] eval-only metric backend="
+                    f"{getattr(task_backend, 'name', type(task_backend).__name__)}"
+                )
+            try:
+                summary = _run_single_task(
+                    task_name=task_name,
+                    task_module=bundle.task_module,
+                    metrics_module=bundle.metrics_module,
+                    task_dir=task_spec.task_dir,
+                    backend=task_backend,
+                    task_output_dir=task_output_dir,
+                    gen_overrides=gen_overrides or {},
+                    metric_options=resolved_metric_options,
+                    overwrite=overwrite,
+                    run_config_common=run_config_common,
+                    tokenizer_getter=get_tokenizer,
+                    generate_only=generate_only,
+                    eval_only=eval_only,
+                )
+            finally:
+                if created_evaluation_backend and task_backend is not None:
+                    task_backend.close()
             summaries[task_name] = summary
             _info(f"===== finish task: {task_name} =====")
 
@@ -1004,6 +1224,7 @@ def run_evaluation(
             "model": model,
             "model_name": effective_model_name,
             "backend": backend_label,
+            "phase": phase,
             "results": all_task_summaries,
             "primary_scores": all_primary_scores,
             "primary_score_aggregate": _aggregate_primary_scores(all_task_summaries),

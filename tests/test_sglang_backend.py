@@ -22,6 +22,12 @@ class _ShortEngine(_FakeEngine):
         return []
 
 
+class _FakeTokenizer:
+    def encode(self, text, add_special_tokens=False):  # noqa: ANN001
+        del add_special_tokens
+        return text.split()
+
+
 class SGLangBackendTests(unittest.TestCase):
     def test_engine_args_per_engine_dp1_with_default_memory_saver(self) -> None:
         # Each engine (single or ray worker) runs dp=1; aethereval-level dp shards payloads.
@@ -104,7 +110,7 @@ class SGLangBackendTests(unittest.TestCase):
 
         outputs = sglang_backend._run_generation(
             engine=engine,
-            tokenizer=object(),
+            tokenizer=_FakeTokenizer(),
             payloads=payloads,
             gen_cfg={"n": 2, "max_new_tokens": 8, "temperature": 0.7, "top_p": 1.0},
             batch_size=2,

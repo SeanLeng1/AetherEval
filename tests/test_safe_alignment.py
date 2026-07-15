@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from aethereval.core.types import GenerationOutput, Sample
 from benchmarks.safe_alignment import metrics
@@ -24,6 +25,31 @@ class _FakeBackend:
 
 
 class SafeAlignmentTests(unittest.TestCase):
+    def test_eval_only_backend_uses_requested_gpu_budget_without_candidate(self) -> None:
+        with mock.patch.object(
+            metrics,
+            "StandaloneRewardModelBackend",
+        ) as backend_cls:
+            metrics.create_evaluation_backend(
+                {},
+                dp_size=4,
+                tensor_parallel_size=2,
+            )
+            backend_cls.assert_called_once_with(
+                [f"cuda:{index}" for index in range(8)]
+            )
+
+        with mock.patch.object(
+            metrics,
+            "StandaloneRewardModelBackend",
+        ) as backend_cls:
+            metrics.create_evaluation_backend(
+                {"rm_device": "cpu"},
+                dp_size=4,
+                tensor_parallel_size=2,
+            )
+            backend_cls.assert_called_once_with(["cpu"])
+
     def test_batch_scoring_combines_reward_models(self) -> None:
         samples = [
             Sample(

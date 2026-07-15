@@ -75,6 +75,19 @@ def append_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    """Atomically replace a JSONL file after all rows are serialized."""
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def write_json(path: Path, obj: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)

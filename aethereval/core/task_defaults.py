@@ -43,5 +43,36 @@ def resolve_task_default_gen(
     merged = dict(fallback_default_gen or {})
     override = _load_task_default_overrides().get(task_name)
     if override:
-        merged.update(override)
+        merged.update(
+            {
+                key: value
+                for key, value in override.items()
+                if key not in {"generation", "metrics"}
+            }
+        )
+        nested_generation = override.get("generation")
+        if nested_generation is not None:
+            if not isinstance(nested_generation, dict):
+                raise ValueError(
+                    f"task_defaults.yaml generation entry for '{task_name}' "
+                    "must be a mapping/object."
+                )
+            merged.update(nested_generation)
+    return merged
+
+
+def resolve_task_default_metrics(
+    task_name: str,
+    runtime_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    task_defaults = _load_task_default_overrides().get(task_name, {})
+    configured = task_defaults.get("metrics", {})
+    if not isinstance(configured, dict):
+        raise ValueError(
+            f"task_defaults.yaml metrics entry for '{task_name}' must be a "
+            "mapping/object."
+        )
+    merged = dict(configured)
+    if runtime_overrides:
+        merged.update(runtime_overrides)
     return merged

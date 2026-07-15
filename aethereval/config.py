@@ -114,6 +114,24 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     inspect = bool(
         _pick(getattr(args, "inspect", None), _cfg_get(cfg, "inspect", "run"), False)
     )
+    generate_only = bool(
+        _pick(
+            getattr(args, "generate_only", None),
+            _cfg_get(cfg, "generate_only", "run"),
+            False,
+        )
+    )
+    eval_only = bool(
+        _pick(
+            getattr(args, "eval_only", None),
+            _cfg_get(cfg, "eval_only", "run"),
+            False,
+        )
+    )
+    if generate_only and eval_only:
+        raise ValueError("generate_only and eval_only are mutually exclusive")
+    if eval_only and overwrite:
+        raise ValueError("eval_only cannot be combined with overwrite")
 
     arg_dp_size = getattr(args, "dp_size", None)
     arg_tp_size = getattr(args, "tp_size", None)
@@ -182,6 +200,34 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             getattr(args, "rm_trust_remote_code", None),
             _cfg_get(cfg, "rm_trust_remote_code", "metrics"),
         ),
+        "judge_model": _pick(
+            getattr(args, "judge_model", None),
+            _cfg_get(cfg, "judge_model", "metrics"),
+        ),
+        "judge_base_url": _pick(
+            getattr(args, "judge_base_url", None),
+            _cfg_get(cfg, "judge_base_url", "metrics"),
+        ),
+        "judge_api_key_env": _pick(
+            getattr(args, "judge_api_key_env", None),
+            _cfg_get(cfg, "judge_api_key_env", "metrics"),
+        ),
+        "judge_workers": _pick(
+            getattr(args, "judge_workers", None),
+            _cfg_get(cfg, "judge_workers", "metrics"),
+        ),
+        "judge_timeout": _pick(
+            getattr(args, "judge_timeout", None),
+            _cfg_get(cfg, "judge_timeout", "metrics"),
+        ),
+        "judge_max_retries": _pick(
+            getattr(args, "judge_max_retries", None),
+            _cfg_get(cfg, "judge_max_retries", "metrics"),
+        ),
+        "judge_repeats": _pick(
+            getattr(args, "judge_repeats", None),
+            _cfg_get(cfg, "judge_repeats", "metrics"),
+        ),
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
 
@@ -241,6 +287,8 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "backend": backend,
         "tasks": tasks,
         "inspect": inspect,
+        "generate_only": generate_only,
+        "eval_only": eval_only,
         "output_dir": output_dir,
         "run_id": run_id,
         "overwrite": overwrite,

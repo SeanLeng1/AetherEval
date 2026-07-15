@@ -183,8 +183,12 @@ def _build_external_spec(
             seed=args.seed,
             verbose=bool(args.bfcl_verbose),
             allow_overwrite=True if args.overwrite is None else bool(args.overwrite),
-            run_generation=not args.skip_generation,
-            run_evaluation=not args.skip_evaluation,
+            run_generation=not (
+                args.skip_generation or getattr(args, "eval_only", False)
+            ),
+            run_evaluation=not (
+                args.skip_evaluation or getattr(args, "generate_only", False)
+            ),
         )
         return spec, run
 
@@ -268,6 +272,7 @@ def _write_combined_run_summary(
     model: str,
     model_name: str,
     backend: str,
+    phase: str,
     task_summaries: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     primary_scores = {
@@ -284,6 +289,7 @@ def _write_combined_run_summary(
         "model": model,
         "model_name": model_name,
         "backend": backend,
+        "phase": phase,
         "results": task_summaries,
         "primary_scores": primary_scores,
         "primary_score_aggregate": _mean_primary_score(task_summaries),
@@ -300,6 +306,15 @@ def run_selected_tasks(
     args: argparse.Namespace,
     resolved: dict[str, Any],
 ) -> dict[str, Any]:
+    if resolved["inspect"] and (
+        resolved["generate_only"] or resolved["eval_only"]
+    ):
+        raise ValueError("--inspect cannot be combined with a phase-only mode")
+    if resolved["generate_only"] and args.skip_generation:
+        raise ValueError("--generate-only cannot be combined with --skip-generation")
+    if resolved["eval_only"] and args.skip_evaluation:
+        raise ValueError("--eval-only cannot be combined with --skip-evaluation")
+
     native_tasks, external_tasks = _split_native_external_tasks(resolved["tasks"])
     if not native_tasks and not external_tasks:
         raise ValueError("No tasks selected.")
@@ -347,6 +362,8 @@ def run_selected_tasks(
             run_id=resolved["run_id"],
             backend_name=resolved["backend"],
             backend_kwargs=resolved["backend_kwargs"],
+            generate_only=resolved["generate_only"],
+            eval_only=resolved["eval_only"],
         )
         task_summaries = dict(native_result["results"])
     else:
@@ -369,6 +386,8 @@ def run_selected_tasks(
             # resolve_run_arguments()'s generic dp_size default.
             external_args.dp_size = None
         external_args.overwrite = resolved["overwrite"]
+        external_args.generate_only = resolved["generate_only"]
+        external_args.eval_only = resolved["eval_only"]
 
         gen_overrides = resolved["gen_overrides"]
         external_args.max_new_tokens = gen_overrides["max_new_tokens"]
@@ -412,6 +431,13 @@ def run_selected_tasks(
         model=str(resolved["model"]),
         model_name=effective_model_name,
         backend=str(resolved["backend"]),
+        phase=(
+            "generate_only"
+            if resolved["generate_only"]
+            else "eval_only"
+            if resolved["eval_only"]
+            else "generate_and_eval"
+        ),
         task_summaries=task_summaries,
     )
 
@@ -467,6 +493,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional run id. Default: <model_suffix_lower>.",
+    )
+    phase_group = parser.add_mutually_exclusive_group()
+    phase_group.add_argument(
+        "--generate-only",
+        action="store_true",
+        default=None,
+        help=(
+            "Generate and save predictions without running metrics or LLM judges. "
+            "Resume with --eval-only using the same model/output/run-id."
+        ),
+    )
+    phase_group.add_argument(
+        "--eval-only",
+        action="store_true",
+        default=None,
+        help=(
+            "Evaluate a complete existing predictions.jsonl without loading the "
+            "candidate inference backend."
+        ),
     )
 
     parser.add_argument(
@@ -556,6 +601,48 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Forward trust_remote_code to RM tokenizers/models.",
+    )
+    parser.add_argument(
+        "--judge-model",
+        type=str,
+        default=None,
+        help="Override the benchmark's aligned default LLM judge model.",
+    )
+    parser.add_argument(
+        "--judge-base-url",
+        type=str,
+        default=None,
+        help="OpenAI-compatible judge API base URL (or AETHEREVAL_JUDGE_BASE_URL).",
+    )
+    parser.add_argument(
+        "--judge-api-key-env",
+        type=str,
+        default=None,
+        help="Environment variable containing the judge API key.",
+    )
+    parser.add_argument(
+        "--judge-workers",
+        type=int,
+        default=None,
+        help="Concurrent LLM-judge requests (default: 64).",
+    )
+    parser.add_argument(
+        "--judge-timeout",
+        type=float,
+        default=None,
+        help="Per-request LLM-judge timeout in seconds (default: 300).",
+    )
+    parser.add_argument(
+        "--judge-max-retries",
+        type=int,
+        default=None,
+        help="Transport retry count for LLM-judge requests (default: 5).",
+    )
+    parser.add_argument(
+        "--judge-repeats",
+        type=int,
+        default=None,
+        help="Override benchmark-specific judge repetition count.",
     )
 
     parser.add_argument(
@@ -699,6 +786,14 @@ def main() -> None:
         f"dp_size={resolved['dp_size']} tp_size={resolved['tp_size']} "
         f"overwrite={resolved['overwrite']}"
     )
+    phase = (
+        "generate_only"
+        if resolved["generate_only"]
+        else "eval_only"
+        if resolved["eval_only"]
+        else "generate_and_eval"
+    )
+    _info(f"phase={phase}")
     _info(
         f"output_dir={resolved['output_dir']} "
         f"run_id={resolved['run_id'] if resolved['run_id'] else '(auto:model_name)'}"

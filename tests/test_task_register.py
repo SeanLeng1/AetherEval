@@ -117,6 +117,8 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["safe_alignment"]["max_new_tokens"], 1024)
         self.assertEqual(defaults["apibank"]["n"], 1)
         self.assertEqual(defaults["apibank"]["max_new_tokens"], 4096)
+        self.assertNotIn("metrics", defaults["healthbench"])
+        self.assertNotIn("judge_model", defaults["healthbench"])
         self.assertIn("max_new_tokens", defaults["livecodebench"])
 
     def test_instruction_following_primary_metrics(self) -> None:
