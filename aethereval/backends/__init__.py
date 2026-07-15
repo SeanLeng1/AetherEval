@@ -1,6 +1,7 @@
 from .base import GenerationBackend
 from .factory import SUPPORTED_BACKENDS, create_backend, normalize_backend_name
 from .prompt import (
+    chat_template_kwargs_from_generation_config,
     count_text_tokens,
     count_token_ids,
     load_chat_tokenizer,
@@ -14,6 +15,7 @@ __all__ = [
     "SGLangBackend",
     "SUPPORTED_BACKENDS",
     "VLLMBackend",
+    "chat_template_kwargs_from_generation_config",
     "count_text_tokens",
     "count_token_ids",
     "create_backend",

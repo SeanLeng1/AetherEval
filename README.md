@@ -269,6 +269,31 @@ CLI generation flags still override candidate defaults, so avoid global
 `--temperature`, `--max-new-tokens`, or `--n` overrides when protocol-aligned
 scores are required.
 
+## Thinking models
+
+Native tasks support both thinking and non-thinking chat templates:
+
+```bash
+# Explicitly enable thinking
+aethereval --model Qwen/Qwen3-4B --tasks <task> --enable-thinking
+
+# Explicitly disable thinking
+aethereval --model Qwen/Qwen3-4B --tasks <task> --no-enable-thinking
+```
+
+Omitting both flags preserves the tokenizer/checkpoint default. In particular,
+the original `Qwen/Qwen3-4B` chat template defaults to thinking enabled. The same
+setting can be written as `generation.enable_thinking: true` or `false` in YAML.
+It is applied locally while rendering the chat template, is shown by `--inspect`,
+and is saved in each task's `run_config.json` so `--eval-only` inherits the mode
+used by `--generate-only`.
+
+This switch does not automatically change temperature, top-p, output length, or
+any task-specific generation defaults. Set those separately only when the target
+model and benchmark protocol call for them. BFCL is not affected because its
+official adapter builds a ToolRL completion prompt directly instead of applying
+the tokenizer chat template.
+
 Anthropic's official OpenAI-SDK compatibility endpoint can judge the two Claude
 tasks directly. Because the judge endpoint is shared by one invocation, use a
 second eval-only command unless a unified gateway routes both providers:

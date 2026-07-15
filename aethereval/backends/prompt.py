@@ -21,7 +21,24 @@ def _warn_chat_template_fallback(reason: str | None = None) -> None:
     _CHAT_TEMPLATE_FALLBACK_WARNED = True
 
 
-def _prompt_to_text(prompt: PromptType, tokenizer: Any) -> str:
+def chat_template_kwargs_from_generation_config(
+    gen_cfg: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not gen_cfg or gen_cfg.get("enable_thinking") is None:
+        return {}
+    value = gen_cfg["enable_thinking"]
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"enable_thinking must be true or false when provided, got {value!r}"
+        )
+    return {"enable_thinking": value}
+
+
+def _prompt_to_text(
+    prompt: PromptType,
+    tokenizer: Any,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> str:
     if isinstance(prompt, str):
         prompt = [{"role": "user", "content": prompt}]
 
@@ -32,6 +49,7 @@ def _prompt_to_text(prompt: PromptType, tokenizer: Any) -> str:
                     prompt,
                     tokenize=False,
                     add_generation_prompt=True,
+                    **(chat_template_kwargs or {}),
                 )
             except ValueError as exc:
                 _warn_chat_template_fallback(
@@ -100,5 +118,9 @@ def count_text_tokens(text: str, tokenizer: Any) -> int:
     return count_token_ids(input_ids)
 
 
-def render_prompt_with_chat_template(prompt: PromptType, tokenizer: Any) -> str:
-    return _prompt_to_text(prompt, tokenizer)
+def render_prompt_with_chat_template(
+    prompt: PromptType,
+    tokenizer: Any,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> str:
+    return _prompt_to_text(prompt, tokenizer, chat_template_kwargs)

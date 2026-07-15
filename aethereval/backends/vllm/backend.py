@@ -3,7 +3,11 @@ from typing import Any
 
 from aethereval.core.types import GenerationInput, GenerationOutput
 
-from ..prompt import _prompt_to_text, count_token_ids
+from ..prompt import (
+    _prompt_to_text,
+    chat_template_kwargs_from_generation_config,
+    count_token_ids,
+)
 
 
 def _build_sampling_params(vllm_module: Any, gen_cfg: dict[str, Any], n: int) -> Any:
@@ -52,7 +56,10 @@ def _run_generation(
 
     for n, items in bucketed.items():
         sampling_params = _build_sampling_params(vllm_module, gen_cfg, n=n)
-        prompts = [_prompt_to_text(x["prompt"], tokenizer) for x in items]
+        chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
+        prompts = [
+            _prompt_to_text(x["prompt"], tokenizer, chat_template_kwargs) for x in items
+        ]
         outputs = llm.generate(
             prompts=prompts,
             sampling_params=sampling_params,

@@ -20,6 +20,7 @@ class ConfigTests(unittest.TestCase):
                 "  tp_size: 1\n"
                 "generation:\n"
                 "  max_new_tokens: 123\n"
+                "  enable_thinking: false\n"
                 "metrics:\n"
                 "  bootstrap_resamples: 250\n"
                 "  rm_model_path: /models/rm\n"
@@ -71,6 +72,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolved["dp_size"], 2)
             self.assertEqual(resolved["tp_size"], 1)
             self.assertEqual(resolved["gen_overrides"]["max_new_tokens"], 123)
+            self.assertIs(resolved["gen_overrides"]["enable_thinking"], False)
             self.assertEqual(resolved["bootstrap_resamples"], 250)
             self.assertEqual(resolved["metric_options"]["rm_model_path"], "/models/rm")
             self.assertEqual(resolved["metric_options"]["cm_model_path"], "/models/cm")

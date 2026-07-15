@@ -5,6 +5,7 @@ from aethereval.core.types import GenerationInput, GenerationOutput
 
 from ..prompt import (
     _prompt_to_text,
+    chat_template_kwargs_from_generation_config,
     count_text_tokens,
     count_token_ids,
     load_chat_tokenizer,
@@ -226,6 +227,7 @@ def _run_generation(
 
     result_by_index: dict[int, dict[str, Any]] = {}
     sampling_params = _build_sampling_params(gen_cfg)
+    chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
     progress_total = sum(int(item["num_generations"]) for item in payloads)
     progress_bar = _make_progress_bar(progress_total, progress_desc, show_progress)
 
@@ -234,7 +236,9 @@ def _run_generation(
             prompts: list[str] = []
             request_payloads: list[dict[str, Any]] = []
             for item in items:
-                rendered = _prompt_to_text(item["prompt"], tokenizer)
+                rendered = _prompt_to_text(
+                    item["prompt"], tokenizer, chat_template_kwargs
+                )
                 for _ in range(n):
                     prompts.append(rendered)
                     request_payloads.append(item)

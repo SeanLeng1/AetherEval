@@ -152,6 +152,10 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "top_k": _pick(args.top_k, _cfg_get(cfg, "top_k", "generation")),
         "min_p": _pick(args.min_p, _cfg_get(cfg, "min_p", "generation")),
         "seed": _pick(args.seed, _cfg_get(cfg, "seed", "generation")),
+        "enable_thinking": _pick(
+            getattr(args, "enable_thinking", None),
+            _cfg_get(cfg, "enable_thinking", "generation"),
+        ),
     }
 
     bootstrap_resamples = int(

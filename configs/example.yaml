@@ -19,6 +19,7 @@ generation:
   top_k: -1
   min_p: null
   seed: 42
+  enable_thinking: null  # true | false | null (preserve checkpoint default)
 
 metrics:
   bootstrap_resamples: 1000

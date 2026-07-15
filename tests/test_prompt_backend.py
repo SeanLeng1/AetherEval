@@ -8,10 +8,18 @@ class _TokenizerWithTemplate:
     def __init__(self) -> None:
         self.calls = 0
         self.last_messages = None
+        self.last_enable_thinking = None
 
-    def apply_chat_template(self, messages, tokenize, add_generation_prompt):  # noqa: ANN001
+    def apply_chat_template(
+        self,
+        messages,  # noqa: ANN001
+        tokenize,  # noqa: ANN001
+        add_generation_prompt,  # noqa: ANN001
+        enable_thinking=None,  # noqa: ANN001
+    ):
         self.calls += 1
         self.last_messages = messages
+        self.last_enable_thinking = enable_thinking
         assert tokenize is False
         assert add_generation_prompt is True
         return "templated_prompt"
@@ -47,6 +55,28 @@ class BackendPromptTests(unittest.TestCase):
         self.assertEqual(out, "user: hello")
         self.assertEqual(len(caught), 1)
         self.assertIn("falling back", str(caught[0].message))
+
+    def test_explicit_thinking_mode_is_forwarded_to_chat_template(self) -> None:
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                tokenizer = _TokenizerWithTemplate()
+                prompt_backend._prompt_to_text(
+                    "hello",
+                    tokenizer,
+                    {"enable_thinking": enabled},
+                )
+                self.assertIs(tokenizer.last_enable_thinking, enabled)
+
+    def test_thinking_mode_is_not_forwarded_when_unspecified(self) -> None:
+        tokenizer = _TokenizerWithTemplate()
+        prompt_backend._prompt_to_text("hello", tokenizer)
+        self.assertIsNone(tokenizer.last_enable_thinking)
+
+    def test_generation_config_rejects_non_boolean_thinking_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "enable_thinking"):
+            prompt_backend.chat_template_kwargs_from_generation_config(
+                {"enable_thinking": "false"}
+            )
 
     def test_broken_chat_template_falls_back_with_warning(self) -> None:
         with warnings.catch_warnings(record=True) as caught:

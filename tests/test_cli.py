@@ -32,6 +32,16 @@ from benchmarks.bfcl.register import register_rlla_model
 
 
 class ExternalCliTests(unittest.TestCase):
+    def test_thinking_mode_flags_are_tri_state(self) -> None:
+        parser = build_parser()
+
+        self.assertIsNone(parser.parse_args([]).enable_thinking)
+        self.assertIs(parser.parse_args(["--enable-thinking"]).enable_thinking, True)
+        self.assertIs(
+            parser.parse_args(["--no-enable-thinking"]).enable_thinking,
+            False,
+        )
+
     def test_bfcl_smg_readiness_waits_for_all_workers(self) -> None:
         class Response:
             def __init__(self, status_code, payload=None):  # noqa: ANN001

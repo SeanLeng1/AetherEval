@@ -23,6 +23,7 @@ from .types import (
 )
 from aethereval.backends import (
     GenerationBackend,
+    chat_template_kwargs_from_generation_config,
     count_text_tokens,
     create_backend,
     load_chat_tokenizer,
@@ -158,6 +159,13 @@ def _merge_generation_config(
     cfg["temperature"] = float(cfg["temperature"])
     cfg["top_p"] = float(cfg["top_p"])
     cfg["top_k"] = int(cfg["top_k"]) if cfg.get("top_k") is not None else -1
+    if cfg.get("enable_thinking") is not None and not isinstance(
+        cfg["enable_thinking"], bool
+    ):
+        raise ValueError(
+            "enable_thinking must be true or false when provided, "
+            f"got {cfg['enable_thinking']!r}"
+        )
     if cfg["n"] < 1:
         raise ValueError(f"n must be >= 1, got {cfg['n']}")
     if cfg["n"] > 1 and cfg["temperature"] == 0.0:
@@ -232,6 +240,7 @@ def _ensure_output_token_metadata(
     *,
     output: GenerationOutput,
     tokenizer_getter: Callable[[], Any],
+    chat_template_kwargs: dict[str, Any] | None = None,
 ) -> None:
     if not isinstance(output.meta, dict):
         raise ValueError(f"GenerationOutput meta must be a dict for {output.sample_id}")
@@ -239,7 +248,9 @@ def _ensure_output_token_metadata(
     prompt_count = output.meta.get("prompt_token_count")
     if prompt_count is None:
         rendered_prompt = render_prompt_with_chat_template(
-            output.prompt, tokenizer_getter()
+            output.prompt,
+            tokenizer_getter(),
+            chat_template_kwargs,
         )
         prompt_count = _token_count_from_text(rendered_prompt, tokenizer_getter)
     elif not _is_token_count(prompt_count):
@@ -257,9 +268,14 @@ def _ensure_output_token_metadata(
 def _ensure_outputs_token_metadata(
     outputs: list[GenerationOutput],
     tokenizer_getter: Callable[[], Any],
+    chat_template_kwargs: dict[str, Any] | None = None,
 ) -> None:
     for output in outputs:
-        _ensure_output_token_metadata(output=output, tokenizer_getter=tokenizer_getter)
+        _ensure_output_token_metadata(
+            output=output,
+            tokenizer_getter=tokenizer_getter,
+            chat_template_kwargs=chat_template_kwargs,
+        )
 
 
 def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str, int]:
@@ -657,6 +673,7 @@ def _run_single_task(
             )
     else:
         gen_cfg = _merge_generation_config(task_module.DEFAULT_GEN, gen_overrides)
+    chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
 
     n = int(gen_cfg["n"])
     _info(
@@ -773,7 +790,11 @@ def _run_single_task(
             existing_outputs, existing_gen_indices = _records_to_generation_outputs(
                 records_to_rescore
             )
-            _ensure_outputs_token_metadata(existing_outputs, tokenizer_getter)
+            _ensure_outputs_token_metadata(
+                existing_outputs,
+                tokenizer_getter,
+                chat_template_kwargs,
+            )
             runtime_metric_options = {}
             if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
                 runtime_metric_options["_tokenizer"] = tokenizer_getter()
@@ -884,7 +905,11 @@ def _run_single_task(
                     f"sample {output.sample_id}, expected {len(missing)}"
                 )
 
-        _ensure_outputs_token_metadata(generated_outputs, tokenizer_getter)
+        _ensure_outputs_token_metadata(
+            generated_outputs,
+            tokenizer_getter,
+            chat_template_kwargs,
+        )
         generated_scores = None
         if not generate_only:
             runtime_metric_options = {}
@@ -1246,6 +1271,7 @@ def inspect_prompts(
     benchmarks_dir: Path | None = None,
     inspect_limit: int = 5,
     prompt_renderer: Callable[[PromptType], str] | None = None,
+    gen_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task_root = benchmarks_dir or BENCHMARKS_DIR
     tasks_map = discover_tasks(task_root)
@@ -1257,13 +1283,9 @@ def inspect_prompts(
     limit = max(1, int(inspect_limit))
     _info(f"inspect mode: model={model} tasks={selected} limit={limit}")
 
-    if prompt_renderer is None:
-        tokenizer = load_chat_tokenizer(model, model_kwargs)
-
-        def _render(prompt: PromptType) -> str:
-            return render_prompt_with_chat_template(prompt, tokenizer)
-
-        prompt_renderer = _render
+    tokenizer = (
+        load_chat_tokenizer(model, model_kwargs) if prompt_renderer is None else None
+    )
 
     task_results: dict[str, list[dict[str, Any]]] = {}
     for task_name in selected:
@@ -1271,11 +1293,23 @@ def inspect_prompts(
         task_spec = tasks_map[task_name]
         samples_raw = bundle.task_module.load_samples(task_spec.task_dir)
         samples = [_to_sample(item) for item in samples_raw]
+        gen_cfg = _merge_generation_config(
+            bundle.task_module.DEFAULT_GEN,
+            gen_overrides or {},
+        )
+        chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
 
         rows: list[dict[str, Any]] = []
         for sample in samples[:limit]:
             prompt = _to_chat_prompt(bundle.task_module.build_prompt(sample))
-            rendered = str(prompt_renderer(prompt))
+            if prompt_renderer is None:
+                rendered = render_prompt_with_chat_template(
+                    prompt,
+                    tokenizer,
+                    chat_template_kwargs,
+                )
+            else:
+                rendered = str(prompt_renderer(prompt))
             rows.append(
                 {
                     "sample_id": sample.id,

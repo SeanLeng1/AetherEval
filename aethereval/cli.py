@@ -329,6 +329,7 @@ def run_selected_tasks(
             model=resolved["model"],
             tasks=",".join(native_tasks),
             model_kwargs=resolved["backend_kwargs"],
+            gen_overrides=resolved["gen_overrides"],
         )
         return {"inspect": inspected}
 
@@ -540,6 +541,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-p", type=float, default=None, help="Override min-p.")
     parser.add_argument(
         "--seed", type=int, default=None, help="Override sampling seed."
+    )
+    parser.add_argument(
+        "--enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Pass enable_thinking=true/false to the tokenizer chat template. "
+            "Omit both forms to preserve the checkpoint's native default."
+        ),
     )
 
     parser.add_argument(

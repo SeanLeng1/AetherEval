@@ -261,7 +261,11 @@ class RunnerTests(unittest.TestCase):
                 backend=backend,
                 benchmarks_dir=root,
                 generate_only=True,
-                gen_overrides={"n": 2, "temperature": 0.7},
+                gen_overrides={
+                    "n": 2,
+                    "temperature": 0.7,
+                    "enable_thinking": False,
+                },
             )
 
             generated_summary = generated["results"]["toy"]
@@ -320,6 +324,10 @@ class RunnerTests(unittest.TestCase):
                 run_config = json.load(f)
             self.assertEqual(run_config["generation_config"]["n"], 2)
             self.assertEqual(run_config["generation_config"]["temperature"], 0.7)
+            self.assertIs(
+                run_config["generation_config"]["enable_thinking"],
+                False,
+            )
 
             with self.assertRaisesRegex(ValueError, "overrides conflict"):
                 run_evaluation(
@@ -774,6 +782,39 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["sample_id"], "1")
             self.assertIn("Question: 2 + 2", rows[0]["prompt"])
+
+    def test_inspect_prompts_uses_explicit_thinking_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+
+            class ThinkingTokenizer(FakeTokenizer):
+                def apply_chat_template(
+                    self,
+                    prompt: list[dict[str, str]],
+                    tokenize: bool = False,
+                    add_generation_prompt: bool = True,
+                    enable_thinking: bool | None = None,
+                ) -> str:
+                    del tokenize, add_generation_prompt
+                    return f"thinking={enable_thinking}:{prompt[-1]['content']}"
+
+            with mock.patch(
+                "aethereval.core.runner.load_chat_tokenizer",
+                return_value=ThinkingTokenizer(),
+            ):
+                inspected = inspect_prompts(
+                    model="fake-model",
+                    tasks="toy",
+                    benchmarks_dir=root,
+                    gen_overrides={"enable_thinking": False},
+                )
+
+            self.assertTrue(
+                inspected["results"]["toy"][0]["prompt"].startswith(
+                    "thinking=False:"
+                )
+            )
 
     def test_run_summary_includes_existing_tasks_under_same_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

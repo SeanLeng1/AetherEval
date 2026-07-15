@@ -28,6 +28,18 @@ class _FakeTokenizer:
         return text.split()
 
 
+class _ThinkingTokenizer(_FakeTokenizer):
+    def apply_chat_template(
+        self,
+        messages,  # noqa: ANN001
+        tokenize,  # noqa: ANN001
+        add_generation_prompt,  # noqa: ANN001
+        enable_thinking=None,  # noqa: ANN001
+    ):
+        del tokenize, add_generation_prompt
+        return f"thinking={enable_thinking}:{messages[-1]['content']}"
+
+
 class SGLangBackendTests(unittest.TestCase):
     def test_engine_args_per_engine_dp1_with_default_memory_saver(self) -> None:
         # Each engine (single or ray worker) runs dp=1; aethereval-level dp shards payloads.
@@ -150,6 +162,35 @@ class SGLangBackendTests(unittest.TestCase):
                 batch_size=1,
                 show_progress=False,
             )
+
+    def test_run_generation_supports_thinking_and_no_thinking(self) -> None:
+        payloads = [
+            {
+                "idx": 0,
+                "sample_id": "a",
+                "prompt": [{"role": "user", "content": "hello"}],
+                "num_generations": 1,
+            }
+        ]
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                engine = _FakeEngine()
+                sglang_backend._run_generation(
+                    engine=engine,
+                    tokenizer=_ThinkingTokenizer(),
+                    payloads=payloads,
+                    gen_cfg={
+                        "n": 1,
+                        "max_new_tokens": 8,
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "enable_thinking": enabled,
+                    },
+                    batch_size=1,
+                    show_progress=False,
+                )
+                self.assertEqual(engine.prompts, [f"thinking={enabled}:hello"])
+                self.assertNotIn("enable_thinking", engine.sampling_params)
 
 
 if __name__ == "__main__":
