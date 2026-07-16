@@ -236,6 +236,74 @@ def _write_batch_benchmark(root: Path) -> None:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_eval_only_manages_offline_judge_and_keeps_runtime_object_out_of_json(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            metrics_path = root / "toy" / "metrics.py"
+            metrics_path.write_text(
+                "USES_LLM_JUDGE = True\n"
+                + metrics_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            out = Path(tmp) / "outputs"
+            run_evaluation(
+                model="candidate/model",
+                tasks="toy",
+                output_dir=out,
+                run_id="local_judge",
+                backend=FakeBackend(),
+                benchmarks_dir=root,
+                generate_only=True,
+            )
+
+            judge = mock.Mock(name="offline-judge")
+            with mock.patch(
+                "aethereval.core.runner.OfflineJudgeClient",
+                return_value=judge,
+            ) as judge_class:
+                evaluated = run_evaluation(
+                    model="candidate/model",
+                    tasks="toy",
+                    output_dir=out,
+                    run_id="local_judge",
+                    benchmarks_dir=root,
+                    eval_only=True,
+                    metric_options={
+                        "judge_backend": "local",
+                        "judge_model": "local/judge",
+                        "judge_dp_size": 1,
+                        "judge_tp_size": 2,
+                        "judge_workers": 8,
+                        "judge_local_max_tokens": 1024,
+                        "judge_sglang_args": {"context_length": 8192},
+                    },
+                )
+
+            self.assertTrue(evaluated["results"]["toy"]["evaluation_complete"])
+            judge_class.assert_called_once_with(
+                model="local/judge",
+                dp_size=1,
+                tensor_parallel_size=2,
+                model_kwargs={"context_length": 8192},
+                batch_size=8,
+                default_max_tokens=1024,
+                enable_thinking=None,
+            )
+            judge.close.assert_called_once_with()
+            run_config_path = (
+                out
+                / "model"
+                / "local_judge"
+                / "toy"
+                / "run_config.json"
+            )
+            with run_config_path.open(encoding="utf-8") as f:
+                run_config = json.load(f)
+            self.assertNotIn("_judge_client", run_config["metric_options"])
+
     def test_generate_only_then_eval_only_without_candidate_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"

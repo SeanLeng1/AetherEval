@@ -7,6 +7,7 @@ from typing import Any
 from .config import load_yaml_config, resolve_run_arguments
 from .core.io import ensure_dir, model_output_name, run_output_dir, write_json
 from .core.runner import inspect_prompts, run_evaluation
+from .core.task_defaults import resolve_task_default_gen
 from .core.task_register import list_task_default_gens, list_tasks
 
 EXTERNAL_TASKS = ("bfcl",)
@@ -93,6 +94,8 @@ def _build_external_spec(
 
         from .config import _parse_sglang_args
 
+        default_gen = resolve_task_default_gen("bfcl", {})
+
         if backend == "sglang":
             tp_size = int(args.tp_size if args.tp_size is not None else 1)
             if args.num_gpus is not None and args.dp_size is None:
@@ -167,9 +170,15 @@ def _build_external_spec(
             sglang_server_args=(
                 bfcl_backend_kwargs if backend == "sglang" else {}
             ),
-            temperature=args.temperature if args.temperature is not None else 0.001,
+            temperature=(
+                args.temperature
+                if args.temperature is not None
+                else float(default_gen.get("temperature", 0.001))
+            ),
             max_tokens=(
-                args.max_new_tokens if args.max_new_tokens is not None else 4096
+                args.max_new_tokens
+                if args.max_new_tokens is not None
+                else int(default_gen.get("max_new_tokens", 4096))
             ),
             max_context_length=(
                 args.bfcl_context_length
@@ -178,8 +187,16 @@ def _build_external_spec(
                 if args.context_length is not None
                 else args.max_model_len
             ),
-            top_p=args.top_p if args.top_p is not None else 1.0,
-            top_k=args.top_k if args.top_k is not None else -1,
+            top_p=(
+                args.top_p
+                if args.top_p is not None
+                else float(default_gen.get("top_p", 1.0))
+            ),
+            top_k=(
+                args.top_k
+                if args.top_k is not None
+                else int(default_gen.get("top_k", -1))
+            ),
             seed=args.seed,
             verbose=bool(args.bfcl_verbose),
             allow_overwrite=True if args.overwrite is None else bool(args.overwrite),
@@ -347,25 +364,62 @@ def run_selected_tasks(
 
     native_result: dict[str, Any] | None = None
     if native_tasks:
-        native_result = run_evaluation(
-            model=resolved["model"],
-            model_name=resolved["model_name"],
-            tasks=",".join(native_tasks),
-            output_dir=resolved["output_dir"],
-            dp_size=resolved["dp_size"],
-            tensor_parallel_size=resolved["tp_size"],
-            gen_overrides=resolved["gen_overrides"],
-            bootstrap_resamples=resolved["bootstrap_resamples"],
-            bootstrap_seed=resolved["bootstrap_seed"],
-            bootstrap_confidence=resolved["bootstrap_confidence"],
-            metric_options=resolved["metric_options"],
-            overwrite=resolved["overwrite"],
-            run_id=resolved["run_id"],
-            backend_name=resolved["backend"],
-            backend_kwargs=resolved["backend_kwargs"],
-            generate_only=resolved["generate_only"],
-            eval_only=resolved["eval_only"],
+        def run_native_phase(
+            *,
+            generate_only: bool,
+            eval_only: bool,
+            overwrite: bool,
+        ) -> dict[str, Any]:
+            return run_evaluation(
+                model=resolved["model"],
+                model_name=resolved["model_name"],
+                tasks=",".join(native_tasks),
+                output_dir=resolved["output_dir"],
+                dp_size=resolved["dp_size"],
+                tensor_parallel_size=resolved["tp_size"],
+                gen_overrides=resolved["gen_overrides"],
+                bootstrap_resamples=resolved["bootstrap_resamples"],
+                bootstrap_seed=resolved["bootstrap_seed"],
+                bootstrap_confidence=resolved["bootstrap_confidence"],
+                metric_options=resolved["metric_options"],
+                overwrite=overwrite,
+                run_id=resolved["run_id"],
+                backend_name=resolved["backend"],
+                backend_kwargs=resolved["backend_kwargs"],
+                generate_only=generate_only,
+                eval_only=eval_only,
+            )
+
+        local_judge = (
+            str(resolved["metric_options"].get("judge_backend", "api")).lower()
+            == "local"
         )
+        if (
+            local_judge
+            and not resolved["generate_only"]
+            and not resolved["eval_only"]
+        ):
+            _info(
+                "offline judge selected: generating candidates first, then "
+                "restarting in eval-only mode so candidate and judge models do "
+                "not share GPU memory"
+            )
+            run_native_phase(
+                generate_only=True,
+                eval_only=False,
+                overwrite=resolved["overwrite"],
+            )
+            native_result = run_native_phase(
+                generate_only=False,
+                eval_only=True,
+                overwrite=False,
+            )
+        else:
+            native_result = run_native_phase(
+                generate_only=resolved["generate_only"],
+                eval_only=resolved["eval_only"],
+                overwrite=resolved["overwrite"],
+            )
         task_summaries = dict(native_result["results"])
     else:
         task_summaries = _load_existing_task_summaries(
@@ -619,6 +673,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the benchmark's aligned default LLM judge model.",
     )
     parser.add_argument(
+        "--judge-backend",
+        choices=("api", "local"),
+        default=None,
+        help=(
+            "Judge transport: OpenAI-compatible API or an internally managed "
+            "offline SGLang engine (default: api)."
+        ),
+    )
+    parser.add_argument(
         "--judge-base-url",
         type=str,
         default=None,
@@ -653,6 +716,40 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override benchmark-specific judge repetition count.",
+    )
+    parser.add_argument(
+        "--judge-dp-size",
+        type=int,
+        default=None,
+        help=(
+            "Offline judge data-parallel size. If judge DP/TP are both omitted, "
+            "the judge uses TP=runtime DP*TP."
+        ),
+    )
+    parser.add_argument(
+        "--judge-tp-size",
+        type=int,
+        default=None,
+        help="Offline judge tensor-parallel size.",
+    )
+    parser.add_argument(
+        "--judge-local-max-tokens",
+        type=int,
+        default=None,
+        help="Offline judge max-token fallback when a benchmark does not specify one.",
+    )
+    parser.add_argument(
+        "--judge-enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the offline judge model's thinking chat-template mode.",
+    )
+    parser.add_argument(
+        "--judge-sglang-arg",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help="Extra offline judge SGLang Engine kwarg; repeat as needed.",
     )
 
     parser.add_argument(
@@ -780,6 +877,12 @@ def main() -> None:
         return
     if args.list_task_defaults:
         payload = list_task_default_gens()
+        payload.update(
+            {
+                task_name: resolve_task_default_gen(task_name, {})
+                for task_name in EXTERNAL_TASKS
+            }
+        )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     cfg = load_yaml_config(args.config)

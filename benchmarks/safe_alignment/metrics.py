@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import Any
 
+from aethereval.core.task_defaults import resolve_task_default_metrics
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.metrics.common import mean, mean_stderr, to_records
 from benchmark_utils.reward_model import StandaloneRewardModelBackend
@@ -10,8 +11,13 @@ PRIMARY_METRIC = "overall/average"
 # A normal combined run reuses/offloads the generation backend. Eval-only creates
 # a standalone RM runtime and never loads the candidate model.
 REQUIRES_BACKEND = True
-DEFAULT_RM_MODEL_PATH = "Rihong/Qwen2.5-7B-SafeRLHF-RM"
-DEFAULT_CM_MODEL_PATH = "Rihong/Qwen2.5-7B-SafeRLHF-CM"
+_DEFAULT_METRICS = resolve_task_default_metrics("safe_alignment")
+DEFAULT_RM_MODEL_PATH = str(
+    _DEFAULT_METRICS.get("rm_model_path", "Rihong/Qwen2.5-7B-SafeRLHF-RM")
+)
+DEFAULT_CM_MODEL_PATH = str(
+    _DEFAULT_METRICS.get("cm_model_path", "Rihong/Qwen2.5-7B-SafeRLHF-CM")
+)
 
 SOURCE_SLUGS = {
     "Stanford Alpaca": "alpaca",

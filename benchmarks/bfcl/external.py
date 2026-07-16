@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from aethereval.core.io import model_output_name
+from aethereval.core.task_defaults import resolve_task_default_gen
 
 from .register import register_rlla_model
 
@@ -31,6 +32,7 @@ _NOISY_BFCL_MESSAGES = {
     "Empty response from the model. Proceed to next turn.",
     "Failed to decode the model response. Proceed to next turn.",
 }
+_DEFAULT_GEN = resolve_task_default_gen("bfcl", {})
 
 
 @dataclass
@@ -52,11 +54,13 @@ class ExternalRunSpec:
     gpu_memory_utilization: float = 0.9
     dtype: str = "bfloat16"
     sglang_server_args: dict[str, Any] = field(default_factory=dict)
-    temperature: float = 0.001  # near-greedy, BFCL tool-calling default
-    max_tokens: int = 4096
+    temperature: float = float(
+        _DEFAULT_GEN.get("temperature", 0.001)
+    )  # near-greedy, BFCL tool-calling default
+    max_tokens: int = int(_DEFAULT_GEN.get("max_new_tokens", 4096))
     max_context_length: int | None = None
-    top_p: float = 1.0
-    top_k: int = -1
+    top_p: float = float(_DEFAULT_GEN.get("top_p", 1.0))
+    top_k: int = int(_DEFAULT_GEN.get("top_k", -1))
     repetition_penalty: float = 1.0
     seed: int | None = None
     verbose: bool = False

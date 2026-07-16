@@ -14,6 +14,7 @@ from benchmark_utils.llm_judge import (
 
 
 PRIMARY_METRIC = "score"
+USES_LLM_JUDGE = True
 PRESERVE_EXISTING_SCORES_ON_RESUME = True
 DEFAULT_JUDGE_MODEL = str(
     resolve_task_default_metrics("healthbench").get(

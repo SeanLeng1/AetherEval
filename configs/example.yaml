@@ -25,6 +25,7 @@ metrics:
   bootstrap_resamples: 1000
   bootstrap_seed: 42
   bootstrap_confidence: 0.95
+  judge_backend: "api"  # api | local
 
 vllm:
   gpu_memory_utilization: 0.8

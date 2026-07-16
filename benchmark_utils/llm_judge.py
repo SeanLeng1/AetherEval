@@ -24,6 +24,7 @@ class JudgeSettings:
     workers: int
     timeout: float
     max_retries: int
+    local_client: Any | None = None
 
 
 def resolve_judge_settings(
@@ -36,28 +37,33 @@ def resolve_judge_settings(
     if not model:
         raise ValueError("judge model cannot be empty")
 
-    base_url = str(
-        options.get("judge_base_url")
-        or os.environ.get("AETHEREVAL_JUDGE_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
-    ).rstrip("/")
-    if not base_url:
-        raise ValueError("judge base URL cannot be empty")
+    local_client = options.get("_judge_client")
+    if local_client is None:
+        base_url = str(
+            options.get("judge_base_url")
+            or os.environ.get("AETHEREVAL_JUDGE_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).rstrip("/")
+        if not base_url:
+            raise ValueError("judge base URL cannot be empty")
 
-    explicit_key_env = options.get("judge_api_key_env")
-    key_env = str(explicit_key_env or "AETHEREVAL_JUDGE_API_KEY").strip()
-    api_key = os.environ.get(key_env)
-    if api_key is None and explicit_key_env is None:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if api_key is not None:
-            key_env = "OPENAI_API_KEY"
-    if not api_key:
-        raise RuntimeError(
-            "LLM-judge benchmark requires an API key. Set "
-            f"{key_env}, or pass --judge-api-key-env NAME. For an unauthenticated "
-            "local OpenAI-compatible endpoint, set the variable to '-'."
-        )
+        explicit_key_env = options.get("judge_api_key_env")
+        key_env = str(explicit_key_env or "AETHEREVAL_JUDGE_API_KEY").strip()
+        api_key = os.environ.get(key_env)
+        if api_key is None and explicit_key_env is None:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key is not None:
+                key_env = "OPENAI_API_KEY"
+        if not api_key:
+            raise RuntimeError(
+                "LLM-judge benchmark requires an API key. Set "
+                f"{key_env}, or pass --judge-api-key-env NAME. For an unauthenticated "
+                "local OpenAI-compatible endpoint, set the variable to '-'."
+            )
+    else:
+        base_url = "offline://local-judge"
+        api_key = "-"
 
     workers = int(options.get("judge_workers", 64))
     timeout = float(options.get("judge_timeout", 300.0))
@@ -76,6 +82,7 @@ def resolve_judge_settings(
         workers=workers,
         timeout=timeout,
         max_retries=max_retries,
+        local_client=local_client,
     )
 
 
@@ -89,6 +96,16 @@ def chat_completion(
     seed: int | None = None,
     extra_body: dict[str, Any] | None = None,
 ) -> str:
+    if settings.local_client is not None:
+        return settings.local_client.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            seed=seed,
+            extra_body=extra_body,
+        )
+
     payload: dict[str, Any] = {
         "model": settings.model,
         "messages": messages,

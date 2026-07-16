@@ -51,6 +51,9 @@ safe_alignment:
   max_new_tokens: 1024
   temperature: 0.0
   top_p: 1.0
+  metrics:
+    rm_model_path: Rihong/Qwen2.5-7B-SafeRLHF-RM
+    cm_model_path: Rihong/Qwen2.5-7B-SafeRLHF-CM
 
 gpqa_diamond:
   n: 32
@@ -99,6 +102,13 @@ apibank:
   max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
+
+bfcl:
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.001
+  top_p: 1.0
+  top_k: -1
 
 llmeval_med:
   n: 1

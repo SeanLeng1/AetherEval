@@ -34,6 +34,11 @@ pip install "bfcl-eval==2025.6.8" --no-deps   # keep the container's sglang/torc
 `--no-deps` skips bfcl's pinned optional API SDKs (cohere/anthropic/…); we only use the
 local **sglang** OSS handler, and [`_compat.py`](_compat.py) stubs those unused imports.
 
+BFCL's aligned generation defaults (`temperature`, `max_new_tokens`, `top_p`, and
+`top_k`) live under `bfcl` in `configs/task_defaults.yaml`, alongside native task
+defaults. Global generation CLI/YAML values override them in the same way as other
+tasks.
+
 ## Run
 
 ```bash

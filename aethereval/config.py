@@ -139,6 +139,42 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     dp_size = int(_pick(arg_dp_size, _cfg_get(cfg, "dp_size", "runtime"), 1))
     tp_size = int(_pick(arg_tp_size, _cfg_get(cfg, "tp_size", "runtime"), 1))
 
+    judge_backend = str(
+        _pick(
+            getattr(args, "judge_backend", None),
+            _cfg_get(cfg, "judge_backend", "metrics"),
+            "api",
+        )
+    ).lower()
+    if judge_backend not in {"api", "local"}:
+        raise ValueError("judge_backend must be 'api' or 'local'")
+    raw_judge_dp_size = _pick(
+        getattr(args, "judge_dp_size", None),
+        _cfg_get(cfg, "judge_dp_size", "metrics"),
+    )
+    raw_judge_tp_size = _pick(
+        getattr(args, "judge_tp_size", None),
+        _cfg_get(cfg, "judge_tp_size", "metrics"),
+    )
+    if raw_judge_dp_size is None and raw_judge_tp_size is None:
+        judge_dp_size = 1
+        judge_tp_size = dp_size * tp_size
+    else:
+        judge_dp_size = int(raw_judge_dp_size or 1)
+        judge_tp_size = int(raw_judge_tp_size or 1)
+    if judge_dp_size < 1 or judge_tp_size < 1:
+        raise ValueError("judge dp/tp sizes must both be >= 1")
+
+    cfg_judge_sglang_args = _cfg_get(cfg, "judge_sglang_args", "metrics")
+    if cfg_judge_sglang_args is not None and not isinstance(
+        cfg_judge_sglang_args, dict
+    ):
+        raise ValueError("metrics.judge_sglang_args must be a mapping/object")
+    judge_sglang_args = dict(cfg_judge_sglang_args or {})
+    judge_sglang_args.update(
+        _parse_sglang_args(getattr(args, "judge_sglang_arg", None))
+    )
+
     gen_overrides = {
         "n": _pick(args.n, _cfg_get(cfg, "n", "generation")),
         "max_new_tokens": _pick(
@@ -234,6 +270,26 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
+    if judge_backend == "local":
+        metric_options.update(
+            {
+                "judge_backend": "local",
+                "judge_dp_size": judge_dp_size,
+                "judge_tp_size": judge_tp_size,
+                "judge_sglang_args": judge_sglang_args,
+                "judge_local_max_tokens": _pick(
+                    getattr(args, "judge_local_max_tokens", None),
+                    _cfg_get(cfg, "judge_local_max_tokens", "metrics"),
+                    4096,
+                ),
+            }
+        )
+        judge_enable_thinking = _pick(
+            getattr(args, "judge_enable_thinking", None),
+            _cfg_get(cfg, "judge_enable_thinking", "metrics"),
+        )
+        if judge_enable_thinking is not None:
+            metric_options["judge_enable_thinking"] = judge_enable_thinking
 
     vllm_kwargs = {
         "gpu_memory_utilization": _pick(

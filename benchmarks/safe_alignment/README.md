@@ -23,7 +23,8 @@ aethereval \
 
 By default, scoring loads `Rihong/Qwen2.5-7B-SafeRLHF-RM` for helpfulness and
 `Rihong/Qwen2.5-7B-SafeRLHF-CM` for harmlessness. Pass `--rm-model-path` and
-`--cm-model-path` to override them with local checkpoints.
+`--cm-model-path` to override them with local checkpoints. The defaults are
+configured under `safe_alignment.metrics` in `configs/task_defaults.yaml`.
 
 The metric records three values per generation:
 

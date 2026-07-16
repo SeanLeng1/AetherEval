@@ -15,6 +15,7 @@ from aethereval.cli import (
     run_selected_tasks,
 )
 from aethereval.config import resolve_run_arguments
+from aethereval.core.task_defaults import resolve_task_default_gen
 from benchmarks.bfcl._compat import _set_bfcl_project_root
 from benchmarks.bfcl.external import (
     ExternalRunSpec,
@@ -32,6 +33,40 @@ from benchmarks.bfcl.register import register_rlla_model
 
 
 class ExternalCliTests(unittest.TestCase):
+    def test_local_judge_automatically_splits_generation_and_evaluation(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--model",
+                "candidate/model",
+                "--tasks",
+                "healthbench",
+                "--judge-backend",
+                "local",
+                "--judge-model",
+                "local/judge",
+                "--overwrite",
+            ]
+        )
+        resolved = resolve_run_arguments(args, {})
+        result = {"results": {"healthbench": {"metrics": {"score": 0.5}}}}
+
+        with mock.patch(
+            "aethereval.cli.run_evaluation",
+            side_effect=[result, result],
+        ) as run_evaluation:
+            actual = run_selected_tasks(args, resolved)
+
+        self.assertIs(actual, result)
+        self.assertEqual(run_evaluation.call_count, 2)
+        generate_call = run_evaluation.call_args_list[0].kwargs
+        evaluate_call = run_evaluation.call_args_list[1].kwargs
+        self.assertTrue(generate_call["generate_only"])
+        self.assertFalse(generate_call["eval_only"])
+        self.assertTrue(generate_call["overwrite"])
+        self.assertFalse(evaluate_call["generate_only"])
+        self.assertTrue(evaluate_call["eval_only"])
+        self.assertFalse(evaluate_call["overwrite"])
+
     def test_thinking_mode_flags_are_tri_state(self) -> None:
         parser = build_parser()
 
@@ -156,6 +191,37 @@ class ExternalCliTests(unittest.TestCase):
         self.assertFalse(spec.allow_overwrite)
         self.assertTrue(spec.run_generation)
         self.assertFalse(spec.run_evaluation)
+
+    def test_bfcl_external_spec_reads_generation_defaults_from_config(self) -> None:
+        args = build_parser().parse_args(
+            ["--tasks", "bfcl", "--model", "rlla-gdpo"]
+        )
+
+        with mock.patch(
+            "aethereval.cli.resolve_task_default_gen",
+            return_value={
+                "n": 1,
+                "max_new_tokens": 1234,
+                "temperature": 0.25,
+                "top_p": 0.8,
+                "top_k": 17,
+            },
+        ):
+            spec, _run = _build_external_spec(args, task_name="bfcl")
+
+        self.assertEqual(spec.max_tokens, 1234)
+        self.assertEqual(spec.temperature, 0.25)
+        self.assertEqual(spec.top_p, 0.8)
+        self.assertEqual(spec.top_k, 17)
+
+    def test_bfcl_python_spec_defaults_match_task_config(self) -> None:
+        configured = resolve_task_default_gen("bfcl", {})
+        spec = ExternalRunSpec(model="model", output_dir=Path("output"))
+
+        self.assertEqual(spec.max_tokens, configured["max_new_tokens"])
+        self.assertEqual(spec.temperature, configured["temperature"])
+        self.assertEqual(spec.top_p, configured["top_p"])
+        self.assertEqual(spec.top_k, configured["top_k"])
 
     def test_bfcl_external_spec_supports_unified_phase_flags(self) -> None:
         generate_args = build_parser().parse_args(

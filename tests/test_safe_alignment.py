@@ -1,6 +1,7 @@
 import unittest
 from unittest import mock
 
+from aethereval.core.task_defaults import resolve_task_default_metrics
 from aethereval.core.types import GenerationOutput, Sample
 from benchmarks.safe_alignment import metrics
 from benchmarks.safe_alignment.task import build_prompt
@@ -25,6 +26,12 @@ class _FakeBackend:
 
 
 class SafeAlignmentTests(unittest.TestCase):
+    def test_reward_model_defaults_come_from_task_config(self) -> None:
+        configured = resolve_task_default_metrics("safe_alignment")
+
+        self.assertEqual(configured["rm_model_path"], metrics.DEFAULT_RM_MODEL_PATH)
+        self.assertEqual(configured["cm_model_path"], metrics.DEFAULT_CM_MODEL_PATH)
+
     def test_eval_only_backend_uses_requested_gpu_budget_without_candidate(self) -> None:
         with mock.patch.object(
             metrics,

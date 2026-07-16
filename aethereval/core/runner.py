@@ -29,6 +29,7 @@ from aethereval.backends import (
     load_chat_tokenizer,
     render_prompt_with_chat_template,
 )
+from benchmark_utils.local_judge import OfflineJudgeClient
 
 
 _UNSCORED_META_KEY = "_aethereval_unscored"
@@ -1045,7 +1046,14 @@ def _run_single_task(
             "task": task_name,
             "task_dir": str(task_dir),
             "generation_config": gen_cfg,
-            "metric_options": {**metric_options, "n": n},
+            "metric_options": {
+                **{
+                    key: value
+                    for key, value in metric_options.items()
+                    if not str(key).startswith("_")
+                },
+                "n": n,
+            },
             "overwrite": overwrite,
             "phase": phase,
         }
@@ -1100,6 +1108,19 @@ def run_evaluation(
         raise RuntimeError(f"No tasks found in {task_root}")
 
     selected = _parse_tasks_arg(tasks, available)
+    judge_backend = str((metric_options or {}).get("judge_backend", "api")).lower()
+    if judge_backend == "local" and not generate_only and not eval_only:
+        raise ValueError(
+            "offline local judging requires disjoint candidate/judge lifecycles. "
+            "Use the CLI (which automatically runs generate-only then eval-only), "
+            "or invoke run_evaluation in those two phases explicitly."
+        )
+    if (
+        judge_backend == "local"
+        and not generate_only
+        and not str((metric_options or {}).get("judge_model", "")).strip()
+    ):
+        raise ValueError("offline local judging requires an explicit judge_model")
     out_dir = Path(output_dir)
     effective_model_name = model_output_name(model, model_name)
     this_run_id = run_id or effective_model_name
@@ -1149,6 +1170,7 @@ def run_evaluation(
         model_kwargs=effective_model_kwargs,
     )
 
+    local_judge_client: OfflineJudgeClient | None = None
     try:
         run_config_common = {
             "model": model,
@@ -1174,6 +1196,47 @@ def run_evaluation(
             task_output_dir = run_root / task_name
             task_backend = backend
             created_evaluation_backend = False
+            task_metric_options = resolve_task_default_metrics(
+                task_name, resolved_metric_options
+            )
+            uses_local_judge = (
+                not generate_only
+                and getattr(bundle.metrics_module, "USES_LLM_JUDGE", False)
+                and str(task_metric_options.get("judge_backend", "api")).lower()
+                == "local"
+            )
+            if not uses_local_judge and local_judge_client is not None:
+                local_judge_client.close()
+                local_judge_client = None
+            if uses_local_judge:
+                if local_judge_client is None:
+                    judge_model = str(task_metric_options["judge_model"])
+                    judge_dp_size = int(task_metric_options.get("judge_dp_size", 1))
+                    judge_tp_size = int(
+                        task_metric_options.get(
+                            "judge_tp_size", int(dp_size) * int(tensor_parallel_size)
+                        )
+                    )
+                    _info(
+                        f"offline judge: model={judge_model} "
+                        f"dp_size={judge_dp_size} tp_size={judge_tp_size}"
+                    )
+                    local_judge_client = OfflineJudgeClient(
+                        model=judge_model,
+                        dp_size=judge_dp_size,
+                        tensor_parallel_size=judge_tp_size,
+                        model_kwargs=dict(
+                            task_metric_options.get("judge_sglang_args", {})
+                        ),
+                        batch_size=int(task_metric_options.get("judge_workers", 64)),
+                        default_max_tokens=int(
+                            task_metric_options.get("judge_local_max_tokens", 4096)
+                        ),
+                        enable_thinking=task_metric_options.get(
+                            "judge_enable_thinking"
+                        ),
+                    )
+                task_metric_options["_judge_client"] = local_judge_client
             if (
                 eval_only
                 and task_backend is None
@@ -1187,9 +1250,6 @@ def run_evaluation(
                         f"[{task_name}] eval-only metrics require a backend but do "
                         "not provide create_evaluation_backend()."
                     )
-                task_metric_options = resolve_task_default_metrics(
-                    task_name, resolved_metric_options
-                )
                 task_backend = create_evaluation_backend(
                     task_metric_options,
                     dp_size=int(dp_size),
@@ -1209,7 +1269,7 @@ def run_evaluation(
                     backend=task_backend,
                     task_output_dir=task_output_dir,
                     gen_overrides=gen_overrides or {},
-                    metric_options=resolved_metric_options,
+                    metric_options=task_metric_options,
                     overwrite=overwrite,
                     run_config_common=run_config_common,
                     tokenizer_getter=get_tokenizer,
@@ -1259,6 +1319,8 @@ def run_evaluation(
         _info(f"run_summary_path={run_root / 'run_summary.json'}")
         return run_summary
     finally:
+        if local_judge_client is not None:
+            local_judge_client.close()
         if created_backend:
             backend.close()
 

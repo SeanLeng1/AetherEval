@@ -7,6 +7,36 @@ from aethereval.config import load_yaml_config, resolve_run_arguments
 
 
 class ConfigTests(unittest.TestCase):
+    def test_local_judge_defaults_to_all_runtime_gpus_as_tensor_parallel(self) -> None:
+        from aethereval.cli import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "--model",
+                "candidate/model",
+                "--dp-size",
+                "4",
+                "--tp-size",
+                "2",
+                "--judge-backend",
+                "local",
+                "--judge-model",
+                "local/judge",
+                "--judge-sglang-arg",
+                "context_length=32768",
+            ]
+        )
+
+        resolved = resolve_run_arguments(args, {})
+
+        self.assertEqual(resolved["metric_options"]["judge_backend"], "local")
+        self.assertEqual(resolved["metric_options"]["judge_dp_size"], 1)
+        self.assertEqual(resolved["metric_options"]["judge_tp_size"], 8)
+        self.assertEqual(
+            resolved["metric_options"]["judge_sglang_args"]["context_length"],
+            32768,
+        )
+
     def test_load_yaml_and_resolve(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "run.yaml"

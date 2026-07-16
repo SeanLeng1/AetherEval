@@ -493,6 +493,7 @@ class SGLangBackend:
                     payloads=payloads,
                     gen_cfg=gen_cfg,
                     batch_size=self._generation_batch_size,
+                    show_progress=bool(gen_cfg.get("_show_progress", True)),
                 )
 
             def score_reward_models_shard(
@@ -555,6 +556,7 @@ class SGLangBackend:
                 payloads=payloads,
                 gen_cfg=gen_cfg,
                 batch_size=self.generation_batch_size,
+                show_progress=bool(gen_cfg.get("_show_progress", True)),
             )
         else:
             assert self._ray is not None

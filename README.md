@@ -47,7 +47,7 @@ aethereval \
   --max-new-tokens 256
 ```
 
-`dp-size` and `tp-size` default to `1`, so you only need to set them when overriding.
+`dp-size` and `tp-size` default to `1`, so you only need to set them when overriding.f
 If `--run-id` is not provided, the default is:
 `<model_suffix_lower>`, for example:
 `qwen3-0.6b-base`.
@@ -221,7 +221,8 @@ aethereval \
 
 `safe_alignment` defaults to `Rihong/Qwen2.5-7B-SafeRLHF-RM` and
 `Rihong/Qwen2.5-7B-SafeRLHF-CM`; pass `--rm-model-path` and `--cm-model-path`
-only when overriding with local checkpoints.
+only when overriding with local checkpoints. These task-specific defaults live
+under `safe_alignment.metrics` in `configs/task_defaults.yaml`.
 
 Optional RM metric flags include `--rm-batch-size`, `--rm-max-length`,
 `--rm-device`, `--rm-dtype`, and `--rm-trust-remote-code`.
@@ -263,6 +264,46 @@ For an unauthenticated local endpoint, set `AETHEREVAL_JUDGE_API_KEY=-`. Optiona
 overrides are `--judge-model`, `--judge-base-url`, `--judge-api-key-env`,
 `--judge-workers`, `--judge-timeout`, `--judge-max-retries`, and
 `--judge-repeats` (the last one controls LLMEval-Med's three-run protocol).
+
+The same native judge benchmarks can instead load a local judge directly into an
+offline SGLang engine, without starting an HTTP server:
+
+```bash
+aethereval \
+  --model /path/to/candidate \
+  --model-name candidate \
+  --tasks healthbench \
+  --output-dir /output \
+  --run-id production-1 \
+  --dp-size 8 \
+  --tp-size 1 \
+  --judge-backend local \
+  --judge-model openai/gpt-oss-120b \
+  --judge-tp-size 8 \
+  --judge-sglang-arg context_length=131072 \
+  --judge-sglang-arg mem_fraction_static=0.8
+```
+
+If judge DP/TP are omitted, the offline judge defaults to one TP replica across
+the candidate run's total `dp_size * tp_size` GPU budget. `--judge-dp-size` and
+`--judge-tp-size` can override that topology. `--judge-workers` controls both the
+number of metric workers feeding the judge and the maximum offline request batch.
+Judge-specific thinking can be set with `--judge-enable-thinking` or
+`--no-judge-enable-thinking`.
+
+For a normal generate-and-evaluate invocation, local mode automatically runs the
+candidate generation phase first, shuts the candidate backend down, and then
+loads the judge in eval-only mode. Candidate and judge weights therefore never
+occupy GPU memory at the same time. Explicit `--generate-only` and `--eval-only`
+commands remain supported as well.
+
+Local judging is opt-in. It preserves each benchmark's existing judge prompt,
+sampling settings, and parser, but replacing its official GPT/Claude judge with a
+local model changes the evaluation model and the resulting score is not directly
+leaderboard-comparable. AetherRL and `/tmp/verl-rubric` also use a local
+generative judge (typically GPT-OSS), but their HealthBench reward path batches
+all rubrics into a different single prompt, so it is not exactly the official
+HealthBench judging protocol used here.
 
 The benchmark folders document the pinned candidate and judge decoding settings.
 CLI generation flags still override candidate defaults, so avoid global
