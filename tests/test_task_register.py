@@ -113,7 +113,7 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["math500"]["n"], 16)
         self.assertEqual(defaults["minerva"]["n"], 16)
         self.assertEqual(defaults["olympiad_bench"]["n"], 16)
-        self.assertEqual(defaults["safe_alignment"]["n"], 1)
+        self.assertEqual(defaults["safe_alignment"]["n"], 4)
         self.assertEqual(defaults["safe_alignment"]["max_new_tokens"], 1024)
         self.assertEqual(defaults["apibank"]["n"], 1)
         self.assertEqual(defaults["apibank"]["max_new_tokens"], 4096)

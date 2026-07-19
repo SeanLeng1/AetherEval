@@ -80,8 +80,6 @@ def score_generations_batch(
             text = chat_completion(
                 settings,
                 [{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=4096,
             )
             scores = _parse_scores(text)
             if scores:

@@ -128,8 +128,6 @@ def score_generations_batch(
                     {"role": "system", "content": SYSTEM_MESSAGE},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.5,
-                max_tokens=2048,
             )
             try:
                 parsed = parse_json_object(text)

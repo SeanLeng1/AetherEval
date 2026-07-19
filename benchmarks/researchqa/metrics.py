@@ -73,7 +73,6 @@ def score_generations_batch(
             last_output = chat_completion(
                 settings,
                 [{"role": "user", "content": prompt}],
-                temperature=0.0,
             )
             labels = [line.strip() for line in last_output.splitlines() if line.strip()]
             if len(labels) == len(rubrics) and all(label in LABELS for label in labels):

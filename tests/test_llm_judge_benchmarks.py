@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -10,8 +11,11 @@ from aethereval.core.runner import run_evaluation
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from aethereval.core.task_register import load_task
 from aethereval.core.types import GenerationInput, GenerationOutput
-from benchmark_utils.llm_judge import parse_json_object, resolve_judge_settings
-
+from benchmark_utils.llm_judge import (
+    chat_completion,
+    parse_json_object,
+    resolve_judge_settings,
+)
 
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 
@@ -52,18 +56,22 @@ class NeverGenerateBackend:
 class LlmJudgeBenchmarkTests(unittest.TestCase):
     def test_official_judge_models_come_from_task_defaults(self) -> None:
         expected = {
-            "llmeval_med": "gpt-4o",
-            "healthbench": "gpt-4.1-2025-04-14",
-            "writingbench": "claude-sonnet-4-5",
-            "creative_writing_v3": "claude-sonnet-4-6",
-            "researchqa": "gpt-4.1-mini",
-            "arena_hard_v2": "gpt-4.1",
+            "llmeval_med": ("gpt-4o", None, None, None),
+            "healthbench": ("gpt-4.1-2025-04-14", 0.5, None, 2048),
+            "writingbench": ("claude-sonnet-4-5", 1.0, 0.95, 2048),
+            "creative_writing_v3": ("claude-sonnet-4-6", 0.0, None, 4096),
+            "researchqa": ("gpt-4.1-mini", 0.0, None, None),
+            "arena_hard_v2": ("gpt-4.1", 0.0, None, 16000),
         }
-        for task_name, judge_model in expected.items():
+        for task_name, judge_defaults in expected.items():
             with self.subTest(task=task_name):
+                judge_model, temperature, top_p, max_new_tokens = judge_defaults
                 defaults = resolve_task_default_metrics(task_name)
                 bundle = load_task(task_name, BENCHMARKS)
                 self.assertEqual(defaults["judge_model"], judge_model)
+                self.assertEqual(defaults["judge_temperature"], temperature)
+                self.assertEqual(defaults["judge_top_p"], top_p)
+                self.assertEqual(defaults["judge_max_new_tokens"], max_new_tokens)
                 self.assertEqual(
                     bundle.metrics_module.DEFAULT_JUDGE_MODEL,
                     judge_model,
@@ -110,7 +118,46 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             parse_json_object('prefix {"score": 8, "reason": "ok"} suffix')["score"],
             8,
         )
-        self.assertTrue(parse_json_object('```json\n{"criteria_met": true}\n```')["criteria_met"])
+        self.assertTrue(
+            parse_json_object('```json\n{"criteria_met": true}\n```')["criteria_met"]
+        )
+
+    def test_api_judge_uses_resolved_sampling_and_thinking_defaults(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"AETHEREVAL_JUDGE_API_KEY": "secret"},
+            clear=True,
+        ):
+            settings = resolve_judge_settings(
+                {
+                    "judge_temperature": 0.25,
+                    "judge_max_new_tokens": 512,
+                    "judge_top_p": 0.9,
+                    "judge_enable_thinking": False,
+                },
+                default_model="judge-default",
+            )
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            b'{"choices":[{"message":{"content":"ok"}}]}'
+        )
+        with mock.patch(
+            "benchmark_utils.llm_judge.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            result = chat_completion(
+                settings,
+                [{"role": "user", "content": "grade"}],
+            )
+
+        self.assertEqual(result, "ok")
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["temperature"], 0.25)
+        self.assertEqual(payload["max_tokens"], 512)
+        self.assertEqual(payload["top_p"], 0.9)
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
 
     def test_judge_cli_options_are_forwarded_to_metrics_only(self) -> None:
         args = build_parser().parse_args(
@@ -133,6 +180,13 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 "7",
                 "--judge-repeats",
                 "3",
+                "--judge-max-new-tokens",
+                "8192",
+                "--judge-temperature",
+                "0.25",
+                "--judge-top-p",
+                "0.9",
+                "--no-judge-enable-thinking",
             ]
         )
         resolved = resolve_run_arguments(args, {})
@@ -146,6 +200,10 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 "judge_timeout": 45.0,
                 "judge_max_retries": 7,
                 "judge_repeats": 3,
+                "judge_max_new_tokens": 8192,
+                "judge_temperature": 0.25,
+                "judge_top_p": 0.9,
+                "judge_enable_thinking": False,
             },
         )
         self.assertNotIn("judge_model", resolved["backend_kwargs"])
@@ -171,9 +229,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             task_dir = root / "hooked"
             data_dir = task_dir / "data"
             data_dir.mkdir(parents=True)
-            (data_dir / "eval.jsonl").write_text(
-                '{"id":"one"}\n', encoding="utf-8"
-            )
+            (data_dir / "eval.jsonl").write_text('{"id":"one"}\n', encoding="utf-8")
             (task_dir / "task.py").write_text(
                 "from aethereval.core.types import GenerationOutput, Sample\n"
                 "TASK_NAME='hooked'\n"
@@ -251,14 +307,14 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(len(outputs), 2)
         second_prompt = backend.calls[1][0].prompt
-        self.assertIn(
-            {"role": "assistant", "content": "first answer"}, second_prompt
-        )
+        self.assertIn({"role": "assistant", "content": "first answer"}, second_prompt)
         self.assertIn(
             {"role": "user", "content": turns[0].data["problem"]}, second_prompt
         )
 
-    def test_writingbench_requirement_aggregation_matches_upstream_formula(self) -> None:
+    def test_writingbench_requirement_aggregation_matches_upstream_formula(
+        self,
+    ) -> None:
         metrics = load_task("writingbench", BENCHMARKS).metrics_module
         sample_results = [
             {
@@ -304,17 +360,13 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 )[0][0]["score"]
             rubrics = health_sample.data["rubrics"]
             expected_health = sum(float(item["points"]) for item in rubrics) / sum(
-                float(item["points"])
-                for item in rubrics
-                if float(item["points"]) > 0
+                float(item["points"]) for item in rubrics if float(item["points"]) > 0
             )
             self.assertEqual(health_score, expected_health)
 
             writing = load_task("writingbench", BENCHMARKS)
             writing_sample = writing.task_module.load_samples(writing.spec.task_dir)[0]
-            writing_output = GenerationOutput(
-                writing_sample.id, "prompt", ["response"]
-            )
+            writing_output = GenerationOutput(writing_sample.id, "prompt", ["response"])
             with mock.patch.object(
                 writing.metrics_module,
                 "chat_completion",
@@ -326,7 +378,9 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             self.assertEqual(writing_score, 8.0)
 
             creative = load_task("creative_writing_v3", BENCHMARKS)
-            creative_sample = creative.task_module.load_samples(creative.spec.task_dir)[0]
+            creative_sample = creative.task_module.load_samples(creative.spec.task_dir)[
+                0
+            ]
             creative_output = GenerationOutput(
                 creative_sample.id, "prompt", ["x" * 500]
             )
@@ -348,9 +402,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             research_sample = next(
                 sample for sample in research_samples if len(sample.data["rubric"]) <= 8
             )
-            research_output = GenerationOutput(
-                research_sample.id, "prompt", ["answer"]
-            )
+            research_output = GenerationOutput(research_sample.id, "prompt", ["answer"])
             research_judgment = "\n".join(
                 "Completely" for _ in research_sample.data["rubric"]
             )

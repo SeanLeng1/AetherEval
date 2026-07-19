@@ -268,6 +268,22 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             getattr(args, "judge_repeats", None),
             _cfg_get(cfg, "judge_repeats", "metrics"),
         ),
+        "judge_max_new_tokens": _pick(
+            getattr(args, "judge_max_new_tokens", None),
+            _cfg_get(cfg, "judge_max_new_tokens", "metrics"),
+        ),
+        "judge_temperature": _pick(
+            getattr(args, "judge_temperature", None),
+            _cfg_get(cfg, "judge_temperature", "metrics"),
+        ),
+        "judge_top_p": _pick(
+            getattr(args, "judge_top_p", None),
+            _cfg_get(cfg, "judge_top_p", "metrics"),
+        ),
+        "judge_enable_thinking": _pick(
+            getattr(args, "judge_enable_thinking", None),
+            _cfg_get(cfg, "judge_enable_thinking", "metrics"),
+        ),
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
     if judge_backend == "local":
@@ -277,19 +293,8 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
                 "judge_dp_size": judge_dp_size,
                 "judge_tp_size": judge_tp_size,
                 "judge_sglang_args": judge_sglang_args,
-                "judge_local_max_tokens": _pick(
-                    getattr(args, "judge_local_max_tokens", None),
-                    _cfg_get(cfg, "judge_local_max_tokens", "metrics"),
-                    4096,
-                ),
             }
         )
-        judge_enable_thinking = _pick(
-            getattr(args, "judge_enable_thinking", None),
-            _cfg_get(cfg, "judge_enable_thinking", "metrics"),
-        )
-        if judge_enable_thinking is not None:
-            metric_options["judge_enable_thinking"] = judge_enable_thinking
 
     vllm_kwargs = {
         "gpu_memory_utilization": _pick(

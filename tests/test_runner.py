@@ -20,7 +20,9 @@ class FakeTokenizer:
         add_generation_prompt: bool = True,
     ) -> str:
         del tokenize, add_generation_prompt
-        return "\n".join(f"{message['role']}: {message['content']}" for message in prompt)
+        return "\n".join(
+            f"{message['role']}: {message['content']}" for message in prompt
+        )
 
 
 class FakeBackend:
@@ -244,8 +246,7 @@ class RunnerTests(unittest.TestCase):
             _write_toy_benchmark(root)
             metrics_path = root / "toy" / "metrics.py"
             metrics_path.write_text(
-                "USES_LLM_JUDGE = True\n"
-                + metrics_path.read_text(encoding="utf-8"),
+                "USES_LLM_JUDGE = True\n" + metrics_path.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             out = Path(tmp) / "outputs"
@@ -277,7 +278,7 @@ class RunnerTests(unittest.TestCase):
                         "judge_dp_size": 1,
                         "judge_tp_size": 2,
                         "judge_workers": 8,
-                        "judge_local_max_tokens": 1024,
+                        "judge_max_new_tokens": 1024,
                         "judge_sglang_args": {"context_length": 8192},
                     },
                 )
@@ -289,17 +290,9 @@ class RunnerTests(unittest.TestCase):
                 tensor_parallel_size=2,
                 model_kwargs={"context_length": 8192},
                 batch_size=8,
-                default_max_tokens=1024,
-                enable_thinking=None,
             )
             judge.close.assert_called_once_with()
-            run_config_path = (
-                out
-                / "model"
-                / "local_judge"
-                / "toy"
-                / "run_config.json"
-            )
+            run_config_path = out / "model" / "local_judge" / "toy" / "run_config.json"
             with run_config_path.open(encoding="utf-8") as f:
                 run_config = json.load(f)
             self.assertNotIn("_judge_client", run_config["metric_options"])
@@ -378,9 +371,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(evaluated_summary["rescored_records"], 4)
             self.assertEqual(evaluated_summary["unscored_records"], 0)
             self.assertTrue(evaluated_summary["evaluation_complete"])
-            self.assertAlmostEqual(
-                evaluated_summary["metrics"]["accuracy_first"], 1.0
-            )
+            self.assertAlmostEqual(evaluated_summary["metrics"]["accuracy_first"], 1.0)
 
             with predictions_path.open(encoding="utf-8") as f:
                 scored_rows = [json.loads(line) for line in f if line.strip()]
@@ -623,9 +614,7 @@ class RunnerTests(unittest.TestCase):
             self.assertAlmostEqual(
                 float(first["primary_score_aggregate"]), 1.0, places=6
             )
-            predictions_path = (
-                out / "fake-model" / "run1" / "toy" / "predictions.jsonl"
-            )
+            predictions_path = out / "fake-model" / "run1" / "toy" / "predictions.jsonl"
             with predictions_path.open("r", encoding="utf-8") as f:
                 first_row = json.loads(f.readline())
             self.assertIsInstance(first_row["prompt"], list)
@@ -665,11 +654,7 @@ class RunnerTests(unittest.TestCase):
             summary = result["results"]["batch_toy"]
             self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0, places=6)
             predictions_path = (
-                out
-                / "fake-model"
-                / "batch_run"
-                / "batch_toy"
-                / "predictions.jsonl"
+                out / "fake-model" / "batch_run" / "batch_toy" / "predictions.jsonl"
             )
             with predictions_path.open("r", encoding="utf-8") as f:
                 rows = [json.loads(line) for line in f if line.strip()]
@@ -717,11 +702,7 @@ class RunnerTests(unittest.TestCase):
             self.assertAlmostEqual(summary["metrics"]["accuracy_first"], 0.0, places=6)
 
             predictions_path = (
-                out
-                / "fake-model"
-                / "run_rescore"
-                / "toy"
-                / "predictions.jsonl"
+                out / "fake-model" / "run_rescore" / "toy" / "predictions.jsonl"
             )
             with predictions_path.open("r", encoding="utf-8") as f:
                 rows = [json.loads(line) for line in f if line.strip()]
@@ -879,9 +860,7 @@ class RunnerTests(unittest.TestCase):
                 )
 
             self.assertTrue(
-                inspected["results"]["toy"][0]["prompt"].startswith(
-                    "thinking=False:"
-                )
+                inspected["results"]["toy"][0]["prompt"].startswith("thinking=False:")
             )
 
     def test_run_summary_includes_existing_tasks_under_same_run_id(self) -> None:

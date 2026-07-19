@@ -76,6 +76,15 @@ class ExternalCliTests(unittest.TestCase):
             parser.parse_args(["--no-enable-thinking"]).enable_thinking,
             False,
         )
+        self.assertIsNone(parser.parse_args([]).judge_enable_thinking)
+        self.assertIs(
+            parser.parse_args(["--judge-enable-thinking"]).judge_enable_thinking,
+            True,
+        )
+        self.assertIs(
+            parser.parse_args(["--no-judge-enable-thinking"]).judge_enable_thinking,
+            False,
+        )
 
     def test_bfcl_smg_readiness_waits_for_all_workers(self) -> None:
         class Response:
@@ -193,9 +202,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertFalse(spec.run_evaluation)
 
     def test_bfcl_external_spec_reads_generation_defaults_from_config(self) -> None:
-        args = build_parser().parse_args(
-            ["--tasks", "bfcl", "--model", "rlla-gdpo"]
-        )
+        args = build_parser().parse_args(["--tasks", "bfcl", "--model", "rlla-gdpo"])
 
         with mock.patch(
             "aethereval.cli.resolve_task_default_gen",
@@ -300,9 +307,7 @@ class ExternalCliTests(unittest.TestCase):
         spec, _run = _build_external_spec(args, task_name="bfcl")
 
         self.assertEqual(resolved["backend_kwargs"]["context_length"], 32768)
-        self.assertNotIn(
-            "json_model_override_args", resolved["backend_kwargs"]
-        )
+        self.assertNotIn("json_model_override_args", resolved["backend_kwargs"])
         self.assertEqual(spec.max_context_length, 131072)
         self.assertEqual(spec.sglang_server_args["chunked_prefill_size"], 4096)
         self.assertEqual(spec.sglang_server_args["schedule_conservativeness"], 0.3)
@@ -368,14 +373,10 @@ class ExternalCliTests(unittest.TestCase):
 
             self.assertEqual(result["selected_tasks"], ["bfcl"])
             self.assertEqual(result["tasks"], ["bfcl"])
-            self.assertEqual(
-                result["results"]["bfcl"]["primary_metric"], "OverallAcc"
-            )
+            self.assertEqual(result["results"]["bfcl"]["primary_metric"], "OverallAcc")
             self.assertEqual(result["results"]["bfcl"]["primary_score"], 0.0)
             self.assertTrue((out / "dry-model" / "bfcl" / "summary.json").exists())
-            self.assertTrue(
-                (out / "dry-model" / "bfcl" / "predictions.jsonl").exists()
-            )
+            self.assertTrue((out / "dry-model" / "bfcl" / "predictions.jsonl").exists())
             self.assertTrue((out / "dry-model" / "run_summary.json").exists())
 
     def test_bfcl_model_name_and_explicit_run_id_match_native_layout(self) -> None:
@@ -405,13 +406,7 @@ class ExternalCliTests(unittest.TestCase):
             self.assertEqual(result["model"], model)
             self.assertEqual(result["model_name"], model_name)
             self.assertTrue(
-                (
-                    out
-                    / model_name
-                    / "production-1"
-                    / "bfcl"
-                    / "summary.json"
-                ).exists()
+                (out / model_name / "production-1" / "bfcl" / "summary.json").exists()
             )
 
             spec, _run = _build_external_spec(args, task_name="bfcl")
@@ -461,8 +456,10 @@ class ExternalCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (score_model_dir / "BFCL_simple_score.json").write_text(
-                json.dumps({"accuracy": 0.5}) + "\n"
-                + json.dumps({"id": "simple_2", "valid": False}) + "\n",
+                json.dumps({"accuracy": 0.5})
+                + "\n"
+                + json.dumps({"id": "simple_2", "valid": False})
+                + "\n",
                 encoding="utf-8",
             )
 

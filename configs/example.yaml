@@ -26,6 +26,12 @@ metrics:
   bootstrap_seed: 42
   bootstrap_confidence: 0.95
   judge_backend: "api"  # api | local
+  # Leave judge sampling unset to use each task's aligned defaults.
+  judge_model: null
+  judge_max_new_tokens: null
+  judge_temperature: null
+  judge_top_p: null
+  judge_enable_thinking: null  # true | false | null (preserve task/backend default)
 
 vllm:
   gpu_memory_utilization: 0.8

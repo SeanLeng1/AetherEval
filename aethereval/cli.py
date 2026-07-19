@@ -85,8 +85,10 @@ def _build_external_spec(
 ) -> tuple[Any, Any]:
     _require_external_common(args)
     backend = args.backend or "sglang"
-    effective_output_dir = Path(output_dir) if output_dir is not None else Path(
-        args.output_dir or "outputs"
+    effective_output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(args.output_dir or "outputs")
     )
 
     if task_name == "bfcl":
@@ -109,9 +111,7 @@ def _build_external_spec(
             tp_size = int(
                 args.tp_size
                 if args.tp_size is not None
-                else args.num_gpus
-                if args.num_gpus is not None
-                else 1
+                else args.num_gpus if args.num_gpus is not None else 1
             )
         num_gpus = dp_size * tp_size
         if args.num_gpus is not None and int(args.num_gpus) != num_gpus:
@@ -125,9 +125,7 @@ def _build_external_spec(
             else bool(args.bfcl_use_sglang_router)
         )
         backend_kwargs = dict(getattr(args, "backend_kwargs", {}) or {})
-        bfcl_sglang_kwargs = _parse_sglang_args(
-            getattr(args, "bfcl_sglang_arg", None)
-        )
+        bfcl_sglang_kwargs = _parse_sglang_args(getattr(args, "bfcl_sglang_arg", None))
         bfcl_backend_kwargs = {**backend_kwargs, **bfcl_sglang_kwargs}
         if backend == "sglang":
             bfcl_backend_kwargs.setdefault("log_level", "warning")
@@ -162,14 +160,14 @@ def _build_external_spec(
             gpu_memory_utilization=(
                 mem_fraction_static
                 if backend == "sglang" and mem_fraction_static is not None
-                else args.gpu_memory_utilization
-                if args.gpu_memory_utilization is not None
-                else 0.9
+                else (
+                    args.gpu_memory_utilization
+                    if args.gpu_memory_utilization is not None
+                    else 0.9
+                )
             ),
             dtype=str(dtype if dtype is not None else "bfloat16"),
-            sglang_server_args=(
-                bfcl_backend_kwargs if backend == "sglang" else {}
-            ),
+            sglang_server_args=(bfcl_backend_kwargs if backend == "sglang" else {}),
             temperature=(
                 args.temperature
                 if args.temperature is not None
@@ -183,9 +181,11 @@ def _build_external_spec(
             max_context_length=(
                 args.bfcl_context_length
                 if getattr(args, "bfcl_context_length", None) is not None
-                else args.context_length
-                if args.context_length is not None
-                else args.max_model_len
+                else (
+                    args.context_length
+                    if args.context_length is not None
+                    else args.max_model_len
+                )
             ),
             top_p=(
                 args.top_p
@@ -212,7 +212,9 @@ def _build_external_spec(
     raise ValueError(f"Unknown external task: {task_name}")
 
 
-def _mean_numeric_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[str, float]:
+def _mean_numeric_metrics(
+    task_summaries: dict[str, dict[str, Any]],
+) -> dict[str, float]:
     grouped: dict[str, list[float]] = {}
     for summary in task_summaries.values():
         metrics = summary.get("metrics", {})
@@ -221,11 +223,7 @@ def _mean_numeric_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[str
         for key, value in metrics.items():
             if isinstance(value, (int, float)):
                 grouped.setdefault(str(key), []).append(float(value))
-    return {
-        key: sum(values) / len(values)
-        for key, values in grouped.items()
-        if values
-    }
+    return {key: sum(values) / len(values) for key, values in grouped.items() if values}
 
 
 def _mean_primary_score(task_summaries: dict[str, dict[str, Any]]) -> float | None:
@@ -261,7 +259,9 @@ def _load_existing_task_summaries(
     return summaries
 
 
-def _external_summary(task_name: str, task_output_dir: Path, result: Any) -> dict[str, Any]:
+def _external_summary(
+    task_name: str, task_output_dir: Path, result: Any
+) -> dict[str, Any]:
     summary_path = task_output_dir / "summary.json"
     if summary_path.exists():
         with summary_path.open("r", encoding="utf-8") as f:
@@ -323,9 +323,7 @@ def run_selected_tasks(
     args: argparse.Namespace,
     resolved: dict[str, Any],
 ) -> dict[str, Any]:
-    if resolved["inspect"] and (
-        resolved["generate_only"] or resolved["eval_only"]
-    ):
+    if resolved["inspect"] and (resolved["generate_only"] or resolved["eval_only"]):
         raise ValueError("--inspect cannot be combined with a phase-only mode")
     if resolved["generate_only"] and args.skip_generation:
         raise ValueError("--generate-only cannot be combined with --skip-generation")
@@ -364,6 +362,7 @@ def run_selected_tasks(
 
     native_result: dict[str, Any] | None = None
     if native_tasks:
+
         def run_native_phase(
             *,
             generate_only: bool,
@@ -394,11 +393,7 @@ def run_selected_tasks(
             str(resolved["metric_options"].get("judge_backend", "api")).lower()
             == "local"
         )
-        if (
-            local_judge
-            and not resolved["generate_only"]
-            and not resolved["eval_only"]
-        ):
+        if local_judge and not resolved["generate_only"] and not resolved["eval_only"]:
             _info(
                 "offline judge selected: generating candidates first, then "
                 "restarting in eval-only mode so candidate and judge models do "
@@ -489,9 +484,7 @@ def run_selected_tasks(
         phase=(
             "generate_only"
             if resolved["generate_only"]
-            else "eval_only"
-            if resolved["eval_only"]
-            else "generate_and_eval"
+            else "eval_only" if resolved["eval_only"] else "generate_and_eval"
         ),
         task_summaries=task_summaries,
     )
@@ -718,6 +711,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override benchmark-specific judge repetition count.",
     )
     parser.add_argument(
+        "--judge-max-new-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Override judge max new tokens for every selected task. Omit to use "
+            "each task's aligned default."
+        ),
+    )
+    parser.add_argument(
+        "--judge-temperature",
+        type=float,
+        default=None,
+        help=(
+            "Override judge temperature for every selected task. Omit to use "
+            "each task's aligned default."
+        ),
+    )
+    parser.add_argument(
+        "--judge-top-p",
+        type=float,
+        default=None,
+        help=(
+            "Override judge top-p for every selected task. Omit to use each "
+            "task's aligned default."
+        ),
+    )
+    parser.add_argument(
+        "--judge-enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Pass enable_thinking=true/false to the judge chat template. Omit "
+            "both forms to preserve each task/backend default."
+        ),
+    )
+    parser.add_argument(
         "--judge-dp-size",
         type=int,
         default=None,
@@ -731,18 +760,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Offline judge tensor-parallel size.",
-    )
-    parser.add_argument(
-        "--judge-local-max-tokens",
-        type=int,
-        default=None,
-        help="Offline judge max-token fallback when a benchmark does not specify one.",
-    )
-    parser.add_argument(
-        "--judge-enable-thinking",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override the offline judge model's thinking chat-template mode.",
     )
     parser.add_argument(
         "--judge-sglang-arg",
@@ -902,9 +919,7 @@ def main() -> None:
     phase = (
         "generate_only"
         if resolved["generate_only"]
-        else "eval_only"
-        if resolved["eval_only"]
-        else "generate_and_eval"
+        else "eval_only" if resolved["eval_only"] else "generate_and_eval"
     )
     _info(f"phase={phase}")
     _info(

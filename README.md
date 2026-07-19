@@ -241,11 +241,24 @@ OpenAI-compatible chat-completions endpoint only for judging:
 - `arena_hard_v2` — 500 hard prompts, GPT-4.1 judge, primary
   `style_controlled_win_rate`.
 
-The official per-task judge model defaults live under each task's `metrics`
-section in `configs/task_defaults.yaml`. `--judge-model` overrides that value
-for every task selected in the current invocation; omitting it preserves the
-official task-specific defaults. Metric defaults are kept separate from the
-candidate generation kwargs.
+The aligned per-task judge model and sampling defaults live under each task's
+`metrics` section in `configs/task_defaults.yaml`. Judge resolution follows the
+same rule as candidate generation: CLI/config values override every selected
+task, while omitted values preserve each task's own defaults. Judge settings
+remain separate from candidate generation settings.
+
+| Task | Judge temperature | Judge top-p | Judge max new tokens |
+| --- | ---: | ---: | ---: |
+| `llmeval_med` | provider default | provider default | provider default |
+| `healthbench` | 0.5 | provider default | 2048 |
+| `writingbench` | 1.0 | 0.95 | 2048 |
+| `creative_writing_v3` | 0.0 | provider default | 4096 |
+| `researchqa` | 0.0 | provider default | provider default |
+| `arena_hard_v2` | 0.0 | provider default | 16000 |
+
+`provider default` is represented by an explicit YAML `null` because the
+upstream benchmark does not set that field. API judging omits it from the
+request; local judging uses the offline backend's native fallback.
 
 Set the judge endpoint independently from the candidate backend:
 
@@ -264,6 +277,8 @@ For an unauthenticated local endpoint, set `AETHEREVAL_JUDGE_API_KEY=-`. Optiona
 overrides are `--judge-model`, `--judge-base-url`, `--judge-api-key-env`,
 `--judge-workers`, `--judge-timeout`, `--judge-max-retries`, and
 `--judge-repeats` (the last one controls LLMEval-Med's three-run protocol).
+Judge sampling can be overridden independently with
+`--judge-max-new-tokens`, `--judge-temperature`, and `--judge-top-p`.
 
 The same native judge benchmarks can instead load a local judge directly into an
 offline SGLang engine, without starting an HTTP server:
@@ -289,7 +304,9 @@ the candidate run's total `dp_size * tp_size` GPU budget. `--judge-dp-size` and
 `--judge-tp-size` can override that topology. `--judge-workers` controls both the
 number of metric workers feeding the judge and the maximum offline request batch.
 Judge-specific thinking can be set with `--judge-enable-thinking` or
-`--no-judge-enable-thinking`.
+`--no-judge-enable-thinking`. This is applied directly to local judges and sent
+as `chat_template_kwargs.enable_thinking` to compatible OpenAI-style judge
+endpoints. Omitting both flags preserves the task/backend default.
 
 For a normal generate-and-evaluate invocation, local mode automatically runs the
 candidate generation phase first, shuts the candidate backend down, and then

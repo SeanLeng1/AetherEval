@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, TypeVar
 
-
 T = TypeVar("T")
 R = TypeVar("R")
 
@@ -24,6 +23,10 @@ class JudgeSettings:
     workers: int
     timeout: float
     max_retries: int
+    temperature: float | None
+    max_new_tokens: int | None
+    top_p: float | None
+    enable_thinking: bool | None
     local_client: Any | None = None
 
 
@@ -68,12 +71,27 @@ def resolve_judge_settings(
     workers = int(options.get("judge_workers", 64))
     timeout = float(options.get("judge_timeout", 300.0))
     max_retries = int(options.get("judge_max_retries", 5))
+    raw_temperature = options.get("judge_temperature")
+    temperature = None if raw_temperature is None else float(raw_temperature)
+    raw_max_new_tokens = options.get("judge_max_new_tokens")
+    max_new_tokens = None if raw_max_new_tokens is None else int(raw_max_new_tokens)
+    raw_top_p = options.get("judge_top_p")
+    top_p = None if raw_top_p is None else float(raw_top_p)
+    enable_thinking = options.get("judge_enable_thinking")
     if workers < 1:
         raise ValueError("judge_workers must be >= 1")
     if timeout <= 0:
         raise ValueError("judge_timeout must be > 0")
     if max_retries < 0:
         raise ValueError("judge_max_retries must be >= 0")
+    if temperature is not None and temperature < 0:
+        raise ValueError("judge_temperature must be >= 0")
+    if max_new_tokens is not None and max_new_tokens < 1:
+        raise ValueError("judge_max_new_tokens must be >= 1")
+    if top_p is not None and not 0 < top_p <= 1:
+        raise ValueError("judge_top_p must be in (0, 1]")
+    if enable_thinking is not None and not isinstance(enable_thinking, bool):
+        raise ValueError("judge_enable_thinking must be true or false")
 
     return JudgeSettings(
         model=model,
@@ -82,6 +100,10 @@ def resolve_judge_settings(
         workers=workers,
         timeout=timeout,
         max_retries=max_retries,
+        temperature=temperature,
+        max_new_tokens=max_new_tokens,
+        top_p=top_p,
+        enable_thinking=enable_thinking,
         local_client=local_client,
     )
 
@@ -96,30 +118,49 @@ def chat_completion(
     seed: int | None = None,
     extra_body: dict[str, Any] | None = None,
 ) -> str:
+    effective_temperature = (
+        settings.temperature if temperature is None else float(temperature)
+    )
+    effective_max_tokens = (
+        settings.max_new_tokens if max_tokens is None else int(max_tokens)
+    )
+    effective_top_p = settings.top_p if top_p is None else float(top_p)
+    effective_extra_body = dict(extra_body or {})
+
     if settings.local_client is not None:
+        if settings.enable_thinking is not None:
+            effective_extra_body.setdefault("enable_thinking", settings.enable_thinking)
         return settings.local_client.complete(
             messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
+            top_p=effective_top_p,
             seed=seed,
-            extra_body=extra_body,
+            extra_body=effective_extra_body or None,
         )
+
+    if settings.enable_thinking is not None:
+        raw_template_kwargs = effective_extra_body.get("chat_template_kwargs", {})
+        if not isinstance(raw_template_kwargs, dict):
+            raise ValueError("extra_body.chat_template_kwargs must be a mapping/object")
+        template_kwargs = dict(raw_template_kwargs)
+        template_kwargs.setdefault("enable_thinking", settings.enable_thinking)
+        effective_extra_body["chat_template_kwargs"] = template_kwargs
 
     payload: dict[str, Any] = {
         "model": settings.model,
         "messages": messages,
     }
-    if temperature is not None:
-        payload["temperature"] = float(temperature)
-    if max_tokens is not None:
-        payload["max_tokens"] = int(max_tokens)
-    if top_p is not None:
-        payload["top_p"] = float(top_p)
+    if effective_temperature is not None:
+        payload["temperature"] = effective_temperature
+    if effective_max_tokens is not None:
+        payload["max_tokens"] = effective_max_tokens
+    if effective_top_p is not None:
+        payload["top_p"] = effective_top_p
     if seed is not None:
         payload["seed"] = int(seed)
-    if extra_body:
-        payload.update(extra_body)
+    if effective_extra_body:
+        payload.update(effective_extra_body)
 
     url = settings.base_url
     if not url.endswith("/chat/completions"):
@@ -183,7 +224,9 @@ def parallel_map(
     results: list[R | None] = [None] * len(values)
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(fn, value): idx for idx, value in enumerate(values)}
+            futures = {
+                executor.submit(fn, value): idx for idx, value in enumerate(values)
+            }
             for future in as_completed(futures):
                 idx = futures[future]
                 results[idx] = future.result()

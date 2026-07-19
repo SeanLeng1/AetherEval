@@ -69,24 +69,33 @@ class OfflineJudgeTests(unittest.TestCase):
         self.assertIs(backend.calls[0][1]["_show_progress"], False)
         self.assertTrue(backend.closed)
 
-    def test_shared_chat_completion_routes_to_offline_client_without_api_key(self) -> None:
+    def test_shared_chat_completion_routes_to_offline_client_without_api_key(
+        self,
+    ) -> None:
         client = _RecordingClient()
         settings = resolve_judge_settings(
-            {"judge_model": "local/judge", "_judge_client": client},
+            {
+                "judge_model": "local/judge",
+                "judge_temperature": 0.25,
+                "judge_max_new_tokens": 96,
+                "judge_top_p": 0.8,
+                "judge_enable_thinking": False,
+                "_judge_client": client,
+            },
             default_model="unused",
         )
 
         output = chat_completion(
             settings,
             [{"role": "user", "content": "grade"}],
-            temperature=0.0,
-            max_tokens=32,
         )
 
         self.assertEqual(output, "local-result")
         self.assertEqual(settings.base_url, "offline://local-judge")
-        self.assertEqual(client.calls[0][1]["temperature"], 0.0)
-        self.assertEqual(client.calls[0][1]["max_tokens"], 32)
+        self.assertEqual(client.calls[0][1]["temperature"], 0.25)
+        self.assertEqual(client.calls[0][1]["max_tokens"], 96)
+        self.assertEqual(client.calls[0][1]["top_p"], 0.8)
+        self.assertEqual(client.calls[0][1]["extra_body"], {"enable_thinking": False})
 
 
 if __name__ == "__main__":

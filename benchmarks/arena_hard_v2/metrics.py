@@ -122,8 +122,6 @@ def score_generations_batch(
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.0,
-                max_tokens=16000,
             )
             label = _parse_label(text)
             if label is not None:

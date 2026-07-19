@@ -31,7 +31,6 @@ from aethereval.backends import (
 )
 from benchmark_utils.local_judge import OfflineJudgeClient
 
-
 _UNSCORED_META_KEY = "_aethereval_unscored"
 
 
@@ -289,9 +288,7 @@ def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str
         or local_idx >= len(response_counts)
         or not _is_token_count(response_counts[local_idx])
     ):
-        raise ValueError(
-            f"Invalid response_token_counts for sample {output.sample_id}"
-        )
+        raise ValueError(f"Invalid response_token_counts for sample {output.sample_id}")
     return {
         "prompt_token_count": int(prompt_count),
         "response_token_count": int(response_counts[local_idx]),
@@ -627,9 +624,7 @@ def _run_single_task(
     phase = (
         "generate_only"
         if generate_only
-        else "eval_only"
-        if eval_only
-        else "generate_and_eval"
+        else "eval_only" if eval_only else "generate_and_eval"
     )
     metric_options = resolve_task_default_metrics(task_name, metric_options)
     _info(f"[{task_name}] loading task from {task_dir}")
@@ -939,9 +934,9 @@ def _run_single_task(
                     score, is_pass, parsed = 0.0, False, None
                     record_meta = {_UNSCORED_META_KEY: True}
                 else:
-                    score, is_pass, parsed, meta = generated_scores[
-                        output.sample_id
-                    ][local_idx]
+                    score, is_pass, parsed, meta = generated_scores[output.sample_id][
+                        local_idx
+                    ]
                     record_meta = dict(meta)
                 record_meta.update(_generation_token_meta(output, local_idx))
                 record = GenerationRecord(
@@ -1000,9 +995,7 @@ def _run_single_task(
             else [str(raw_warnings)]
         )
         metrics = aggregate_result
-        primary_metric, primary_score = _resolve_primary_metric(
-            metrics_module, metrics
-        )
+        primary_metric, primary_score = _resolve_primary_metric(metrics_module, metrics)
 
     token_usage = _token_usage_summary(all_records)
     if not generate_only and token_usage["avg_prompt_tokens"] is not None:
@@ -1039,7 +1032,9 @@ def _run_single_task(
         _info(f"[{task_name}] warnings={warnings}")
 
     task_run_config = (
-        dict(prior_run_config) if eval_only and prior_run_config else dict(run_config_common)
+        dict(prior_run_config)
+        if eval_only and prior_run_config
+        else dict(run_config_common)
     )
     task_run_config.update(
         {
@@ -1094,9 +1089,7 @@ def run_evaluation(
     phase = (
         "generate_only"
         if generate_only
-        else "eval_only"
-        if eval_only
-        else "generate_and_eval"
+        else "eval_only" if eval_only else "generate_and_eval"
     )
     effective_model_kwargs = (
         backend_kwargs if backend_kwargs is not None else model_kwargs
@@ -1115,12 +1108,6 @@ def run_evaluation(
             "Use the CLI (which automatically runs generate-only then eval-only), "
             "or invoke run_evaluation in those two phases explicitly."
         )
-    if (
-        judge_backend == "local"
-        and not generate_only
-        and not str((metric_options or {}).get("judge_model", "")).strip()
-    ):
-        raise ValueError("offline local judging requires an explicit judge_model")
     out_dir = Path(output_dir)
     effective_model_name = model_output_name(model, model_name)
     this_run_id = run_id or effective_model_name
@@ -1171,6 +1158,7 @@ def run_evaluation(
     )
 
     local_judge_client: OfflineJudgeClient | None = None
+    local_judge_key: tuple[Any, ...] | None = None
     try:
         run_config_common = {
             "model": model,
@@ -1208,15 +1196,39 @@ def run_evaluation(
             if not uses_local_judge and local_judge_client is not None:
                 local_judge_client.close()
                 local_judge_client = None
+                local_judge_key = None
             if uses_local_judge:
-                if local_judge_client is None:
-                    judge_model = str(task_metric_options["judge_model"])
-                    judge_dp_size = int(task_metric_options.get("judge_dp_size", 1))
-                    judge_tp_size = int(
-                        task_metric_options.get(
-                            "judge_tp_size", int(dp_size) * int(tensor_parallel_size)
-                        )
+                judge_model = str(task_metric_options.get("judge_model", "")).strip()
+                if not judge_model:
+                    raise ValueError(
+                        f"[{task_name}] offline local judging requires judge_model "
+                        "in the task defaults, config, or --judge-model"
                     )
+                judge_dp_size = int(task_metric_options.get("judge_dp_size", 1))
+                judge_tp_size = int(
+                    task_metric_options.get(
+                        "judge_tp_size", int(dp_size) * int(tensor_parallel_size)
+                    )
+                )
+                judge_model_kwargs = dict(
+                    task_metric_options.get("judge_sglang_args", {})
+                )
+                judge_batch_size = int(task_metric_options.get("judge_workers", 64))
+                requested_judge_key = (
+                    judge_model,
+                    judge_dp_size,
+                    judge_tp_size,
+                    judge_batch_size,
+                    json.dumps(judge_model_kwargs, sort_keys=True, default=str),
+                )
+                if (
+                    local_judge_client is not None
+                    and local_judge_key != requested_judge_key
+                ):
+                    local_judge_client.close()
+                    local_judge_client = None
+                    local_judge_key = None
+                if local_judge_client is None:
                     _info(
                         f"offline judge: model={judge_model} "
                         f"dp_size={judge_dp_size} tp_size={judge_tp_size}"
@@ -1225,17 +1237,10 @@ def run_evaluation(
                         model=judge_model,
                         dp_size=judge_dp_size,
                         tensor_parallel_size=judge_tp_size,
-                        model_kwargs=dict(
-                            task_metric_options.get("judge_sglang_args", {})
-                        ),
-                        batch_size=int(task_metric_options.get("judge_workers", 64)),
-                        default_max_tokens=int(
-                            task_metric_options.get("judge_local_max_tokens", 4096)
-                        ),
-                        enable_thinking=task_metric_options.get(
-                            "judge_enable_thinking"
-                        ),
+                        model_kwargs=judge_model_kwargs,
+                        batch_size=judge_batch_size,
                     )
+                    local_judge_key = requested_judge_key
                 task_metric_options["_judge_client"] = local_judge_client
             if (
                 eval_only
