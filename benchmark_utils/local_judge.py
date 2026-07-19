@@ -42,7 +42,7 @@ class OfflineJudgeClient:
         batch_size: int = 64,
         batch_wait_seconds: float = 0.01,
         default_max_tokens: int = 4096,
-        enable_thinking: bool | None = None,
+        enable_thinking: bool | None = False,
         backend: GenerationBackend | None = None,
     ) -> None:
         self.model = str(model)

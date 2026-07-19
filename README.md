@@ -249,16 +249,19 @@ remain separate from candidate generation settings.
 
 | Task | Judge temperature | Judge top-p | Judge max new tokens |
 | --- | ---: | ---: | ---: |
-| `llmeval_med` | provider default | provider default | provider default |
-| `healthbench` | 0.5 | provider default | 2048 |
+| `llmeval_med` | 1.0 | 1.0 | 4096 |
+| `healthbench` | 0.5 | 1.0 | 2048 |
 | `writingbench` | 1.0 | 0.95 | 2048 |
-| `creative_writing_v3` | 0.0 | provider default | 4096 |
-| `researchqa` | 0.0 | provider default | provider default |
-| `arena_hard_v2` | 0.0 | provider default | 16000 |
+| `creative_writing_v3` | 0.0 | 1.0 | 4096 |
+| `researchqa` | 0.0 | 1.0 | 4096 |
+| `arena_hard_v2` | 0.0 | 1.0 | 16000 |
 
-`provider default` is represented by an explicit YAML `null` because the
-upstream benchmark does not set that field. API judging omits it from the
-request; local judging uses the offline backend's native fallback.
+Upstream LLMEval-Med omits temperature/top-p, and several other upstreams omit
+top-p. AetherEval pins those conventional unfiltered values to `1.0` so API and
+local judges receive identical sampling settings. OpenAI does not document a
+fixed omitted-value token limit, so the otherwise-unspecified LLMEval-Med and
+ResearchQA judge limits are pinned to 4096. Both output protocols are far shorter
+than this cap.
 
 Set the judge endpoint independently from the candidate backend:
 
@@ -306,7 +309,9 @@ number of metric workers feeding the judge and the maximum offline request batch
 Judge-specific thinking can be set with `--judge-enable-thinking` or
 `--no-judge-enable-thinking`. This is applied directly to local judges and sent
 as `chat_template_kwargs.enable_thinking` to compatible OpenAI-style judge
-endpoints. Omitting both flags preserves the task/backend default.
+endpoints. Omitting both flags defaults an internally managed local judge to
+no-thinking; API judging omits the field and preserves the remote provider's
+default.
 
 For a normal generate-and-evaluate invocation, local mode automatically runs the
 candidate generation phase first, shuts the candidate backend down, and then

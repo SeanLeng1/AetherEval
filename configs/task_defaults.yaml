@@ -117,10 +117,11 @@ llmeval_med:
   top_p: 1.0
   metrics:
     judge_model: gpt-4o
-    # Upstream sends neither sampling field; preserve the judge provider defaults.
-    judge_temperature: null
-    judge_top_p: null
-    judge_max_new_tokens: null
+    # Upstream omits sampling fields; pin the conventional unfiltered defaults
+    # explicitly so API and local judges behave identically.
+    judge_temperature: 1.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
 
 healthbench:
   n: 1
@@ -130,7 +131,7 @@ healthbench:
   metrics:
     judge_model: gpt-4.1-2025-04-14
     judge_temperature: 0.5
-    judge_top_p: null
+    judge_top_p: 1.0
     judge_max_new_tokens: 2048
 
 writingbench:
@@ -155,7 +156,7 @@ creative_writing_v3:
   metrics:
     judge_model: claude-sonnet-4-6
     judge_temperature: 0.0
-    judge_top_p: null
+    judge_top_p: 1.0
     judge_max_new_tokens: 4096
 
 researchqa:
@@ -166,9 +167,9 @@ researchqa:
   metrics:
     judge_model: gpt-4.1-mini
     judge_temperature: 0.0
-    judge_top_p: null
-    # Upstream does not set a judge output limit.
-    judge_max_new_tokens: null
+    judge_top_p: 1.0
+    # Upstream omits the limit; at most eight one-word labels are requested.
+    judge_max_new_tokens: 4096
 
 arena_hard_v2:
   n: 1
@@ -178,5 +179,5 @@ arena_hard_v2:
   metrics:
     judge_model: gpt-4.1
     judge_temperature: 0.0
-    judge_top_p: null
+    judge_top_p: 1.0
     judge_max_new_tokens: 16000

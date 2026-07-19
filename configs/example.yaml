@@ -31,7 +31,8 @@ metrics:
   judge_max_new_tokens: null
   judge_temperature: null
   judge_top_p: null
-  judge_enable_thinking: null  # true | false | null (preserve task/backend default)
+  # null => local judge defaults false; API judge omits the field.
+  judge_enable_thinking: null
 
 vllm:
   gpu_memory_utilization: 0.8

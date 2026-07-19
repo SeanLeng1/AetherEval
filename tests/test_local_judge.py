@@ -66,6 +66,7 @@ class OfflineJudgeTests(unittest.TestCase):
         self.assertCountEqual(outputs, [f"judged:prompt-{index}" for index in range(4)])
         self.assertEqual(backend.calls[0][1]["temperature"], 0.5)
         self.assertEqual(backend.calls[0][1]["max_new_tokens"], 128)
+        self.assertIs(backend.calls[0][1]["enable_thinking"], False)
         self.assertIs(backend.calls[0][1]["_show_progress"], False)
         self.assertTrue(backend.closed)
 

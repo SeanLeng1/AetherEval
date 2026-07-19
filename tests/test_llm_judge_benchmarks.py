@@ -56,12 +56,12 @@ class NeverGenerateBackend:
 class LlmJudgeBenchmarkTests(unittest.TestCase):
     def test_official_judge_models_come_from_task_defaults(self) -> None:
         expected = {
-            "llmeval_med": ("gpt-4o", None, None, None),
-            "healthbench": ("gpt-4.1-2025-04-14", 0.5, None, 2048),
+            "llmeval_med": ("gpt-4o", 1.0, 1.0, 4096),
+            "healthbench": ("gpt-4.1-2025-04-14", 0.5, 1.0, 2048),
             "writingbench": ("claude-sonnet-4-5", 1.0, 0.95, 2048),
-            "creative_writing_v3": ("claude-sonnet-4-6", 0.0, None, 4096),
-            "researchqa": ("gpt-4.1-mini", 0.0, None, None),
-            "arena_hard_v2": ("gpt-4.1", 0.0, None, 16000),
+            "creative_writing_v3": ("claude-sonnet-4-6", 0.0, 1.0, 4096),
+            "researchqa": ("gpt-4.1-mini", 0.0, 1.0, 4096),
+            "arena_hard_v2": ("gpt-4.1", 0.0, 1.0, 16000),
         }
         for task_name, judge_defaults in expected.items():
             with self.subTest(task=task_name):
@@ -78,6 +78,29 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 )
                 self.assertNotIn("metrics", bundle.task_module.DEFAULT_GEN)
                 self.assertNotIn("judge_model", bundle.task_module.DEFAULT_GEN)
+
+    def test_multiple_tasks_keep_independent_judge_defaults(self) -> None:
+        writing = resolve_task_default_metrics("writingbench")
+        arena = resolve_task_default_metrics("arena_hard_v2")
+
+        self.assertEqual(writing["judge_temperature"], 1.0)
+        self.assertEqual(writing["judge_max_new_tokens"], 2048)
+        self.assertEqual(arena["judge_temperature"], 0.0)
+        self.assertEqual(arena["judge_max_new_tokens"], 16000)
+
+        runtime_override = {"judge_temperature": 0.25}
+        self.assertEqual(
+            resolve_task_default_metrics("writingbench", runtime_override)[
+                "judge_temperature"
+            ],
+            0.25,
+        )
+        self.assertEqual(
+            resolve_task_default_metrics("arena_hard_v2", runtime_override)[
+                "judge_temperature"
+            ],
+            0.25,
+        )
 
     def test_native_tasks_load_expected_release_sizes_and_defaults(self) -> None:
         expected = {
