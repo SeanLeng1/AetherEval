@@ -33,7 +33,7 @@ def _parse_scalar(value: str) -> Any:
         return text
 
 
-def _parse_key_value_args(values: Any, flag_name: str) -> dict[str, Any]:
+def parse_key_value_args(values: Any, flag_name: str) -> dict[str, Any]:
     if not values:
         return {}
     if not isinstance(values, (list, tuple)):
@@ -49,14 +49,6 @@ def _parse_key_value_args(values: Any, flag_name: str) -> dict[str, Any]:
             raise ValueError(f"Invalid {flag_name} '{raw}', empty key")
         parsed[key] = _parse_scalar(value)
     return parsed
-
-
-def _parse_vllm_args(values: Any) -> dict[str, Any]:
-    return _parse_key_value_args(values, "--vllm-arg")
-
-
-def _parse_sglang_args(values: Any) -> dict[str, Any]:
-    return _parse_key_value_args(values, "--sglang-arg")
 
 
 def load_yaml_config(path: str | None) -> dict[str, Any]:
@@ -138,6 +130,8 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 
     dp_size = int(_pick(arg_dp_size, _cfg_get(cfg, "dp_size", "runtime"), 1))
     tp_size = int(_pick(arg_tp_size, _cfg_get(cfg, "tp_size", "runtime"), 1))
+    if dp_size < 1 or tp_size < 1:
+        raise ValueError("runtime dp_size and tp_size must both be >= 1")
 
     judge_backend = str(
         _pick(
@@ -172,7 +166,21 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("metrics.judge_sglang_args must be a mapping/object")
     judge_sglang_args = dict(cfg_judge_sglang_args or {})
     judge_sglang_args.update(
-        _parse_sglang_args(getattr(args, "judge_sglang_arg", None))
+        parse_key_value_args(
+            getattr(args, "judge_sglang_arg", None),
+            "--judge-sglang-arg",
+        )
+    )
+
+    cfg_rm_sglang_args = _cfg_get(cfg, "rm_sglang_args", "metrics")
+    if cfg_rm_sglang_args is not None and not isinstance(cfg_rm_sglang_args, dict):
+        raise ValueError("metrics.rm_sglang_args must be a mapping/object")
+    rm_sglang_args = dict(cfg_rm_sglang_args or {})
+    rm_sglang_args.update(
+        parse_key_value_args(
+            getattr(args, "rm_sglang_arg", None),
+            "--rm-sglang-arg",
+        )
     )
 
     gen_overrides = {
@@ -215,77 +223,31 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             0.95,
         )
     )
+    metric_keys = (
+        "rm_model_path",
+        "cm_model_path",
+        "rm_max_length",
+        "rm_dtype",
+        "rm_trust_remote_code",
+        "judge_model",
+        "judge_base_url",
+        "judge_api_key_env",
+        "judge_workers",
+        "judge_timeout",
+        "judge_max_retries",
+        "judge_repeats",
+        "judge_max_new_tokens",
+        "judge_temperature",
+        "judge_top_p",
+        "judge_enable_thinking",
+    )
     metric_options = {
-        "rm_model_path": _pick(
-            getattr(args, "rm_model_path", None),
-            _cfg_get(cfg, "rm_model_path", "metrics"),
-        ),
-        "cm_model_path": _pick(
-            getattr(args, "cm_model_path", None),
-            _cfg_get(cfg, "cm_model_path", "metrics"),
-        ),
-        "rm_batch_size": _pick(
-            getattr(args, "rm_batch_size", None),
-            _cfg_get(cfg, "rm_batch_size", "metrics"),
-        ),
-        "rm_max_length": _pick(
-            getattr(args, "rm_max_length", None),
-            _cfg_get(cfg, "rm_max_length", "metrics"),
-        ),
-        "rm_dtype": _pick(
-            getattr(args, "rm_dtype", None),
-            _cfg_get(cfg, "rm_dtype", "metrics"),
-        ),
-        "rm_trust_remote_code": _pick(
-            getattr(args, "rm_trust_remote_code", None),
-            _cfg_get(cfg, "rm_trust_remote_code", "metrics"),
-        ),
-        "judge_model": _pick(
-            getattr(args, "judge_model", None),
-            _cfg_get(cfg, "judge_model", "metrics"),
-        ),
-        "judge_base_url": _pick(
-            getattr(args, "judge_base_url", None),
-            _cfg_get(cfg, "judge_base_url", "metrics"),
-        ),
-        "judge_api_key_env": _pick(
-            getattr(args, "judge_api_key_env", None),
-            _cfg_get(cfg, "judge_api_key_env", "metrics"),
-        ),
-        "judge_workers": _pick(
-            getattr(args, "judge_workers", None),
-            _cfg_get(cfg, "judge_workers", "metrics"),
-        ),
-        "judge_timeout": _pick(
-            getattr(args, "judge_timeout", None),
-            _cfg_get(cfg, "judge_timeout", "metrics"),
-        ),
-        "judge_max_retries": _pick(
-            getattr(args, "judge_max_retries", None),
-            _cfg_get(cfg, "judge_max_retries", "metrics"),
-        ),
-        "judge_repeats": _pick(
-            getattr(args, "judge_repeats", None),
-            _cfg_get(cfg, "judge_repeats", "metrics"),
-        ),
-        "judge_max_new_tokens": _pick(
-            getattr(args, "judge_max_new_tokens", None),
-            _cfg_get(cfg, "judge_max_new_tokens", "metrics"),
-        ),
-        "judge_temperature": _pick(
-            getattr(args, "judge_temperature", None),
-            _cfg_get(cfg, "judge_temperature", "metrics"),
-        ),
-        "judge_top_p": _pick(
-            getattr(args, "judge_top_p", None),
-            _cfg_get(cfg, "judge_top_p", "metrics"),
-        ),
-        "judge_enable_thinking": _pick(
-            getattr(args, "judge_enable_thinking", None),
-            _cfg_get(cfg, "judge_enable_thinking", "metrics"),
-        ),
+        key: _pick(getattr(args, key, None), _cfg_get(cfg, key, "metrics"))
+        for key in metric_keys
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
+    if rm_sglang_args:
+        metric_options["rm_sglang_args"] = rm_sglang_args
     if judge_backend == "local":
         metric_options.update(
             {
@@ -315,7 +277,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     if isinstance(cfg_extra_model_kwargs, dict):
         vllm_kwargs.update(cfg_extra_model_kwargs)
 
-    cli_extra = _parse_vllm_args(getattr(args, "vllm_arg", None))
+    cli_extra = parse_key_value_args(getattr(args, "vllm_arg", None), "--vllm-arg")
     vllm_kwargs.update(cli_extra)
     vllm_kwargs = {k: v for k, v in vllm_kwargs.items() if v is not None}
 
@@ -328,10 +290,6 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             getattr(args, "context_length", None),
             _cfg_get(cfg, "context_length", "sglang"),
         ),
-        "generation_batch_size": _pick(
-            getattr(args, "sglang_generation_batch_size", None),
-            _cfg_get(cfg, "generation_batch_size", "sglang"),
-        ),
         "dtype": _pick(args.dtype, _cfg_get(cfg, "dtype", "sglang")),
     }
     cfg_sglang_extra = _cfg_get(cfg, "extra_model_kwargs", "sglang")
@@ -340,7 +298,10 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     if isinstance(cfg_sglang_extra, dict):
         sglang_kwargs.update(cfg_sglang_extra)
 
-    sglang_cli_extra = _parse_sglang_args(getattr(args, "sglang_arg", None))
+    sglang_cli_extra = parse_key_value_args(
+        getattr(args, "sglang_arg", None),
+        "--sglang-arg",
+    )
     sglang_kwargs.update(sglang_cli_extra)
     sglang_kwargs = {k: v for k, v in sglang_kwargs.items() if v is not None}
 
@@ -365,7 +326,4 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "bootstrap_confidence": bootstrap_confidence,
         "metric_options": metric_options,
         "backend_kwargs": backend_kwargs,
-        "model_kwargs": backend_kwargs,
-        "vllm_kwargs": vllm_kwargs,
-        "sglang_kwargs": sglang_kwargs,
     }

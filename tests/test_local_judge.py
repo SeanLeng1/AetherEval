@@ -27,6 +27,15 @@ class _FakeBackend:
         self.closed = True
 
 
+class _BackendSystemValidator(_FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.validation_calls = []
+
+    def validate_system_role_support(self, chat_template_kwargs):  # noqa: ANN001
+        self.validation_calls.append(dict(chat_template_kwargs))
+
+
 class _RecordingClient:
     def __init__(self) -> None:
         self.calls = []
@@ -34,6 +43,44 @@ class _RecordingClient:
     def complete(self, messages, **kwargs):  # noqa: ANN001, ANN003
         self.calls.append((messages, kwargs))
         return "local-result"
+
+
+class _SystemAwareTokenizer:
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize,
+        add_generation_prompt,
+        **kwargs,  # noqa: ANN001
+    ):
+        del kwargs
+        assert tokenize is False
+        assert add_generation_prompt is True
+        return "\n".join(message["content"] for message in messages)
+
+
+class _SystemRejectingTokenizer:
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize,
+        add_generation_prompt,
+        **kwargs,  # noqa: ANN001
+    ):
+        del messages, tokenize, add_generation_prompt, kwargs
+        raise ValueError("System role not supported")
+
+
+class _SystemDroppingTokenizer:
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize,
+        add_generation_prompt,
+        **kwargs,  # noqa: ANN001
+    ):
+        del tokenize, add_generation_prompt, kwargs
+        return messages[-1]["content"]
 
 
 class OfflineJudgeTests(unittest.TestCase):
@@ -69,6 +116,95 @@ class OfflineJudgeTests(unittest.TestCase):
         self.assertIs(backend.calls[0][1]["enable_thinking"], False)
         self.assertIs(backend.calls[0][1]["_show_progress"], False)
         self.assertTrue(backend.closed)
+
+    def test_system_role_is_preflighted_before_offline_generation(self) -> None:
+        backend = _FakeBackend()
+        client = OfflineJudgeClient(
+            model="local/judge",
+            dp_size=1,
+            tensor_parallel_size=1,
+            backend=backend,
+            tokenizer=_SystemAwareTokenizer(),
+        )
+        try:
+            output = client.complete(
+                [
+                    {"role": "system", "content": "grade carefully"},
+                    {"role": "user", "content": "grade"},
+                ]
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(output, "judged:grade")
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_system_role_preflight_can_reuse_backend_worker_tokenizer(self) -> None:
+        backend = _BackendSystemValidator()
+        client = OfflineJudgeClient(
+            model="local/judge",
+            dp_size=8,
+            tensor_parallel_size=1,
+            backend=backend,
+        )
+        try:
+            client.complete(
+                [
+                    {"role": "system", "content": "grade carefully"},
+                    {"role": "user", "content": "grade"},
+                ]
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(backend.validation_calls, [{"enable_thinking": False}])
+
+    def test_rejected_system_role_has_clear_error(self) -> None:
+        backend = _FakeBackend()
+        client = OfflineJudgeClient(
+            model="local/gemma",
+            dp_size=1,
+            tensor_parallel_size=1,
+            backend=backend,
+            tokenizer=_SystemRejectingTokenizer(),
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "local/gemma.*does not support system-role.*System role not supported",
+            ):
+                client.complete(
+                    [
+                        {"role": "system", "content": "grade carefully"},
+                        {"role": "user", "content": "grade"},
+                    ]
+                )
+        finally:
+            client.close()
+
+        self.assertEqual(backend.calls, [])
+
+    def test_silently_dropped_system_role_has_clear_error(self) -> None:
+        backend = _FakeBackend()
+        client = OfflineJudgeClient(
+            model="local/judge",
+            dp_size=1,
+            tensor_parallel_size=1,
+            backend=backend,
+            tokenizer=_SystemDroppingTokenizer(),
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "does not preserve system-role"):
+                client.complete(
+                    [
+                        {"role": "system", "content": "grade carefully"},
+                        {"role": "user", "content": "grade"},
+                    ]
+                )
+        finally:
+            client.close()
+
+        self.assertEqual(backend.calls, [])
 
     def test_shared_chat_completion_routes_to_offline_client_without_api_key(
         self,

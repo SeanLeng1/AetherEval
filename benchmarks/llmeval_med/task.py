@@ -12,12 +12,6 @@ from aethereval.core.types import (
 
 TASK_NAME = "llmeval_med"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 2048,
-    "temperature": 1.0,
-    "top_p": 1.0,
-}
 SYSTEM_MESSAGE = "You are a helpful assistant."
 
 

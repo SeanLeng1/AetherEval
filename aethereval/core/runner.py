@@ -3,6 +3,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
+from tqdm.auto import tqdm
+
 from .io import (
     append_jsonl,
     ensure_dir,
@@ -12,7 +14,8 @@ from .io import (
     write_json,
     write_jsonl,
 )
-from .task_register import BENCHMARKS_DIR, discover_tasks, load_task
+from .run_summary import build_run_summary, load_task_summaries, phase_name
+from .task_register import BENCHMARKS_DIR, discover_tasks, load_task, parse_task_names
 from .task_defaults import resolve_task_default_metrics
 from .types import (
     GenerationInput,
@@ -49,11 +52,13 @@ def _metric_keys_preview(metrics: dict[str, Any], limit: int = 8) -> str:
 def _make_progress_bar(total: int, desc: str) -> Any:
     if total <= 0:
         return None
-    try:
-        from tqdm.auto import tqdm
-    except ImportError:
-        return None
-    return tqdm(total=total, desc=desc, unit="gen", dynamic_ncols=True)
+    return tqdm(
+        total=total,
+        desc=desc,
+        unit="gen",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    )
 
 
 def _resolve_primary_metric(
@@ -126,27 +131,22 @@ def _to_chat_prompt(prompt: PromptType) -> list[dict[str, str]]:
     raise TypeError(f"Unsupported prompt type: {type(prompt).__name__}")
 
 
-def _parse_tasks_arg(tasks_arg: str, available: list[str]) -> list[str]:
-    if tasks_arg.strip() == "all":
-        return sorted(available)
-    selected = [x.strip() for x in tasks_arg.split(",") if x.strip()]
-    if not selected:
-        raise ValueError("No tasks selected.")
-    unknown = sorted(set(selected) - set(available))
-    if unknown:
-        raise ValueError(
-            f"Unknown tasks: {', '.join(unknown)}. Available: {', '.join(available)}"
-        )
-    return selected
-
-
 def _merge_generation_config(
     default_gen: dict[str, Any],
     overrides: dict[str, Any],
 ) -> dict[str, Any]:
     cfg = dict(default_gen or {})
+    default_n = int(cfg.get("n", 1))
+    use_task_sampling_temperature = (
+        overrides.get("n") is None
+        and default_n > 1
+        and overrides.get("temperature") is not None
+        and float(overrides["temperature"]) == 0.0
+    )
     for key, value in overrides.items():
-        if value is not None:
+        if value is not None and not (
+            key == "temperature" and use_task_sampling_temperature
+        ):
             cfg[key] = value
 
     cfg.setdefault("n", 1)
@@ -542,69 +542,6 @@ def _records_to_generation_outputs(
     return outputs, gen_indices
 
 
-def _aggregate_run_metrics(task_summaries: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    grouped: dict[str, list[float]] = defaultdict(list)
-    for summary in task_summaries.values():
-        metrics = summary["metrics"]
-        if not isinstance(metrics, dict):
-            raise ValueError("Task summary metrics must be a dict")
-        for key, value in metrics.items():
-            if isinstance(value, (int, float)):
-                grouped[key].append(float(value))
-
-    aggregate_metrics: dict[str, float] = {}
-    for key, values in grouped.items():
-        if values:
-            aggregate_metrics[key] = sum(values) / len(values)
-
-    return {
-        "num_tasks": len(task_summaries),
-        "metrics": aggregate_metrics,
-    }
-
-
-def _aggregate_primary_scores(
-    task_summaries: dict[str, dict[str, Any]],
-) -> float | None:
-    values: list[float] = []
-    for summary in task_summaries.values():
-        value = summary["primary_score"]
-        if isinstance(value, (int, float)):
-            values.append(float(value))
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
-def _load_existing_task_summaries(
-    *,
-    run_root: Path,
-    available_tasks: set[str],
-    skip_tasks: set[str],
-) -> dict[str, dict[str, Any]]:
-    if not run_root.exists():
-        return {}
-
-    loaded: dict[str, dict[str, Any]] = {}
-    for task_dir in sorted(run_root.iterdir()):
-        if not task_dir.is_dir():
-            continue
-        task_name = task_dir.name
-        if task_name in skip_tasks:
-            continue
-        if task_name not in available_tasks:
-            continue
-        summary_path = task_dir / "summary.json"
-        if not summary_path.exists():
-            continue
-        with summary_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError(f"Existing summary must be a JSON object: {summary_path}")
-        loaded[task_name] = data
-    return loaded
-
-
 def _run_single_task(
     *,
     task_name: str,
@@ -621,11 +558,7 @@ def _run_single_task(
     generate_only: bool,
     eval_only: bool,
 ) -> dict[str, Any]:
-    phase = (
-        "generate_only"
-        if generate_only
-        else "eval_only" if eval_only else "generate_and_eval"
-    )
+    phase = phase_name(generate_only=generate_only, eval_only=eval_only)
     metric_options = resolve_task_default_metrics(task_name, metric_options)
     _info(f"[{task_name}] loading task from {task_dir}")
     samples_raw = task_module.load_samples(task_dir)
@@ -673,7 +606,8 @@ def _run_single_task(
 
     n = int(gen_cfg["n"])
     _info(
-        f"[{task_name}] samples={len(samples)} n={n} phase={phase} "
+        f"[{task_name}] samples={len(samples)} n={n} "
+        f"temperature={gen_cfg['temperature']} phase={phase} "
         f"overwrite={overwrite} "
         f"data_file={getattr(task_module, 'DATA_FILE', '(unknown)')}"
     )
@@ -780,8 +714,7 @@ def _run_single_task(
 
         if records_to_rescore:
             _info(
-                f"[{task_name}] rescoring existing records "
-                f"({len(records_to_rescore)})"
+                f"[{task_name}] rescoring existing records ({len(records_to_rescore)})"
             )
             existing_outputs, existing_gen_indices = _records_to_generation_outputs(
                 records_to_rescore
@@ -1076,7 +1009,6 @@ def run_evaluation(
     run_id: str | None = None,
     backend_name: str = "vllm",
     backend_kwargs: dict[str, Any] | None = None,
-    model_kwargs: dict[str, Any] | None = None,
     backend: GenerationBackend | None = None,
     benchmarks_dir: Path | None = None,
     generate_only: bool = False,
@@ -1086,21 +1018,15 @@ def run_evaluation(
         raise ValueError("generate_only and eval_only are mutually exclusive")
     if eval_only and overwrite:
         raise ValueError("eval_only cannot be combined with overwrite")
-    phase = (
-        "generate_only"
-        if generate_only
-        else "eval_only" if eval_only else "generate_and_eval"
-    )
-    effective_model_kwargs = (
-        backend_kwargs if backend_kwargs is not None else model_kwargs
-    )
+    phase = phase_name(generate_only=generate_only, eval_only=eval_only)
+    effective_model_kwargs = backend_kwargs
     task_root = benchmarks_dir or BENCHMARKS_DIR
     tasks_map = discover_tasks(task_root)
     available = sorted(tasks_map.keys())
     if not available:
         raise RuntimeError(f"No tasks found in {task_root}")
 
-    selected = _parse_tasks_arg(tasks, available)
+    selected = parse_task_names(tasks, available)
     judge_backend = str((metric_options or {}).get("judge_backend", "api")).lower()
     if judge_backend == "local" and not generate_only and not eval_only:
         raise ValueError(
@@ -1120,8 +1046,7 @@ def run_evaluation(
             loaded_run_summary = json.load(f)
         if not isinstance(loaded_run_summary, dict):
             raise ValueError(
-                f"Existing run summary must be a JSON object: "
-                f"{prior_run_summary_path}"
+                f"Existing run summary must be a JSON object: {prior_run_summary_path}"
             )
         prior_run_summary = loaded_run_summary
     _info(f"benchmark_root={task_root}")
@@ -1166,7 +1091,7 @@ def run_evaluation(
             "backend": backend_label,
             "dp_size": int(dp_size),
             "tp_size": int(tensor_parallel_size),
-            "model_kwargs": effective_model_kwargs or {},
+            "backend_kwargs": effective_model_kwargs or {},
             "phase": phase,
         }
         resolved_metric_options = {
@@ -1287,9 +1212,9 @@ def run_evaluation(
             summaries[task_name] = summary
             _info(f"===== finish task: {task_name} =====")
 
-        existing_summaries = _load_existing_task_summaries(
-            run_root=run_root,
-            available_tasks=set(available),
+        existing_summaries = load_task_summaries(
+            run_root,
+            allowed_tasks=available,
             skip_tasks=set(selected),
         )
         if existing_summaries:
@@ -1299,28 +1224,16 @@ def run_evaluation(
             )
 
         all_task_summaries = {**existing_summaries, **summaries}
-        all_primary_scores = {
-            task_name: {
-                "metric": task_summary["primary_metric"],
-                "score": task_summary["primary_score"],
-            }
-            for task_name, task_summary in all_task_summaries.items()
-        }
-
-        run_summary = {
-            "run_id": this_run_id,
-            "selected_tasks": selected,
-            "tasks": sorted(all_task_summaries.keys()),
-            "model": model,
-            "model_name": effective_model_name,
-            "backend": backend_label,
-            "phase": phase,
-            "results": all_task_summaries,
-            "primary_scores": all_primary_scores,
-            "primary_score_aggregate": _aggregate_primary_scores(all_task_summaries),
-            "summary": _aggregate_run_metrics(all_task_summaries),
-        }
-        write_json(run_root / "run_summary.json", run_summary)
+        run_summary = build_run_summary(
+            run_root=run_root,
+            run_id=this_run_id,
+            selected_tasks=selected,
+            model=model,
+            model_name=effective_model_name,
+            backend=backend_label,
+            phase=phase,
+            task_summaries=all_task_summaries,
+        )
         _info(f"run_summary_path={run_root / 'run_summary.json'}")
         return run_summary
     finally:
@@ -1334,7 +1247,7 @@ def inspect_prompts(
     *,
     model: str,
     tasks: str,
-    model_kwargs: dict[str, Any] | None = None,
+    backend_kwargs: dict[str, Any] | None = None,
     benchmarks_dir: Path | None = None,
     inspect_limit: int = 5,
     prompt_renderer: Callable[[PromptType], str] | None = None,
@@ -1346,12 +1259,12 @@ def inspect_prompts(
     if not available:
         raise RuntimeError(f"No tasks found in {task_root}")
 
-    selected = _parse_tasks_arg(tasks, available)
+    selected = parse_task_names(tasks, available)
     limit = max(1, int(inspect_limit))
     _info(f"inspect mode: model={model} tasks={selected} limit={limit}")
 
     tokenizer = (
-        load_chat_tokenizer(model, model_kwargs) if prompt_renderer is None else None
+        load_chat_tokenizer(model, backend_kwargs) if prompt_renderer is None else None
     )
 
     task_results: dict[str, list[dict[str, Any]]] = {}

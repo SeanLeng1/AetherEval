@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Iterable
 
 from .task_defaults import resolve_task_default_gen
 from .types import TaskBundle, TaskSpec
@@ -37,6 +37,24 @@ def discover_tasks(benchmarks_dir: Path | None = None) -> dict[str, TaskSpec]:
 
 def list_tasks(benchmarks_dir: Path | None = None) -> list[str]:
     return sorted(discover_tasks(benchmarks_dir).keys())
+
+
+def parse_task_names(tasks: str, available: Iterable[str]) -> list[str]:
+    available_names = sorted(set(available))
+    if tasks.strip() == "all":
+        return available_names
+
+    selected = [item.strip() for item in tasks.split(",") if item.strip()]
+    if not selected:
+        raise ValueError("No tasks selected.")
+
+    unknown = sorted(set(selected) - set(available_names))
+    if unknown:
+        raise ValueError(
+            f"Unknown tasks: {', '.join(unknown)}. "
+            f"Available: {', '.join(available_names)}"
+        )
+    return selected
 
 
 def list_task_default_gens(

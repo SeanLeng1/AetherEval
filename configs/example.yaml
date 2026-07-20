@@ -45,7 +45,6 @@ vllm:
 sglang:
   mem_fraction_static: 0.8
   context_length: 16384
-  generation_batch_size: 128
   dtype: "bfloat16"
   extra_model_kwargs:
     trust_remote_code: true

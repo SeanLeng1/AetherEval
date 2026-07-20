@@ -1,7 +1,5 @@
 """Batched offline LLM-judge inference using an AetherEval generation backend."""
 
-from __future__ import annotations
-
 import json
 import queue
 import threading
@@ -10,7 +8,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from aethereval.backends import GenerationBackend, create_backend
+from aethereval.backends import (
+    GenerationBackend,
+    chat_template_kwargs_from_generation_config,
+    create_backend,
+    validate_system_role_support,
+)
 from aethereval.core.types import GenerationInput
 
 
@@ -44,6 +47,7 @@ class OfflineJudgeClient:
         default_max_tokens: int = 4096,
         enable_thinking: bool | None = False,
         backend: GenerationBackend | None = None,
+        tokenizer: Any | None = None,
     ) -> None:
         self.model = str(model)
         self.batch_size = int(batch_size)
@@ -61,13 +65,21 @@ class OfflineJudgeClient:
         if enable_thinking is not None and not isinstance(enable_thinking, bool):
             raise ValueError("offline judge enable_thinking must be true or false")
 
+        resolved_model_kwargs = dict(model_kwargs or {})
         self._backend = backend or create_backend(
             backend_name="sglang",
             model=self.model,
             dp_size=int(dp_size),
             tensor_parallel_size=int(tensor_parallel_size),
-            model_kwargs=dict(model_kwargs or {}),
+            model_kwargs=resolved_model_kwargs,
         )
+        self._chat_tokenizer = (
+            tokenizer
+            if tokenizer is not None
+            else getattr(self._backend, "_tokenizer", None)
+        )
+        self._validated_system_template_configs: set[str] = set()
+        self._system_template_lock = threading.Lock()
         self._queue: queue.Queue[Any] = queue.Queue()
         self._request_id = 0
         self._id_lock = threading.Lock()
@@ -118,6 +130,9 @@ class OfflineJudgeClient:
                 )
             gen_cfg[key] = value
 
+        if any(message.get("role") == "system" for message in messages):
+            self._validate_system_role(gen_cfg)
+
         request = _JudgeRequest(
             request_id=request_id,
             messages=[dict(message) for message in messages],
@@ -132,6 +147,30 @@ class OfflineJudgeClient:
         if request.result is None:
             raise RuntimeError(f"offline judge request {request_id} returned no result")
         return request.result
+
+    def _validate_system_role(self, gen_cfg: dict[str, Any]) -> None:
+        template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
+        cache_key = json.dumps(template_kwargs, sort_keys=True, default=str)
+        with self._system_template_lock:
+            if cache_key in self._validated_system_template_configs:
+                return
+            if self._chat_tokenizer is not None:
+                validate_system_role_support(
+                    self._chat_tokenizer,
+                    model=self.model,
+                    chat_template_kwargs=template_kwargs,
+                )
+            else:
+                backend_validator = getattr(
+                    self._backend, "validate_system_role_support", None
+                )
+                if not callable(backend_validator):
+                    raise ValueError(
+                        f"Judge model {self.model!r} system-role compatibility "
+                        "cannot be validated because its tokenizer is unavailable."
+                    )
+                backend_validator(template_kwargs)
+            self._validated_system_template_configs.add(cache_key)
 
     def _batch_worker(self) -> None:
         stop_after_batch = False

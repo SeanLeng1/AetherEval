@@ -1,53 +1,6 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
 from typing import Any
 
-
-class StandaloneRewardModelBackend:
-    """Reward-model scoring runtime that does not load a candidate LLM engine."""
-
-    name = "standalone-reward-model"
-
-    def __init__(self, devices: list[str]) -> None:
-        normalized = [str(device).strip() for device in devices if str(device).strip()]
-        if not normalized:
-            raise ValueError("Standalone reward-model scoring requires a device")
-        self.devices = normalized
-
-    def score_reward_models(
-        self,
-        model_paths: list[str],
-        conversations: list[list[dict[str, str]]],
-        scorer_kwargs: dict[str, Any] | None = None,
-    ) -> dict[str, list[float]]:
-        return score_conversations_sharded(
-            model_paths=model_paths,
-            conversations=conversations,
-            devices=self.devices,
-            scorer_kwargs=dict(scorer_kwargs or {}),
-        )
-
-    def close(self) -> None:
-        # score_conversations_sharded owns and releases each model process.
-        return None
-
-
-def _torch_dtype(dtype_name: str | None, torch: Any) -> Any:
-    if dtype_name is None or dtype_name == "auto":
-        return torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    normalized = dtype_name.strip().lower()
-    mapping = {
-        "bfloat16": torch.bfloat16,
-        "bf16": torch.bfloat16,
-        "float16": torch.float16,
-        "fp16": torch.float16,
-        "float32": torch.float32,
-        "fp32": torch.float32,
-    }
-    if normalized not in mapping:
-        raise ValueError(f"Unsupported RM dtype: {dtype_name}")
-    return mapping[normalized]
+from aethereval.backends.sglang.service import SGLangService
 
 
 def _format_conversation(tokenizer: Any, messages: list[dict[str, str]]) -> str:
@@ -62,285 +15,178 @@ def _format_conversation(tokenizer: Any, messages: list[dict[str, str]]) -> str:
     text = ""
     for message in messages:
         role = str(message["role"]).upper()
-        content = message["content"]
-        text += f"{role}: {content}\n"
+        text += f"{role}: {message['content']}\n"
     return text
 
 
-def _score_tensor_from_output(output: Any) -> Any:
-    if hasattr(output, "end_scores") and output.end_scores is not None:
-        return output.end_scores.squeeze(-1)
-    if hasattr(output, "logits") and output.logits is not None:
-        logits = output.logits
-        if logits.dim() == 3:
-            return logits[:, -1, :].squeeze(-1)
-        return logits.squeeze(-1)
-    if isinstance(output, (tuple, list)) and output:
-        tensor = output[0]
-        if tensor.dim() == 3:
-            return tensor[:, -1, :].squeeze(-1)
-        return tensor.squeeze(-1)
-    raise ValueError("Reward model output does not contain end_scores or logits")
-
-
-def _load_reward_model_class(model_path: str, trust_remote_code: bool) -> Any:
+def _render_conversations(
+    model_path: str,
+    conversations: list[list[dict[str, str]]],
+    *,
+    max_length: int,
+    trust_remote_code: bool,
+) -> list[str]:
     try:
-        from transformers import AutoConfig
+        from transformers import AutoTokenizer
     except ImportError as exc:
         raise RuntimeError(
-            "transformers is required for RM-based metrics. Install transformers first."
+            "transformers is required to render reward-model conversations"
         ) from exc
 
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    if config.model_type == "qwen2":
-        try:
-            import torch
-            import torch.nn as nn
-            from transformers import Qwen2Model, Qwen2PreTrainedModel
-            from transformers.utils import ModelOutput
-        except ImportError as exc:
-            raise RuntimeError(
-                "Qwen2 reward models require torch and a transformers build with Qwen2 support."
-            ) from exc
-
-        @dataclass
-        class ScoreModelOutput(ModelOutput):
-            scores: Any | None = None
-            end_scores: Any | None = None
-            last_hidden_state: Any | None = None
-            end_last_hidden_state: Any | None = None
-            end_index: Any | None = None
-
-        class Qwen2RewardModel(Qwen2PreTrainedModel):
-            supports_gradient_checkpointing = True
-
-            def __init__(self, config: Any) -> None:
-                super().__init__(config)
-                setattr(self, self.base_model_prefix, Qwen2Model(config))
-                self.score_head = nn.Linear(config.hidden_size, 1, bias=False)
-                self.post_init()
-
-            def forward(
-                self,
-                input_ids: Any | None = None,
-                attention_mask: Any | None = None,
-                **kwargs: Any,
-            ) -> Any:
-                outputs = self.model(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                    **kwargs,
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path,
+        trust_remote_code=trust_remote_code,
+    )
+    tokenizer.truncation_side = "right"
+    rendered: list[str] = []
+    for conversation in conversations:
+        text = _format_conversation(tokenizer, conversation)
+        ids = [
+            int(token)
+            for token in tokenizer.encode(text, add_special_tokens=True)
+        ]
+        if len(ids) > max_length:
+            target_ids = ids[:max_length]
+            text = tokenizer.decode(
+                target_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            roundtrip_ids = [
+                int(token)
+                for token in tokenizer.encode(text, add_special_tokens=True)
+            ]
+            if roundtrip_ids != target_ids:
+                raise RuntimeError(
+                    "RM prompt cannot be losslessly truncated through the "
+                    f"gRPC text API for model {model_path!r}"
                 )
-                last_hidden_state = outputs.hidden_states[-1]
-                scores = self.score_head(last_hidden_state).float()
-                batch_size, seq_len, _ = last_hidden_state.size()
-
-                if attention_mask is None:
-                    if batch_size > 1:
-                        raise ValueError(
-                            "'attention_mask' is required when batch size > 1."
-                        )
-                    attention_mask = last_hidden_state.new_ones(
-                        batch_size, seq_len, dtype=torch.bool
-                    )
-
-                end_index = torch.cat([mask.nonzero()[-1] for mask in attention_mask])
-                gather_hidden_index = (
-                    end_index.to(last_hidden_state.device)
-                    .unsqueeze(dim=1)
-                    .unsqueeze(dim=2)
-                    .expand(-1, -1, last_hidden_state.size(-1))
-                )
-                gather_score_index = (
-                    end_index.to(scores.device)
-                    .unsqueeze(dim=1)
-                    .unsqueeze(dim=2)
-                    .expand(-1, -1, scores.size(-1))
-                )
-                end_last_hidden_state = torch.gather(
-                    last_hidden_state,
-                    dim=1,
-                    index=gather_hidden_index,
-                ).squeeze(dim=1)
-                end_scores = torch.gather(
-                    scores,
-                    dim=1,
-                    index=gather_score_index,
-                ).squeeze(dim=1)
-
-                return ScoreModelOutput(
-                    scores=scores,
-                    end_scores=end_scores,
-                    last_hidden_state=last_hidden_state,
-                    end_last_hidden_state=end_last_hidden_state,
-                    end_index=end_index,
-                )
-
-        return Qwen2RewardModel
-
-    from transformers import AutoModelForSequenceClassification
-
-    return AutoModelForSequenceClassification
+        rendered.append(text)
+    return rendered
 
 
-class RewardModelScorer:
+def _extract_scalar_embedding(response: Any) -> float:
+    if not isinstance(response, dict):
+        raise ValueError(
+            "SGLang reward model returned a non-object response: "
+            f"{type(response).__name__}"
+        )
+    data = response.get("data")
+    if not isinstance(data, list) or len(data) != 1:
+        raise ValueError("SGLang reward model returned invalid embedding data")
+    item = data[0]
+    if not isinstance(item, dict):
+        raise ValueError("SGLang reward model returned invalid embedding item")
+    embedding = item.get("embedding")
+    if not isinstance(embedding, list) or len(embedding) != 1:
+        raise ValueError(
+            "Safe-alignment reward models must return exactly one raw score"
+        )
+    return float(embedding[0])
+
+
+class SGLangRewardModelBackend:
+    """Score converted sequence-classification checkpoints with SGLang.
+
+    RM and CM are loaded sequentially. Each model uses the complete requested
+    DP x TP GPU budget, and SMG dynamically routes conversations across all
+    replicas on the attached Ray cluster.
+    """
+
+    name = "sglang-reward-model"
+
     def __init__(
         self,
         *,
-        model_path: str,
-        batch_size: int = 1,
-        max_length: int = 2048,
-        device: str | None = None,
-        dtype: str | None = "auto",
-        trust_remote_code: bool = True,
+        dp_size: int,
+        tensor_parallel_size: int,
     ) -> None:
-        try:
-            import torch
-            from transformers import AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "torch and transformers are required for RM-based metrics."
-            ) from exc
-
-        self._torch = torch
-        self.model_path = model_path
-        self.batch_size = int(batch_size)
-        self.max_length = int(max_length)
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=trust_remote_code,
-        )
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "right"
-
-        model_cls = _load_reward_model_class(model_path, trust_remote_code)
-        torch_dtype = _torch_dtype(dtype, torch)
-        self.model = model_cls.from_pretrained(
-            model_path,
-            torch_dtype=torch_dtype,
-            trust_remote_code=trust_remote_code,
-        )
-        self.model.to(self.device)
-        self.model.eval()
-
-    def score(self, conversations: list[list[dict[str, str]]]) -> list[float]:
-        scores: list[float] = []
-        starts = range(0, len(conversations), self.batch_size)
-        try:
-            from tqdm.auto import tqdm
-
-            iterator = tqdm(
-                starts,
-                desc=f"RM scoring {self.model_path}",
-                unit="batch",
-                dynamic_ncols=True,
+        self.dp_size = int(dp_size)
+        self.tensor_parallel_size = int(tensor_parallel_size)
+        if self.dp_size < 1:
+            raise ValueError(f"RM dp_size must be >= 1, got {self.dp_size}")
+        if self.tensor_parallel_size < 1:
+            raise ValueError(
+                "RM tensor_parallel_size must be >= 1, "
+                f"got {self.tensor_parallel_size}"
             )
-        except ImportError:
-            iterator = starts
 
-        with self._torch.inference_mode():
-            for start in iterator:
-                batch = conversations[start : start + self.batch_size]
-                texts = [
-                    _format_conversation(self.tokenizer, conversation)
-                    for conversation in batch
-                ]
-                inputs = self.tokenizer(
-                    texts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=self.max_length,
+    def score_reward_models(
+        self,
+        model_paths: list[str],
+        conversations: list[list[dict[str, str]]],
+        scorer_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, list[float]]:
+        unique_paths = list(dict.fromkeys(model_paths))
+        if not unique_paths:
+            raise ValueError("model_paths must not be empty")
+        if not conversations:
+            return {path: [] for path in unique_paths}
+
+        options = dict(scorer_kwargs or {})
+        max_length = int(options.get("max_length", 2048))
+        if max_length < 1:
+            raise ValueError(f"RM max_length must be >= 1, got {max_length}")
+        trust_remote_code = bool(options.get("trust_remote_code", True))
+        dtype = options.get("dtype", "auto")
+        extra_sglang_args = options.get("sglang_args", {})
+        if not isinstance(extra_sglang_args, dict):
+            raise ValueError("RM sglang_args must be a mapping/object")
+
+        results: dict[str, list[float]] = {}
+        for model_path in unique_paths:
+            rendered_inputs = _render_conversations(
+                model_path,
+                conversations,
+                max_length=max_length,
+                trust_remote_code=trust_remote_code,
+            )
+            model_kwargs = dict(extra_sglang_args)
+            # Sequence-classification scoring is prefill-only. Capturing the
+            # large default prefill CUDA-graph matrix adds minutes to every RM
+            # and CM startup without changing the forward result.
+            model_kwargs.setdefault("cuda_graph_backend_decode", "disabled")
+            model_kwargs.setdefault("cuda_graph_backend_prefill", "disabled")
+            model_kwargs.setdefault("is_embedding", True)
+            if trust_remote_code:
+                model_kwargs.setdefault("trust_remote_code", True)
+            if dtype is not None and str(dtype).lower() != "auto":
+                model_kwargs.setdefault("dtype", str(dtype))
+
+            service = SGLangService(
+                model=model_path,
+                dp_size=self.dp_size,
+                tensor_parallel_size=self.tensor_parallel_size,
+                model_kwargs=model_kwargs,
+            )
+            try:
+                responses = service.request_many(
+                    "/v1/embeddings",
+                    [
+                        {
+                            "model": model_path,
+                            "input": text,
+                        }
+                        for text in rendered_inputs
+                    ],
+                    show_progress=True,
+                    progress_desc=f"RM scoring {model_path}",
+                    progress_unit="sample",
                 )
-                model_inputs = {
-                    "input_ids": inputs["input_ids"].to(self.device),
-                    "attention_mask": inputs["attention_mask"].to(self.device),
-                }
-                output = self.model(**model_inputs)
-                tensor = _score_tensor_from_output(output)
-                scores.extend(float(value) for value in tensor.detach().cpu().tolist())
-        return scores
+                results[model_path] = [
+                    _extract_scalar_embedding(response) for response in responses
+                ]
+            finally:
+                service.close()
+        return results
 
     def close(self) -> None:
-        del self.model
-        if self._torch.cuda.is_available():
-            self._torch.cuda.empty_cache()
-
-
-def _score_shard_on_device(
-    args: tuple[list[str], list[list[dict[str, str]]], str, dict[str, Any]],
-) -> dict[str, list[float]]:
-    # Module-level so multiprocessing spawn workers can pickle it.
-    model_paths, conversations, device, scorer_kwargs = args
-    results: dict[str, list[float]] = {}
-    for model_path in dict.fromkeys(model_paths):
-        scorer = RewardModelScorer(
-            model_path=model_path, device=device, **scorer_kwargs
-        )
         try:
-            results[model_path] = scorer.score(conversations)
-        finally:
-            scorer.close()
-    return results
+            import ray
+        except ImportError:
+            return
+        if ray.is_initialized():
+            ray.shutdown()
 
 
-def score_conversations_sharded(
-    *,
-    model_paths: list[str],
-    conversations: list[list[dict[str, str]]],
-    devices: list[str],
-    scorer_kwargs: dict[str, Any],
-) -> dict[str, list[float]]:
-    """Score every conversation with each model, data-parallel across devices.
-
-    Contiguous shards, one spawn worker per device; each worker keeps one reward
-    model resident at a time (models scored sequentially within a shard).
-    """
-    unique_paths = list(dict.fromkeys(model_paths))
-    if not unique_paths:
-        raise ValueError("model_paths must not be empty")
-    if not devices:
-        raise ValueError("devices must not be empty")
-    if not conversations:
-        return {path: [] for path in unique_paths}
-
-    num_workers = min(len(devices), len(conversations))
-    if num_workers == 1:
-        return _score_shard_on_device(
-            (unique_paths, conversations, devices[0], scorer_kwargs)
-        )
-
-    base, extra = divmod(len(conversations), num_workers)
-    shards: list[list[list[dict[str, str]]]] = []
-    start = 0
-    for worker_index in range(num_workers):
-        size = base + (1 if worker_index < extra else 0)
-        shards.append(conversations[start : start + size])
-        start += size
-
-    import multiprocessing
-
-    context = multiprocessing.get_context("spawn")
-    with context.Pool(processes=num_workers) as pool:
-        shard_results = pool.map(
-            _score_shard_on_device,
-            [
-                (unique_paths, shard, devices[worker_index], scorer_kwargs)
-                for worker_index, shard in enumerate(shards)
-            ],
-        )
-
-    merged: dict[str, list[float]] = {path: [] for path in unique_paths}
-    for shard_result in shard_results:
-        for path in unique_paths:
-            merged[path].extend(shard_result[path])
-    for path in unique_paths:
-        if len(merged[path]) != len(conversations):
-            raise ValueError(
-                f"sharded scoring returned {len(merged[path])} scores for {path}, "
-                f"expected {len(conversations)}"
-            )
-    return merged
+__all__ = ["SGLangRewardModelBackend"]

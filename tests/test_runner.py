@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from aethereval.core.runner import inspect_prompts, run_evaluation
+from aethereval.core.runner import (
+    _merge_generation_config,
+    inspect_prompts,
+    run_evaluation,
+)
 from aethereval.core.types import GenerationInput, GenerationOutput
 
 
@@ -83,6 +87,42 @@ class ShortGenerationBackend(FakeBackend):
                 generations=[],
             )
         ]
+
+
+class GenerationConfigTests(unittest.TestCase):
+    def test_greedy_override_preserves_multi_sample_task_protocol(self) -> None:
+        resolved = _merge_generation_config(
+            {"n": 16, "temperature": 1.0, "top_p": 0.7},
+            {"n": None, "temperature": 0.0},
+        )
+
+        self.assertEqual(resolved["n"], 16)
+        self.assertEqual(resolved["temperature"], 1.0)
+
+    def test_greedy_override_applies_to_single_sample_task(self) -> None:
+        resolved = _merge_generation_config(
+            {"n": 1, "temperature": 0.7},
+            {"n": None, "temperature": 0.0},
+        )
+
+        self.assertEqual(resolved["n"], 1)
+        self.assertEqual(resolved["temperature"], 0.0)
+
+    def test_explicit_n_allows_replacing_multi_sample_task_protocol(self) -> None:
+        resolved = _merge_generation_config(
+            {"n": 16, "temperature": 1.0},
+            {"n": 1, "temperature": 0.0},
+        )
+
+        self.assertEqual(resolved["n"], 1)
+        self.assertEqual(resolved["temperature"], 0.0)
+
+    def test_explicit_multi_sample_greedy_remains_invalid(self) -> None:
+        with self.assertRaisesRegex(ValueError, "n>1 requires temperature>0"):
+            _merge_generation_config(
+                {"n": 1, "temperature": 0.7},
+                {"n": 4, "temperature": 0.0},
+            )
 
 
 def _write_toy_benchmark(root: Path) -> None:

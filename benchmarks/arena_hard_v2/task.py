@@ -6,12 +6,6 @@ from aethereval.core.types import Sample
 
 TASK_NAME = "arena_hard_v2"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 8192,
-    "temperature": 0.0,
-    "top_p": 1.0,
-}
 
 
 def load_samples(task_dir: Path) -> list[Sample]:

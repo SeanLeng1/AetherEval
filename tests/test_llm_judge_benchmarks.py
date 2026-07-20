@@ -106,7 +106,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
         expected = {
             "llmeval_med": (667, 1, 2048, 1.0),
             "healthbench": (5000, 1, 2048, 0.5),
-            "writingbench": (1000, 1, 16000, 0.7),
+            "writingbench": (1000, 1, 8192, 0.7),
             "creative_writing_v3": (96, 1, 12000, 0.7),
             "researchqa": (3750, 1, 2048, 0.0),
             "arena_hard_v2": (500, 1, 8192, 0.0),
@@ -361,6 +361,47 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["requirement/style_R"], 60.0)
         self.assertEqual(result["requirement/style_C"], 60.0)
 
+    def test_healthbench_grader_includes_actual_candidate_system_message(
+        self,
+    ) -> None:
+        bundle = load_task("healthbench", BENCHMARKS)
+        sample = bundle.task_module.load_samples(bundle.spec.task_dir)[0]
+        candidate_prompt = [
+            {"role": "system", "content": "candidate system message"},
+            *sample.data["prompt"],
+        ]
+        output = GenerationOutput(
+            sample.id,
+            candidate_prompt,
+            ["candidate response"],
+        )
+        grader_prompts: list[str] = []
+
+        def capture_grader_prompt(settings, messages):  # noqa: ANN001
+            del settings
+            grader_prompts.append(messages[-1]["content"])
+            return '{"criteria_met": true, "explanation": "ok"}'
+
+        with (
+            mock.patch.dict(
+                os.environ, {"AETHEREVAL_JUDGE_API_KEY": "test"}, clear=True
+            ),
+            mock.patch.object(
+                bundle.metrics_module,
+                "chat_completion",
+                side_effect=capture_grader_prompt,
+            ),
+        ):
+            bundle.metrics_module.score_generations_batch(
+                [sample],
+                [output],
+                {"judge_workers": 1, "judge_max_retries": 0},
+            )
+
+        self.assertTrue(grader_prompts)
+        self.assertIn("system: candidate system message\n\nuser:", grader_prompts[0])
+        self.assertIn("assistant: candidate response", grader_prompts[0])
+
     def test_all_six_batched_judge_protocols_reassemble_scores(self) -> None:
         options = {"judge_workers": 1, "judge_max_retries": 0}
         with mock.patch.dict(
@@ -455,6 +496,25 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                     [medical_sample], [medical_output], options
                 )[0][0]["score"]
             self.assertEqual(medical_score, 4.0)
+
+            with mock.patch.object(
+                medical.metrics_module,
+                "chat_completion",
+                return_value="仍然无法评分。",
+            ) as invalid_judge:
+                unscored = medical.metrics_module.score_generations_batch(
+                    [medical_sample],
+                    [medical_output],
+                    {**options, "judge_repeats": 1},
+                )[0][0]
+            self.assertEqual(
+                invalid_judge.call_count,
+                medical.metrics_module.MAX_FORMAT_ATTEMPTS,
+            )
+            self.assertEqual(unscored["score"], 0.0)
+            self.assertFalse(unscored["is_pass"])
+            self.assertEqual(unscored["meta"]["judge_scores"], [0])
+            self.assertEqual(unscored["parsed"][0]["error"], "judge returned no [1-5] score")
 
             arena = load_task("arena_hard_v2", BENCHMARKS)
             arena_sample = arena.task_module.load_samples(arena.spec.task_dir)[0]

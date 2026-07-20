@@ -6,13 +6,6 @@ from aethereval.core.types import Sample
 
 TASK_NAME = "writingbench"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 16000,
-    "temperature": 0.7,
-    "top_p": 0.8,
-    "top_k": 20,
-}
 
 
 def load_samples(task_dir: Path) -> list[Sample]:

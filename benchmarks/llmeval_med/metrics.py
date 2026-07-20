@@ -21,6 +21,7 @@ DEFAULT_JUDGE_MODEL = str(
 )
 SYSTEM_MESSAGE = "You are a helpful assistant."
 THRESHOLD = 4.0
+MAX_FORMAT_ATTEMPTS = 5
 CATEGORY_CODES = {
     "医疗知识": "MK",
     "医疗语言理解": "MLU",
@@ -72,7 +73,7 @@ def score_generations_batch(
     def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
         _, _, _, prompt = job
         last = ""
-        for _ in range(5):
+        for attempt in range(MAX_FORMAT_ATTEMPTS):
             last = chat_completion(
                 settings,
                 [
@@ -82,8 +83,17 @@ def score_generations_batch(
             )
             match = re.search(r"\[(\d+)\]", last)
             if match and 1 <= int(match.group(1)) <= 5:
-                return {"score": int(match.group(1)), "raw": last}
-        raise RuntimeError(f"LLMEval-Med judge returned no [1-5] score: {last!r}")
+                return {
+                    "score": int(match.group(1)),
+                    "raw": last,
+                    "format_attempts": attempt + 1,
+                }
+        return {
+            "score": 0,
+            "raw": last,
+            "format_attempts": MAX_FORMAT_ATTEMPTS,
+            "error": "judge returned no [1-5] score",
+        }
 
     grades = parallel_map(judge, jobs, workers=settings.workers, desc="LLMEval-Med judge")
     results: list[list[dict[str, Any]]] = []

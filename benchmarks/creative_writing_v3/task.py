@@ -12,14 +12,6 @@ from aethereval.core.types import (
 
 TASK_NAME = "creative_writing_v3"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 12000,
-    "temperature": 0.7,
-    "top_p": 1.0,
-    "top_k": -1,
-    "min_p": 0.1,
-}
 
 
 def load_samples(task_dir: Path) -> list[Sample]:

@@ -8,7 +8,8 @@ A lightweight, generative-only LLM evaluation framework.
 - Task discovery is automatic: any `benchmarks/<task>/task.py + metrics.py` is picked up.
 - Backends are offline vLLM and SGLang.
 - vLLM supports `dp_size=1` single process and `dp_size>1` Ray data parallel.
-- SGLang supports `dp_size=1` single process and `dp_size>1` Ray data parallel.
+- SGLang always uses Ray-managed tensor-parallel servers behind the SGLang Model
+  Gateway (SMG), including when `dp_size=1`.
 - Scoring (`score_generation`) has a framework tqdm progress bar.
 - Metrics may opt into batch scoring with `score_generations_batch`, used for
   model-based metrics such as reward-model evaluation.
@@ -34,7 +35,10 @@ aethereval --list-task-defaults
 
 Task generation defaults are centrally defined in `configs/task_defaults.yaml`.
 You can edit this file to adjust per-task `n/max_new_tokens/temperature/top_p`.
-CLI and run YAML still override these defaults.
+CLI and run YAML override these defaults. One protocol guard applies: when
+`temperature=0` is set globally without an explicit `n`, tasks whose default
+`n>1` retain their task-default sampling temperature. Pass `--n 1` as well to
+explicitly switch those tasks to single-generation greedy decoding.
 
 ## Run (single GPU)
 
@@ -47,7 +51,31 @@ aethereval \
   --max-new-tokens 256
 ```
 
-`dp-size` and `tp-size` default to `1`, so you only need to set them when overriding.f
+### Ray data parallelism
+
+Evaluation commands run directly in the invoking shell. SGLang data-parallel
+replicas are Ray actors behind one SMG router:
+
+```bash
+aethereval --model /path/to/model --tasks apibank --dp-size 8 --tp-size 1
+```
+
+For multiple nodes, start and join the Ray cluster manually before invoking
+`aethereval` once on the head node. Set `RAY_ADDRESS=auto` when necessary so
+the driver connects to that cluster. AetherEval intentionally does not perform
+SSH, scheduler allocation, or worker-node joins.
+
+For SGLang DP, Ray places one gRPC server actor per replica, including across
+joined worker nodes, and AetherEval starts one SMG router on the driver. SMG
+routes requests to the workers over gRPC with its default cache-aware policy.
+No SGLang server or router needs to be started manually on any node.
+
+Each replica is one Ray actor requesting `tp-size` GPUs, so its tensor-parallel
+group must fit on one node. For two eight-GPU nodes, `--dp-size 16 --tp-size 1`
+and `--dp-size 2 --tp-size 8` are supported topologies; one cross-node
+`--tp-size 16` replica is not supported by this launcher.
+
+`dp-size` and `tp-size` default to `1`, so you only need to set them when overriding.
 If `--run-id` is not provided, the default is:
 `<model_suffix_lower>`, for example:
 `qwen3-0.6b-base`.
@@ -70,6 +98,12 @@ Outputs are grouped by model. Without `--run-id`, results are written to
 
 If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
 Use `--overwrite` to discard old predictions and rerun from scratch.
+
+A normal native-task run uses the same two phases automatically: it completes
+generation for every selected native task, unloads the candidate backend, and
+then evaluates every task. This ordering is shared by API judges, local judges,
+and non-judge metrics. Explicit phase flags are only needed when the two phases
+must run as separate commands or on separate machines.
 
 ### Split offline generation from online evaluation
 
@@ -117,11 +151,11 @@ for the selected tasks. Both modes can also be set as `run.generate_only` or
 `run.eval_only` in YAML. BFCL maps these flags to its existing generation and
 evaluation phases as well.
 
-`safe_alignment` also supports this split. In eval-only mode it creates a
-standalone Transformers reward-model scorer over `dp_size * tp_size` GPUs and
-loads only the RM/CM models; the candidate model and SGLang engine are never
-started, so no offload/resume cycle is needed. `--rm-device` can select one
-explicit device instead.
+`safe_alignment` also supports this split. In eval-only mode it starts
+Ray-managed SGLang sequence-classification servers over the requested
+`dp_size * tp_size` topology and loads only the RM/CM models. RM and CM run
+sequentially so each receives the complete GPU budget; the candidate model is
+never resident at the same time.
 
 To use SGLang:
 
@@ -134,7 +168,6 @@ aethereval \
   --dp-size 1 \
   --tp-size 1 \
   --context-length 16384 \
-  --sglang-generation-batch-size 128 \
   --mem-fraction-static 0.8
 ```
 
@@ -219,13 +252,14 @@ aethereval \
   --output-dir outputs
 ```
 
-`safe_alignment` defaults to `Rihong/Qwen2.5-7B-SafeRLHF-RM` and
-`Rihong/Qwen2.5-7B-SafeRLHF-CM`; pass `--rm-model-path` and `--cm-model-path`
+`safe_alignment` defaults to the SGLang-compatible converted checkpoints
+`RLLab/Qwen2.5-7B-SafeRLHF-RM` and `RLLab/Qwen2.5-7B-SafeRLHF-CM`; pass
+`--rm-model-path` and `--cm-model-path`
 only when overriding with local checkpoints. These task-specific defaults live
 under `safe_alignment.metrics` in `configs/task_defaults.yaml`.
 
-Optional RM metric flags include `--rm-batch-size`, `--rm-max-length`,
-`--rm-device`, `--rm-dtype`, and `--rm-trust-remote-code`.
+Optional RM metric flags include `--rm-max-length`, `--rm-dtype`,
+`--rm-trust-remote-code`, and repeated `--rm-sglang-arg KEY=VALUE` overrides.
 
 ## Native LLM-Judge Benchmarks
 
@@ -283,8 +317,9 @@ overrides are `--judge-model`, `--judge-base-url`, `--judge-api-key-env`,
 Judge sampling can be overridden independently with
 `--judge-max-new-tokens`, `--judge-temperature`, and `--judge-top-p`.
 
-The same native judge benchmarks can instead load a local judge directly into an
-offline SGLang engine, without starting an HTTP server:
+The same native judge benchmarks can instead load a local judge through
+Ray-managed SGLang servers. With judge DP greater than one, AetherEval starts an
+SMG router automatically:
 
 ```bash
 aethereval \
@@ -302,10 +337,10 @@ aethereval \
   --judge-sglang-arg mem_fraction_static=0.8
 ```
 
-If judge DP/TP are omitted, the offline judge defaults to one TP replica across
+If judge DP/TP are omitted, the local judge defaults to one TP replica across
 the candidate run's total `dp_size * tp_size` GPU budget. `--judge-dp-size` and
-`--judge-tp-size` can override that topology. `--judge-workers` controls both the
-number of metric workers feeding the judge and the maximum offline request batch.
+`--judge-tp-size` can override that topology. `--judge-workers` controls the
+number of metric workers feeding independent requests into the judge service.
 Judge-specific thinking can be set with `--judge-enable-thinking` or
 `--no-judge-enable-thinking`. This is applied directly to local judges and sent
 as `chat_template_kwargs.enable_thinking` to compatible OpenAI-style judge
@@ -328,9 +363,9 @@ all rubrics into a different single prompt, so it is not exactly the official
 HealthBench judging protocol used here.
 
 The benchmark folders document the pinned candidate and judge decoding settings.
-CLI generation flags still override candidate defaults, so avoid global
-`--temperature`, `--max-new-tokens`, or `--n` overrides when protocol-aligned
-scores are required.
+CLI generation flags override candidate defaults except for the `n>1` sampling
+guard described above. Avoid other global decoding overrides when
+protocol-aligned scores are required.
 
 ## Thinking models
 
@@ -397,9 +432,12 @@ External runs use the regular `aethereval` CLI for shared runtime flags
 (`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
 benchmark-specific selectors such as `--categories` for BFCL.
 
-For BFCL with SGLang, `--dp-size > 1` uses SGLang Model Gateway with cache-aware
-routing; `--tp-size` remains the tensor-parallel size per replica. This avoids the
-upstream BFCL behavior that treats the total GPU count as tensor parallelism.
+BFCL with SGLang always uses SGLang Model Gateway with cache-aware routing, including
+when `--dp-size 1`; `--tp-size` remains the tensor-parallel size per replica. This
+avoids the upstream BFCL behavior that treats the total GPU count as tensor
+parallelism. BFCL keeps its official generation loop and scorer but connects to
+the same Ray-managed SGLang workers and SMG router as native tasks, so its DP
+replicas can be placed across an attached multi-node Ray cluster.
 
 External benchmark modules use the same shape:
 

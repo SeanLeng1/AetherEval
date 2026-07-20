@@ -7,12 +7,6 @@ from aethereval.core.types import Sample
 
 TASK_NAME = "healthbench"
 DATA_FILE = "data/eval.jsonl"
-DEFAULT_GEN = {
-    "n": 1,
-    "max_new_tokens": 2048,
-    "temperature": 0.5,
-    "top_p": 1.0,
-}
 SYSTEM_MESSAGE = "You are a helpful assistant."
 
 
@@ -44,7 +38,7 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
 def build_prompt(sample: Sample) -> list[dict[str, str]]:
     # simple-evals' ChatCompletionSampler prepends this system message to the
-    # candidate request; keep the raw conversation unchanged for the grader.
+    # candidate request. The scorer grades this complete queried conversation.
     return [{"role": "system", "content": SYSTEM_MESSAGE}] + _messages(
         sample.data["prompt"], sample.id
     )

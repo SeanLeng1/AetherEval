@@ -17,9 +17,7 @@ PRIMARY_METRIC = "score"
 USES_LLM_JUDGE = True
 PRESERVE_EXISTING_SCORES_ON_RESUME = True
 DEFAULT_JUDGE_MODEL = str(
-    resolve_task_default_metrics("healthbench").get(
-        "judge_model", "gpt-4.1-2025-04-14"
-    )
+    resolve_task_default_metrics("healthbench").get("judge_model", "gpt-4.1-2025-04-14")
 )
 SYSTEM_MESSAGE = "You are a helpful assistant."
 
@@ -101,7 +99,23 @@ def score_generations_batch(
             raise ValueError("HealthBench sample/output mismatch")
         per_generation: list[int] = []
         for gen_idx, generation in enumerate(output.generations):
-            conversation = sample.data["prompt"] + [
+            if isinstance(output.prompt, str):
+                candidate_prompt = [{"role": "user", "content": output.prompt}]
+            elif isinstance(output.prompt, list):
+                candidate_prompt = [
+                    {
+                        "role": str(message["role"]),
+                        "content": str(message["content"]),
+                    }
+                    for message in output.prompt
+                ]
+            else:
+                raise TypeError(
+                    "HealthBench generation prompt must be a string or message list"
+                )
+            # simple-evals grades the actual messages sent to the candidate,
+            # including its system message, rather than the raw dataset prompt.
+            conversation = candidate_prompt + [
                 {"role": "assistant", "content": generation}
             ]
             convo_str = "\n\n".join(
@@ -131,7 +145,10 @@ def score_generations_batch(
             )
             try:
                 parsed = parse_json_object(text)
-                if parsed.get("criteria_met") is True or parsed.get("criteria_met") is False:
+                if (
+                    parsed.get("criteria_met") is True
+                    or parsed.get("criteria_met") is False
+                ):
                     return {
                         "criteria_met": bool(parsed["criteria_met"]),
                         "explanation": str(parsed.get("explanation", "")),
@@ -141,7 +158,9 @@ def score_generations_batch(
                 last_error = exc
         raise RuntimeError(f"HealthBench judge returned invalid JSON: {last_error}")
 
-    grades = parallel_map(judge, jobs, workers=settings.workers, desc="HealthBench judge")
+    grades = parallel_map(
+        judge, jobs, workers=settings.workers, desc="HealthBench judge"
+    )
     results: list[list[dict[str, Any]]] = []
     offset = 0
     for sample, per_generation in zip(samples, layouts, strict=True):
@@ -150,7 +169,9 @@ def score_generations_batch(
             rubric_grades = grades[offset : offset + rubric_count]
             offset += rubric_count
             rubrics = sample.data["rubrics"]
-            positive_total = sum(float(r["points"]) for r in rubrics if float(r["points"]) > 0)
+            positive_total = sum(
+                float(r["points"]) for r in rubrics if float(r["points"]) > 0
+            )
             achieved = sum(
                 float(rubric["points"])
                 for rubric, grade in zip(rubrics, rubric_grades, strict=True)
@@ -160,7 +181,9 @@ def score_generations_batch(
             tag_values: dict[str, float] = {
                 str(tag): score for tag in sample.data["example_tags"]
             }
-            tagged: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
+            tagged: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = (
+                defaultdict(list)
+            )
             for rubric, grade in zip(rubrics, rubric_grades, strict=True):
                 for tag in rubric.get("tags", []):
                     tagged[str(tag)].append((rubric, grade))
@@ -171,11 +194,14 @@ def score_generations_batch(
                     if float(rubric["points"]) > 0
                 )
                 if denom:
-                    tag_values[tag] = sum(
-                        float(rubric["points"])
-                        for rubric, grade in pairs
-                        if grade["criteria_met"]
-                    ) / denom
+                    tag_values[tag] = (
+                        sum(
+                            float(rubric["points"])
+                            for rubric, grade in pairs
+                            if grade["criteria_met"]
+                        )
+                        / denom
+                    )
             sample_results.append(
                 {
                     "score": score,
@@ -231,8 +257,6 @@ def _bootstrap_std(values: list[float], count: int, seed: int) -> float:
     if not values or count <= 0:
         return 0.0
     rng = random.Random(seed)
-    means = [
-        _clipped_mean([rng.choice(values) for _ in values]) for _ in range(count)
-    ]
+    means = [_clipped_mean([rng.choice(values) for _ in values]) for _ in range(count)]
     mean_value = sum(means) / len(means)
     return math.sqrt(sum((value - mean_value) ** 2 for value in means) / len(means))

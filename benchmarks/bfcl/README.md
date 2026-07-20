@@ -45,13 +45,13 @@ tasks.
 # base HF model (registry name == HF id):
 aethereval --tasks bfcl \
   --model Qwen/Qwen2.5-1.5B-Instruct \
-  --output-dir outputs --categories all --num-gpus 1
+  --output-dir outputs --categories all --dp-size 1 --tp-size 1
 
 # a GDPO/GRPO checkpoint (any registry name + a local dir):
 aethereval --tasks bfcl \
   --model /path/to/hf_ckpt \
   --model-name optional-output-label \
-  --output-dir outputs --categories all --num-gpus 1
+  --output-dir outputs --categories all --dp-size 1 --tp-size 1
 ```
 
 `--model` is always the actual Hugging Face ID or local checkpoint used for loading.
@@ -61,18 +61,16 @@ IDs such as `qwen2.5/huggingface`; it does not alter BFCL model registration or 
 `--categories` accepts BFCL collections/categories: `all`, `non_live`, `live`,
 `multi_turn`, or individual ones (`live_simple`, `multi_turn_base`, …). Backend defaults
 to **sglang**. BFCL inherits AetherEval's normal parallelism semantics: `--dp-size` is
-the replica count and `--tp-size` is the tensor-parallel size of each replica. When
-`dp_size > 1`, AetherEval replaces BFCL's upstream TP-only launch command with SGLang
-Model Gateway (SMG), using `cache_aware` routing by default:
+the replica count and `--tp-size` is the tensor-parallel size of each replica.
+AetherEval replaces BFCL's upstream TP-only launch command with SGLang Model Gateway
+(SMG), including for one replica, using `cache_aware` routing by default:
 
 ```bash
 aethereval --tasks bfcl --model /path/to/hf_ckpt \
   --backend sglang --dp-size 8 --tp-size 1
 ```
 
-Use `--bfcl-router-policy` to change the policy or
-`--no-bfcl-use-sglang-router` only for an explicit comparison. Legacy `--num-gpus N`
-means DP=N, TP=1 for SGLang when DP/TP are not otherwise supplied.
+Use `--bfcl-router-policy` to change the policy.
 
 BFCL's local handler sends requests to the local SGLang server concurrently. The upstream
 package hardcodes 100 workers. AetherEval defaults to `max(16, 16 * dp_size)`, capped at
@@ -90,10 +88,11 @@ actual sampling parameters: `temperature`, `top_p`, `top_k`, `max_new_tokens`, a
 `context_length` are forwarded where applicable, with `repetition_penalty=1.0`.
 An explicit `--seed` is forwarded too, for reproducible local sampling.
 `--mem-fraction-static`, `--dtype`, and compatible repeatable `--sglang-arg` values are
-also forwarded to SMG workers; offline-only `generation_batch_size` is intentionally not.
-BFCL defaults SGLang worker logging to `warning` and SMG router logging to `warn`; use
-`--bfcl-sglang-arg log_level=info --bfcl-sglang-arg router_log_level=info` for detailed
-server diagnostics.
+also forwarded to the gRPC SGLang workers. Tokenizer, chat-template, reasoning-parser,
+and tool-parser settings are mirrored onto SMG because gRPC mode runs those components
+in the router.
+SGLang worker logging defaults to `error` and SMG router logging to `warn`. Use
+`--bfcl-sglang-arg router_log_level=info` when detailed router diagnostics are needed.
 
 BFCL runs after native tasks and starts its own server. Use `--bfcl-context-length` and
 repeatable `--bfcl-sglang-arg` values when BFCL needs a server setting that must not
@@ -123,7 +122,7 @@ from benchmarks.bfcl.external import ExternalRunSpec, run
 result = run(ExternalRunSpec(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     output_dir=Path("outputs/bfcl-base"),
-    categories=["all"], backend="sglang", num_gpus=1, dp_size=1, tp_size=1,
+    categories=["all"], backend="sglang", dp_size=1, tp_size=1,
 ))
 print(result.metrics, result.primary_score)   # primary_metric = "OverallAcc"
 ```

@@ -10,8 +10,10 @@ It stores the three validation splits used by the reference eval:
 - `Anthropic/hh-rlhf`
 - `PKU-Alignment/PKU-SafeRLHF`
 
-Generation uses the normal AetherEval backend. Scoring uses the batch metric hook
-because reward-model scoring must load each RM once and run in batches.
+Generation uses the normal AetherEval backend. Scoring uses converted
+sequence-classification checkpoints served by SGLang. RM and CM are loaded
+sequentially, and each is data-parallel over the full requested topology through
+SMG.
 
 ```bash
 aethereval \
@@ -21,10 +23,14 @@ aethereval \
   --output-dir outputs
 ```
 
-By default, scoring loads `Rihong/Qwen2.5-7B-SafeRLHF-RM` for helpfulness and
-`Rihong/Qwen2.5-7B-SafeRLHF-CM` for harmlessness. Pass `--rm-model-path` and
+By default, scoring loads `RLLab/Qwen2.5-7B-SafeRLHF-RM` for helpfulness and
+`RLLab/Qwen2.5-7B-SafeRLHF-CM` for harmlessness. Pass `--rm-model-path` and
 `--cm-model-path` to override them with local checkpoints. The defaults are
 configured under `safe_alignment.metrics` in `configs/task_defaults.yaml`.
+
+`--rm-max-length` keeps the reference 2048-token right truncation by default.
+Use repeated `--rm-sglang-arg KEY=VALUE` only when a checkpoint needs an
+additional SGLang server option.
 
 The metric records three values per generation:
 

@@ -5,6 +5,7 @@ from aethereval.core.types import PromptType
 
 
 _CHAT_TEMPLATE_FALLBACK_WARNED = False
+_SYSTEM_ROLE_PROBE = "AETHEREVAL_SYSTEM_ROLE_SUPPORT_PROBE_7f34c8"
 
 
 def _warn_chat_template_fallback(reason: str | None = None) -> None:
@@ -32,6 +33,47 @@ def chat_template_kwargs_from_generation_config(
             f"enable_thinking must be true or false when provided, got {value!r}"
         )
     return {"enable_thinking": value}
+
+
+def validate_system_role_support(
+    tokenizer: Any,
+    *,
+    model: str,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> None:
+    """Fail clearly if a judge tokenizer cannot preserve a system message."""
+
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise ValueError(
+            f"Judge model {model!r} has no usable chat template, so AetherEval "
+            "cannot send the system-role messages required by this benchmark."
+        )
+
+    messages = [
+        {"role": "system", "content": _SYSTEM_ROLE_PROBE},
+        {"role": "user", "content": "Reply with OK."},
+    ]
+    try:
+        rendered = apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **(chat_template_kwargs or {}),
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"Judge model {model!r} chat template does not support system-role "
+            "messages required by this benchmark. Choose a compatible judge "
+            f"model or chat template. Original error: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if not isinstance(rendered, str) or _SYSTEM_ROLE_PROBE not in rendered:
+        raise ValueError(
+            f"Judge model {model!r} chat template does not preserve system-role "
+            "content required by this benchmark. Choose a compatible judge "
+            "model or chat template."
+        )
 
 
 def _prompt_to_text(

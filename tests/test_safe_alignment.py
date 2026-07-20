@@ -32,10 +32,10 @@ class SafeAlignmentTests(unittest.TestCase):
         self.assertEqual(configured["rm_model_path"], metrics.DEFAULT_RM_MODEL_PATH)
         self.assertEqual(configured["cm_model_path"], metrics.DEFAULT_CM_MODEL_PATH)
 
-    def test_eval_only_backend_uses_requested_gpu_budget_without_candidate(self) -> None:
+    def test_eval_only_backend_uses_requested_sglang_topology(self) -> None:
         with mock.patch.object(
             metrics,
-            "StandaloneRewardModelBackend",
+            "SGLangRewardModelBackend",
         ) as backend_cls:
             metrics.create_evaluation_backend(
                 {},
@@ -43,19 +43,9 @@ class SafeAlignmentTests(unittest.TestCase):
                 tensor_parallel_size=2,
             )
             backend_cls.assert_called_once_with(
-                [f"cuda:{index}" for index in range(8)]
-            )
-
-        with mock.patch.object(
-            metrics,
-            "StandaloneRewardModelBackend",
-        ) as backend_cls:
-            metrics.create_evaluation_backend(
-                {"rm_device": "cpu"},
                 dp_size=4,
                 tensor_parallel_size=2,
             )
-            backend_cls.assert_called_once_with(["cpu"])
 
     def test_batch_scoring_combines_reward_models(self) -> None:
         samples = [
@@ -94,7 +84,6 @@ class SafeAlignmentTests(unittest.TestCase):
             {
                 "rm_model_path": "rm",
                 "cm_model_path": "cm",
-                "rm_batch_size": 2,
                 "_backend": backend,
             },
         )
@@ -105,9 +94,9 @@ class SafeAlignmentTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(backend.calls[0]["model_paths"], ["rm", "cm"])
         self.assertEqual(backend.calls[0]["num_conversations"], 2)
-        self.assertEqual(backend.calls[0]["scorer_kwargs"]["batch_size"], 2)
+        self.assertEqual(backend.calls[0]["scorer_kwargs"]["max_length"], 2048)
 
-    def test_batch_scoring_uses_default_rihong_models(self) -> None:
+    def test_batch_scoring_uses_default_rllab_models(self) -> None:
         sample = Sample(
             id="s1",
             data={
@@ -122,8 +111,8 @@ class SafeAlignmentTests(unittest.TestCase):
         )
         backend = _FakeBackend(
             {
-                "Rihong/Qwen2.5-7B-SafeRLHF-RM": [1.0],
-                "Rihong/Qwen2.5-7B-SafeRLHF-CM": [1.0],
+                "RLLab/Qwen2.5-7B-SafeRLHF-RM": [1.0],
+                "RLLab/Qwen2.5-7B-SafeRLHF-CM": [1.0],
             }
         )
         metrics.score_generations_batch([sample], [output], {"_backend": backend})
@@ -131,8 +120,8 @@ class SafeAlignmentTests(unittest.TestCase):
         self.assertEqual(
             backend.calls[0]["model_paths"],
             [
-                "Rihong/Qwen2.5-7B-SafeRLHF-RM",
-                "Rihong/Qwen2.5-7B-SafeRLHF-CM",
+                "RLLab/Qwen2.5-7B-SafeRLHF-RM",
+                "RLLab/Qwen2.5-7B-SafeRLHF-CM",
             ],
         )
 

@@ -55,7 +55,8 @@ class ConfigTests(unittest.TestCase):
                 "  bootstrap_resamples: 250\n"
                 "  rm_model_path: /models/rm\n"
                 "  cm_model_path: /models/cm\n"
-                "  rm_batch_size: 2\n"
+                "  rm_sglang_args:\n"
+                "    mem_fraction_static: 0.75\n"
                 "vllm:\n"
                 "  max_model_len: 4096\n",
                 encoding="utf-8",
@@ -86,7 +87,6 @@ class ConfigTests(unittest.TestCase):
                 max_model_len=None,
                 mem_fraction_static=None,
                 context_length=None,
-                sglang_generation_batch_size=None,
                 dtype=None,
                 vllm_arg=None,
                 sglang_arg=None,
@@ -106,9 +106,35 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolved["bootstrap_resamples"], 250)
             self.assertEqual(resolved["metric_options"]["rm_model_path"], "/models/rm")
             self.assertEqual(resolved["metric_options"]["cm_model_path"], "/models/cm")
-            self.assertEqual(resolved["metric_options"]["rm_batch_size"], 2)
-            self.assertEqual(resolved["model_kwargs"]["max_model_len"], 4096)
+            self.assertEqual(
+                resolved["metric_options"]["rm_sglang_args"],
+                {"mem_fraction_static": 0.75},
+            )
             self.assertEqual(resolved["backend_kwargs"]["max_model_len"], 4096)
+            self.assertNotIn("model_kwargs", resolved)
+            self.assertNotIn("vllm_kwargs", resolved)
+            self.assertNotIn("sglang_kwargs", resolved)
+
+    def test_rm_sglang_args_are_forwarded_and_parallel_sizes_are_validated(self) -> None:
+        from aethereval.cli import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "--model",
+                "candidate/model",
+                "--rm-sglang-arg",
+                "context_length=4096",
+            ]
+        )
+        resolved = resolve_run_arguments(args, {})
+        self.assertEqual(
+            resolved["metric_options"]["rm_sglang_args"],
+            {"context_length": 4096},
+        )
+
+        args.dp_size = 0
+        with self.assertRaisesRegex(ValueError, "dp_size and tp_size"):
+            resolve_run_arguments(args, {})
 
     def test_cli_overrides_yaml(self) -> None:
         cfg = {
@@ -147,11 +173,9 @@ class ConfigTests(unittest.TestCase):
             max_model_len=None,
             mem_fraction_static=None,
             context_length=None,
-            sglang_generation_batch_size=None,
             dtype=None,
             rm_model_path="/cli/rm",
             cm_model_path=None,
-            rm_batch_size=None,
             rm_max_length=None,
             rm_dtype=None,
             rm_trust_remote_code=None,
@@ -168,8 +192,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(resolved["bootstrap_resamples"], 123)
         self.assertEqual(resolved["bootstrap_confidence"], 0.9)
         self.assertEqual(resolved["metric_options"]["rm_model_path"], "/cli/rm")
-        self.assertEqual(resolved["model_kwargs"]["trust_remote_code"], True)
-        self.assertEqual(resolved["model_kwargs"]["max_num_seqs"], 64)
+        self.assertEqual(resolved["backend_kwargs"]["trust_remote_code"], True)
+        self.assertEqual(resolved["backend_kwargs"]["max_num_seqs"], 64)
 
     def test_sglang_backend_config(self) -> None:
         cfg = {
@@ -178,7 +202,6 @@ class ConfigTests(unittest.TestCase):
             "sglang": {
                 "mem_fraction_static": 0.75,
                 "context_length": 8192,
-                "generation_batch_size": 64,
                 "dtype": "bfloat16",
                 "extra_model_kwargs": {"trust_remote_code": True},
             },
@@ -207,7 +230,6 @@ class ConfigTests(unittest.TestCase):
             max_model_len=None,
             mem_fraction_static=None,
             context_length=None,
-            sglang_generation_batch_size=None,
             dtype=None,
             vllm_arg=None,
             sglang_arg=["chunked_prefill_size=4096"],
@@ -216,7 +238,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(resolved["backend"], "sglang")
         self.assertEqual(resolved["backend_kwargs"]["mem_fraction_static"], 0.75)
         self.assertEqual(resolved["backend_kwargs"]["context_length"], 8192)
-        self.assertEqual(resolved["backend_kwargs"]["generation_batch_size"], 64)
         self.assertEqual(resolved["backend_kwargs"]["dtype"], "bfloat16")
         self.assertEqual(resolved["backend_kwargs"]["trust_remote_code"], True)
         self.assertEqual(resolved["backend_kwargs"]["chunked_prefill_size"], 4096)
@@ -255,7 +276,6 @@ class ConfigTests(unittest.TestCase):
             max_model_len=None,
             mem_fraction_static=None,
             context_length=None,
-            sglang_generation_batch_size=None,
             dtype=None,
             vllm_arg=None,
             sglang_arg=None,

@@ -9,22 +9,22 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from aethereval.cli import (
-    _build_external_spec,
     _split_native_external_tasks,
     build_parser,
     run_selected_tasks,
 )
 from aethereval.config import resolve_run_arguments
+from aethereval.core.io import run_output_dir
 from aethereval.core.task_defaults import resolve_task_default_gen
 from benchmarks.bfcl._compat import _set_bfcl_project_root
+from benchmarks.bfcl.cli import build_bfcl_spec
 from benchmarks.bfcl.external import (
     ExternalRunSpec,
-    _RouterReadyRequestsProxy,
-    _ThreadingDrainProxy,
     _filter_bfcl_prints,
     _gen_args,
     _is_allowed_zero_score_error,
     _raise_on_inference_errors,
+    _run_generation,
     _server_command_for_spec,
     parse_scores,
     write_predictions_jsonl,
@@ -67,6 +67,43 @@ class ExternalCliTests(unittest.TestCase):
         self.assertTrue(evaluate_call["eval_only"])
         self.assertFalse(evaluate_call["overwrite"])
 
+    def test_api_judge_automatically_splits_generation_and_evaluation(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--model",
+                "candidate/model",
+                "--tasks",
+                "healthbench,llmeval_med",
+                "--overwrite",
+            ]
+        )
+        resolved = resolve_run_arguments(args, {})
+        result = {
+            "results": {
+                "healthbench": {"metrics": {"score": 0.5}},
+                "llmeval_med": {"metrics": {"OP": 30.0}},
+            }
+        }
+
+        with mock.patch(
+            "aethereval.cli.run_evaluation",
+            side_effect=[result, result],
+        ) as run_evaluation:
+            actual = run_selected_tasks(args, resolved)
+
+        self.assertIs(actual, result)
+        self.assertEqual(run_evaluation.call_count, 2)
+        generate_call = run_evaluation.call_args_list[0].kwargs
+        evaluate_call = run_evaluation.call_args_list[1].kwargs
+        self.assertEqual(generate_call["tasks"], "healthbench,llmeval_med")
+        self.assertTrue(generate_call["generate_only"])
+        self.assertFalse(generate_call["eval_only"])
+        self.assertTrue(generate_call["overwrite"])
+        self.assertEqual(evaluate_call["tasks"], "healthbench,llmeval_med")
+        self.assertFalse(evaluate_call["generate_only"])
+        self.assertTrue(evaluate_call["eval_only"])
+        self.assertFalse(evaluate_call["overwrite"])
+
     def test_thinking_mode_flags_are_tri_state(self) -> None:
         parser = build_parser()
 
@@ -86,64 +123,6 @@ class ExternalCliTests(unittest.TestCase):
             False,
         )
 
-    def test_bfcl_smg_readiness_waits_for_all_workers(self) -> None:
-        class Response:
-            def __init__(self, status_code, payload=None):  # noqa: ANN001
-                self.status_code = status_code
-                self._payload = payload or {}
-
-            def json(self):
-                return self._payload
-
-        class Requests:
-            class exceptions:
-                ConnectionError = ConnectionError
-
-            def get(self, url, *args, **kwargs):  # noqa: ANN001
-                del args, kwargs
-                if url.endswith("/workers"):
-                    return Response(
-                        200,
-                        {
-                            "workers": [
-                                {"is_healthy": True},
-                                {"is_healthy": True},
-                            ]
-                        },
-                    )
-                raise AssertionError("models endpoint must wait for every worker")
-
-        proxy = _RouterReadyRequestsProxy(Requests(), expected_workers=8)
-
-        with mock.patch("benchmarks.bfcl.external.time.sleep"):
-            response = proxy.get("http://127.0.0.1:1053/v1/models")
-
-        self.assertEqual(response.status_code, 503)
-
-    def test_bfcl_smg_readiness_accepts_all_healthy_workers(self) -> None:
-        response = mock.Mock(status_code=200)
-        workers_response = mock.Mock(status_code=200)
-        workers_response.json.return_value = {
-            "workers": [{"is_healthy": True} for _ in range(8)]
-        }
-        requests = mock.Mock()
-        requests.get.side_effect = [workers_response, response]
-        proxy = _RouterReadyRequestsProxy(requests, expected_workers=8)
-
-        actual = proxy.get("http://127.0.0.1:1053/v1/models")
-
-        self.assertIs(actual, response)
-        self.assertEqual(actual.status_code, 200)
-
-    def test_bfcl_smg_log_event_drains_until_process_eof(self) -> None:
-        threading_module = mock.Mock()
-        proxy = _ThreadingDrainProxy(threading_module)
-
-        event = proxy.Event()
-        event.set()
-
-        self.assertFalse(event.is_set())
-
     def test_split_tasks_accepts_external_name(self) -> None:
         native_tasks, external_tasks = _split_native_external_tasks("ifeval,bfcl")
 
@@ -157,6 +136,8 @@ class ExternalCliTests(unittest.TestCase):
                 "bfcl",
                 "--model",
                 "rlla-gdpo",
+                "--backend",
+                "sglang",
                 "--output-dir",
                 "outputs/bfcl",
                 "--categories",
@@ -179,11 +160,12 @@ class ExternalCliTests(unittest.TestCase):
                 "8",
                 "--bfcl-verbose",
                 "--no-overwrite",
-                "--skip-evaluation",
+                "--generate-only",
             ]
         )
 
-        spec, _run = _build_external_spec(args, task_name="bfcl")
+        resolved = resolve_run_arguments(args, {})
+        spec = build_bfcl_spec(args, resolved, Path(args.output_dir))
 
         self.assertEqual(spec.categories, ["non_live", "live"])
         self.assertEqual(spec.num_gpus, 4)
@@ -202,10 +184,13 @@ class ExternalCliTests(unittest.TestCase):
         self.assertFalse(spec.run_evaluation)
 
     def test_bfcl_external_spec_reads_generation_defaults_from_config(self) -> None:
-        args = build_parser().parse_args(["--tasks", "bfcl", "--model", "rlla-gdpo"])
+        args = build_parser().parse_args(
+            ["--tasks", "bfcl", "--model", "rlla-gdpo", "--backend", "sglang"]
+        )
+        resolved = resolve_run_arguments(args, {})
 
         with mock.patch(
-            "aethereval.cli.resolve_task_default_gen",
+            "benchmarks.bfcl.cli.resolve_task_default_gen",
             return_value={
                 "n": 1,
                 "max_new_tokens": 1234,
@@ -214,7 +199,7 @@ class ExternalCliTests(unittest.TestCase):
                 "top_k": 17,
             },
         ):
-            spec, _run = _build_external_spec(args, task_name="bfcl")
+            spec = build_bfcl_spec(args, resolved, Path("outputs"))
 
         self.assertEqual(spec.max_tokens, 1234)
         self.assertEqual(spec.temperature, 0.25)
@@ -234,14 +219,22 @@ class ExternalCliTests(unittest.TestCase):
         generate_args = build_parser().parse_args(
             ["--tasks", "bfcl", "--model", "model", "--generate-only"]
         )
-        generate_spec, _run = _build_external_spec(generate_args, task_name="bfcl")
+        generate_spec = build_bfcl_spec(
+            generate_args,
+            resolve_run_arguments(generate_args, {}),
+            Path("outputs"),
+        )
         self.assertTrue(generate_spec.run_generation)
         self.assertFalse(generate_spec.run_evaluation)
 
         eval_args = build_parser().parse_args(
             ["--tasks", "bfcl", "--model", "model", "--eval-only"]
         )
-        eval_spec, _run = _build_external_spec(eval_args, task_name="bfcl")
+        eval_spec = build_bfcl_spec(
+            eval_args,
+            resolve_run_arguments(eval_args, {}),
+            Path("outputs"),
+        )
         self.assertFalse(eval_spec.run_generation)
         self.assertTrue(eval_spec.run_evaluation)
 
@@ -257,6 +250,8 @@ class ExternalCliTests(unittest.TestCase):
                 "bfcl",
                 "--model",
                 "rlla-gdpo",
+                "--backend",
+                "sglang",
                 "--output-dir",
                 "outputs/bfcl",
                 "--dp-size",
@@ -266,15 +261,77 @@ class ExternalCliTests(unittest.TestCase):
             ]
         )
 
-        spec, _run = _build_external_spec(args, task_name="bfcl")
+        spec = build_bfcl_spec(
+            args,
+            resolve_run_arguments(args, {}),
+            Path(args.output_dir),
+        )
 
         self.assertEqual(spec.num_gpus, 8)
         self.assertEqual(spec.dp_size, 8)
         self.assertEqual(spec.tp_size, 1)
-        self.assertTrue(spec.use_sglang_router)
         self.assertEqual(spec.router_policy, "cache_aware")
-        self.assertEqual(spec.sglang_server_args["log_level"], "warning")
-        self.assertEqual(spec.sglang_server_args["router_log_level"], "warn")
+        self.assertNotIn("log_level", spec.sglang_server_args)
+        self.assertNotIn("log_level_http", spec.sglang_server_args)
+        self.assertNotIn("router_log_level", spec.sglang_server_args)
+
+    def test_bfcl_generation_reuses_managed_sglang_service(self) -> None:
+        spec = ExternalRunSpec(
+            model="test/model",
+            output_dir=Path("outputs"),
+            backend="sglang",
+            dp_size=8,
+            tp_size=1,
+            router_policy="cache_aware",
+            sglang_server_args={
+                "context_length": 131072,
+                "router_log_level": "warn",
+            },
+        )
+        service = mock.Mock(base_url="http://127.0.0.1:18443")
+        observed = {}
+
+        def generation_main(args):  # noqa: ANN001
+            observed["args"] = args
+            observed["host"] = os.environ.get("VLLM_ENDPOINT")
+            observed["port"] = os.environ.get("VLLM_PORT")
+
+        with (
+            mock.patch(
+                "benchmarks.bfcl.external.SGLangService",
+                return_value=service,
+            ) as service_cls,
+            mock.patch(
+                "benchmarks.bfcl.external._filter_bfcl_prints",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch(
+                "benchmarks.bfcl.external._cap_bfcl_thread_pool",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"VLLM_ENDPOINT": "old-host", "VLLM_PORT": "1234"},
+            ),
+        ):
+            _run_generation(spec, Path("outputs/result"), generation_main)
+            self.assertEqual(os.environ["VLLM_ENDPOINT"], "old-host")
+            self.assertEqual(os.environ["VLLM_PORT"], "1234")
+
+        service_cls.assert_called_once_with(
+            model="test/model",
+            dp_size=8,
+            tensor_parallel_size=1,
+            model_kwargs={
+                "context_length": 131072,
+                "router_log_level": "warn",
+            },
+            router_policy="cache_aware",
+        )
+        service.close.assert_called_once_with()
+        self.assertTrue(observed["args"].skip_server_setup)
+        self.assertEqual(observed["host"], "127.0.0.1")
+        self.assertEqual(observed["port"], "18443")
 
     def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
         args = build_parser().parse_args(
@@ -302,9 +359,7 @@ class ExternalCliTests(unittest.TestCase):
             ]
         )
         resolved = resolve_run_arguments(args, {})
-        args.backend_kwargs = resolved["backend_kwargs"]
-
-        spec, _run = _build_external_spec(args, task_name="bfcl")
+        spec = build_bfcl_spec(args, resolved, Path("outputs"))
 
         self.assertEqual(resolved["backend_kwargs"]["context_length"], 32768)
         self.assertNotIn("json_model_override_args", resolved["backend_kwargs"])
@@ -324,23 +379,12 @@ class ExternalCliTests(unittest.TestCase):
             },
         )
 
-    def test_bfcl_legacy_num_gpus_means_sglang_dp(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "--tasks",
-                "bfcl",
-                "--model",
-                "rlla-gdpo",
-                "--num-gpus",
-                "8",
-            ]
-        )
-
-        spec, _run = _build_external_spec(args, task_name="bfcl")
-
-        self.assertEqual(spec.num_gpus, 8)
-        self.assertEqual(spec.dp_size, 8)
-        self.assertEqual(spec.tp_size, 1)
+    def test_bfcl_legacy_flags_are_removed(self) -> None:
+        parser = build_parser()
+        for flag in ("--num-gpus", "--skip-generation", "--skip-evaluation"):
+            with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args([flag, "1"] if flag == "--num-gpus" else [flag])
 
     def test_external_benchmark_flag_is_removed(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
@@ -351,33 +395,6 @@ class ExternalCliTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 build_parser().parse_args(["--model-path", "/tmp/model"])
-
-    def test_bfcl_can_run_from_tasks_skip_only(self) -> None:
-        with TemporaryDirectory() as tmp:
-            out = Path(tmp) / "outputs"
-            args = build_parser().parse_args(
-                [
-                    "--tasks",
-                    "bfcl",
-                    "--model",
-                    "dry-model",
-                    "--output-dir",
-                    str(out),
-                    "--skip-generation",
-                    "--skip-evaluation",
-                ]
-            )
-            resolved = resolve_run_arguments(args, {})
-
-            result = run_selected_tasks(args, resolved)
-
-            self.assertEqual(result["selected_tasks"], ["bfcl"])
-            self.assertEqual(result["tasks"], ["bfcl"])
-            self.assertEqual(result["results"]["bfcl"]["primary_metric"], "OverallAcc")
-            self.assertEqual(result["results"]["bfcl"]["primary_score"], 0.0)
-            self.assertTrue((out / "dry-model" / "bfcl" / "summary.json").exists())
-            self.assertTrue((out / "dry-model" / "bfcl" / "predictions.jsonl").exists())
-            self.assertTrue((out / "dry-model" / "run_summary.json").exists())
 
     def test_bfcl_model_name_and_explicit_run_id_match_native_layout(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -396,20 +413,16 @@ class ExternalCliTests(unittest.TestCase):
                     str(out),
                     "--run-id",
                     "production-1",
-                    "--skip-generation",
-                    "--skip-evaluation",
                 ]
             )
 
-            result = run_selected_tasks(args, resolve_run_arguments(args, {}))
-
-            self.assertEqual(result["model"], model)
-            self.assertEqual(result["model_name"], model_name)
-            self.assertTrue(
-                (out / model_name / "production-1" / "bfcl" / "summary.json").exists()
+            resolved = resolve_run_arguments(args, {})
+            self.assertEqual(
+                run_output_dir(out, model, "production-1", model_name),
+                out / model_name / "production-1",
             )
 
-            spec, _run = _build_external_spec(args, task_name="bfcl")
+            spec = build_bfcl_spec(args, resolved, out / model_name / "production-1")
             generation_args = _gen_args(spec, out / "raw")
             self.assertEqual(spec.model_name, model_name)
             self.assertEqual(generation_args.model, [model])
@@ -547,8 +560,6 @@ class ExternalCliTests(unittest.TestCase):
                     "dry-model",
                     "--output-dir",
                     str(out),
-                    "--skip-generation",
-                    "--skip-evaluation",
                 ]
             )
             resolved = resolve_run_arguments(
@@ -565,22 +576,20 @@ class ExternalCliTests(unittest.TestCase):
                 },
             )
 
-            result = run_selected_tasks(args, resolved)
-            summary = result["results"]["bfcl"]
+            spec = build_bfcl_spec(args, resolved, out / "dry-model" / "bfcl")
 
-            self.assertEqual(summary["backend"], "sglang")
-            self.assertEqual(summary["num_gpus"], 3)
-            self.assertEqual(summary["dp_size"], 3)
-            self.assertEqual(summary["tp_size"], 1)
-            self.assertTrue(summary["use_sglang_router"])
-            self.assertEqual(summary["router_policy"], "cache_aware")
-            self.assertEqual(summary["num_threads"], 48)
-            self.assertEqual(summary["temperature"], 0.25)
-            self.assertEqual(summary["max_tokens"], 1234)
-            self.assertEqual(summary["max_context_length"], 9999)
-            self.assertEqual(summary["top_p"], 0.77)
-            self.assertEqual(summary["top_k"], 11)
-            self.assertFalse(summary["verbose"])
+            self.assertEqual(spec.backend, "sglang")
+            self.assertEqual(spec.num_gpus, 3)
+            self.assertEqual(spec.dp_size, 3)
+            self.assertEqual(spec.tp_size, 1)
+            self.assertEqual(spec.router_policy, "cache_aware")
+            self.assertEqual(spec.num_threads, 48)
+            self.assertEqual(spec.temperature, 0.25)
+            self.assertEqual(spec.max_tokens, 1234)
+            self.assertEqual(spec.max_context_length, 9999)
+            self.assertEqual(spec.top_p, 0.77)
+            self.assertEqual(spec.top_k, 11)
+            self.assertFalse(spec.verbose)
 
     def test_bfcl_inference_errors_fail_fast(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -668,81 +677,6 @@ class ExternalCliTests(unittest.TestCase):
                     os.environ["BFCL_PROJECT_ROOT"],
                     str(Path(tmp) / "bfcl"),
                 )
-
-    def test_bfcl_server_command_uses_smg_dp_and_inherits_args(self) -> None:
-        sglang_cmd = [
-            "python",
-            "-m",
-            "sglang.launch_server",
-            "--model-path",
-            "model",
-            "--tp",
-            "8",
-            "--mem-fraction-static",
-            "0.9",
-        ]
-        spec = ExternalRunSpec(
-            model="model",
-            output_dir=Path("outputs"),
-            num_gpus=8,
-            dp_size=8,
-            tp_size=1,
-            gpu_memory_utilization=0.86,
-            dtype="bfloat16",
-            max_context_length=32768,
-            sglang_server_args={
-                "chunked_prefill_size": 4096,
-                "enable_tokenizer_batch_encode": True,
-                "generation_batch_size": 64,
-            },
-        )
-
-        patched = _server_command_for_spec(sglang_cmd, spec)
-
-        self.assertIn("sglang_router.launch_server", patched)
-        self.assertNotIn("sglang.launch_server", patched)
-        self.assertEqual(patched[patched.index("--dp-size") + 1], "8")
-        self.assertEqual(patched[patched.index("--tp-size") + 1], "1")
-        self.assertEqual(patched[patched.index("--router-policy") + 1], "cache_aware")
-        self.assertEqual(patched[patched.index("--context-length") + 1], "32768")
-        self.assertEqual(patched[patched.index("--mem-fraction-static") + 1], "0.86")
-        self.assertEqual(patched[patched.index("--chunked-prefill-size") + 1], "4096")
-        self.assertIn("--enable-tokenizer-batch-encode", patched)
-        self.assertNotIn("--generation-batch-size", patched)
-
-    def test_bfcl_server_command_keeps_single_replica_sglang(self) -> None:
-        command = ["python", "-m", "sglang.launch_server", "--model-path", "model"]
-        spec = ExternalRunSpec(
-            model="model",
-            output_dir=Path("outputs"),
-            num_gpus=2,
-            dp_size=1,
-            tp_size=2,
-        )
-
-        patched = _server_command_for_spec(command, spec)
-
-        self.assertIn("sglang.launch_server", patched)
-        self.assertNotIn("sglang_router.launch_server", patched)
-        self.assertEqual(patched[patched.index("--tp-size") + 1], "2")
-        self.assertNotIn("--dp-size", patched)
-
-    def test_bfcl_server_command_can_use_native_dp_for_comparison(self) -> None:
-        command = ["python", "-m", "sglang.launch_server", "--model-path", "model"]
-        spec = ExternalRunSpec(
-            model="model",
-            output_dir=Path("outputs"),
-            num_gpus=8,
-            dp_size=8,
-            tp_size=1,
-            use_sglang_router=False,
-        )
-
-        patched = _server_command_for_spec(command, spec)
-
-        self.assertIn("sglang.launch_server", patched)
-        self.assertNotIn("sglang_router.launch_server", patched)
-        self.assertEqual(patched[patched.index("--dp-size") + 1], "8")
 
     def test_bfcl_vllm_server_command_receives_context_length(self) -> None:
         vllm_cmd = ["vllm", "serve", "model"]

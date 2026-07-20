@@ -1,7 +1,5 @@
 """Small OpenAI-compatible client shared by native LLM-judge benchmarks."""
 
-from __future__ import annotations
-
 import json
 import os
 import time
@@ -10,6 +8,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, TypeVar
+
+from tqdm.auto import tqdm
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -213,13 +213,13 @@ def parallel_map(
     if not values:
         return []
 
-    progress = None
-    try:
-        from tqdm.auto import tqdm
-
-        progress = tqdm(total=len(values), desc=desc, unit="judge", dynamic_ncols=True)
-    except ImportError:
-        pass
+    progress = tqdm(
+        total=len(values),
+        desc=desc,
+        unit="judge",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    )
 
     results: list[R | None] = [None] * len(values)
     try:
@@ -230,11 +230,9 @@ def parallel_map(
             for future in as_completed(futures):
                 idx = futures[future]
                 results[idx] = future.result()
-                if progress is not None:
-                    progress.update(1)
+                progress.update(1)
     finally:
-        if progress is not None:
-            progress.close()
+        progress.close()
 
     if any(result is None for result in results):
         raise RuntimeError("judge worker returned an incomplete result set")
