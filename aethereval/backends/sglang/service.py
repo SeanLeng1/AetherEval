@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import signal
@@ -8,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 from tqdm.auto import tqdm
@@ -16,6 +18,12 @@ from tqdm.auto import tqdm
 _STARTUP_TIMEOUT_SECONDS = 1800
 _REQUEST_TIMEOUT_SECONDS = 24 * 60 * 60
 _URL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_HARMONY_ENCODING_ENV = "TIKTOKEN_ENCODINGS_BASE"
+_HARMONY_ENCODING_FILENAME = "o200k_base.tiktoken"
+_HARMONY_ENCODING_SHA256 = (
+    "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+)
+_BUNDLED_HARMONY_ENCODING_DIR = Path(__file__).with_name("encodings")
 _UNSUPPORTED_SERVER_ARGS = {
     "grpc_http_sidecar_port",
     "log_level_http",
@@ -36,6 +44,36 @@ _ROUTER_MODEL_ARGS = {
     "reasoning_parser": "--reasoning-parser",
     "tool_call_parser": "--tool-call-parser",
 }
+
+
+def _resolve_harmony_encoding_dir() -> Path:
+    configured_dir = os.environ.get(_HARMONY_ENCODING_ENV)
+    encoding_dir = (
+        Path(configured_dir).expanduser()
+        if configured_dir
+        else _BUNDLED_HARMONY_ENCODING_DIR
+    )
+    vocab_path = encoding_dir / _HARMONY_ENCODING_FILENAME
+    if not vocab_path.is_file():
+        source = (
+            f"{_HARMONY_ENCODING_ENV}={configured_dir!r}"
+            if configured_dir
+            else "the bundled AetherEval assets"
+        )
+        raise RuntimeError(
+            f"Missing Harmony encoding {vocab_path} from {source}. "
+            "Reinstall AetherEval with package data included, or set "
+            f"{_HARMONY_ENCODING_ENV} to a directory containing "
+            f"{_HARMONY_ENCODING_FILENAME}."
+        )
+
+    digest = hashlib.sha256(vocab_path.read_bytes()).hexdigest()
+    if digest != _HARMONY_ENCODING_SHA256:
+        raise RuntimeError(
+            f"Invalid Harmony encoding at {vocab_path}: SHA-256 is {digest}, "
+            f"expected {_HARMONY_ENCODING_SHA256}."
+        )
+    return encoding_dir.resolve()
 
 
 def _free_port(max_port: int = 65535) -> int:
@@ -292,6 +330,8 @@ class SGLangService:
                 f"got {tensor_parallel_size}"
             )
 
+        harmony_encoding_dir = _resolve_harmony_encoding_dir()
+
         try:
             import ray
         except ImportError as exc:
@@ -310,6 +350,7 @@ class SGLangService:
         self.router_log_level = str(
             self.model_kwargs.get("router_log_level", "warn")
         )
+        self._harmony_encoding_dir = harmony_encoding_dir
         self._workers: list[Any] = []
         self._router: subprocess.Popen[Any] | None = None
         self._closed = False
@@ -365,6 +406,7 @@ class SGLangService:
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env["TQDM_DISABLE"] = "1"
+        env[_HARMONY_ENCODING_ENV] = str(self._harmony_encoding_dir)
         self._router = subprocess.Popen(
             command,
             env=env,

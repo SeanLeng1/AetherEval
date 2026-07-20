@@ -1,7 +1,10 @@
 import asyncio
+import hashlib
 import struct
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -44,6 +47,34 @@ class _ThinkingTokenizer(_FakeTokenizer):
 
 
 class SGLangBackendTests(unittest.TestCase):
+    def test_bundled_harmony_encoding_has_official_hash(self) -> None:
+        with mock.patch.dict(
+            sglang_service.os.environ,
+            {},
+            clear=True,
+        ):
+            encoding_dir = sglang_service._resolve_harmony_encoding_dir()
+
+        vocab_path = encoding_dir / "o200k_base.tiktoken"
+        self.assertTrue(vocab_path.is_file())
+        self.assertEqual(
+            hashlib.sha256(vocab_path.read_bytes()).hexdigest(),
+            sglang_service._HARMONY_ENCODING_SHA256,
+        )
+
+    def test_invalid_explicit_harmony_encoding_fails_early(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with mock.patch.dict(
+                sglang_service.os.environ,
+                {"TIKTOKEN_ENCODINGS_BASE": temporary_dir},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Missing Harmony encoding",
+                ):
+                    sglang_service._resolve_harmony_encoding_dir()
+
     def test_normal_shutdown_signals_only_server_parent(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None
@@ -263,6 +294,7 @@ class SGLangBackendTests(unittest.TestCase):
             "reasoning_parser": "qwen3",
             "tool_call_parser": "qwen",
         }
+        service._harmony_encoding_dir = Path("/opt/aethereval/encodings")
         process = mock.Mock()
         with (
             mock.patch.object(
@@ -283,6 +315,7 @@ class SGLangBackendTests(unittest.TestCase):
             base_url = service._start_router(["grpc://10.0.0.2:9000"])
 
         command = popen.call_args.args[0]
+        env = popen.call_args.kwargs["env"]
         self.assertEqual(base_url, "http://127.0.0.1:18080")
         self.assertEqual(command[command.index("--policy") + 1], "round_robin")
         self.assertEqual(command[command.index("--log-level") + 1], "error")
@@ -313,6 +346,10 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--tool-call-parser") + 1],
             "qwen",
+        )
+        self.assertEqual(
+            env["TIKTOKEN_ENCODINGS_BASE"],
+            "/opt/aethereval/encodings",
         )
         wait_until_ready.assert_called_once_with(
             "http://127.0.0.1:18080",

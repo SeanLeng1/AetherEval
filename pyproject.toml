@@ -34,3 +34,6 @@ aethereval = "aethereval.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["aethereval*", "benchmark_utils*", "benchmarks*"]
+
+[tool.setuptools.package-data]
+"aethereval.backends.sglang" = ["encodings/*.tiktoken"]
