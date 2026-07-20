@@ -177,11 +177,23 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(record["FormatAcc."], 66.67)
         self.assertEqual(record["LengthRew."], 0.0067)
         self.assertEqual(record["LengthReward"], 0.0067)
-        self.assertEqual(record["Overall"], 1.0067)
+        self.assertEqual(record["Overall"], 1.0)
         self.assertEqual(record["think_word_count_avg_lv1"], 4.0)
         self.assertEqual(record["overall_think_word_count_avg"], 2.6667)
         self.assertEqual(record["reward_avg_lv1"], 0.01)
         self.assertEqual(record["overall_reward_avg"], 0.0067)
+
+    def test_overall_does_not_include_length_reward(self) -> None:
+        short = _scored(RAW_MATCH)
+        long = {**short, "length_score": 1.0}
+
+        short_metrics = aggregate_scores({"Level1_0": short})
+        long_metrics = aggregate_scores({"Level1_0": long})
+
+        self.assertEqual(short_metrics["LengthRew."], 0.01)
+        self.assertEqual(long_metrics["LengthRew."], 1.0)
+        self.assertEqual(short_metrics["Overall"], 2.0)
+        self.assertEqual(long_metrics["Overall"], 2.0)
 
     def test_native_task_loads_jsonl(self) -> None:
         task_dir = Path(__file__).resolve().parents[1] / "benchmarks" / "apibank"
@@ -227,7 +239,7 @@ class ApiBankScoringTests(unittest.TestCase):
         self.assertEqual(metrics["CorrectAcc."], 100.0)
         self.assertEqual(metrics["FormatAcc."], 100.0)
         self.assertEqual(metrics["LengthRew."], 0.01)
-        self.assertEqual(metrics["Overall"], 2.01)
+        self.assertEqual(metrics["Overall"], 2.0)
 
 
 if __name__ == "__main__":

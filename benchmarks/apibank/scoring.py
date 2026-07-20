@@ -269,18 +269,13 @@ def _add_report_metrics(record: dict[str, Any]) -> None:
     record["LengthRew."] = record["overall_length_avg"]
     record["LengthReward"] = record["LengthRew."]
 
-    if (
-        record["CorrectAcc."] is None
-        or record["FormatAcc."] is None
-        or record["LengthRew."] is None
-    ):
+    if record["CorrectAcc."] is None or record["FormatAcc."] is None:
         record["Overall"] = None
         return
 
     record["Overall"] = round(
         record["CorrectAcc."] / 100
-        + record["FormatAcc."] / 100
-        + record["LengthRew."],
+        + record["FormatAcc."] / 100,
         4,
     )
 

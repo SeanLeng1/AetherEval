@@ -1,7 +1,7 @@
 # API-Bank
 
-Native AetherEval task for the GD2PO API-Bank setup. It reproduces the per-level
-correctness, format, and length-reward metrics for ToolRL/GDPO-style models that emit
+Native AetherEval task for the GD2PO API-Bank setup. It reports the per-level
+correctness, format, and diagnostic length-reward metrics for ToolRL/GDPO-style models that emit
 `<think>...</think>`, `<tool_call>...</tool_call>`, and/or `<response>...</response>`.
 
 ## Data
@@ -72,8 +72,9 @@ Per-generation `meta` in `predictions.jsonl` includes `correct_score`,
   APIBank eval/reward code.
 - Report aliases: `Level 1 Acc.`, `Level 2 Acc.`, `Level 3 Acc.`, `CorrectAcc.`,
   `FormatAcc.`, `LengthRew.`, `LengthReward`, and `Overall`.
-- `Overall = CorrectAcc. / 100 + FormatAcc. / 100 + LengthRew.` and is the
-  AetherEval `PRIMARY_METRIC`.
+- `Overall = CorrectAcc. / 100 + FormatAcc. / 100` and is the AetherEval
+  `PRIMARY_METRIC` (range `0` to `2`). `LengthRew.` remains available as a
+  diagnostic metric but does not contribute to `Overall`.
 
 Raw counts (`correct_*`, `total_*`, `format_*`), `think_word_count_avg_*`, and
 `reward_avg_*` are also reported for parity with the GD2PO leaderboard layer.
