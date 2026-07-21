@@ -6,7 +6,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
+    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
+    local_constraint_body,
     parallel_map,
     parse_json_object,
     resolve_judge_settings,
@@ -20,6 +22,15 @@ DEFAULT_JUDGE_MODEL = str(
     resolve_task_default_metrics("healthbench").get("judge_model", "gpt-4.1-2025-04-14")
 )
 SYSTEM_MESSAGE = "You are a helpful assistant."
+GRADE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "explanation": {"type": "string"},
+        "criteria_met": {"type": "boolean"},
+    },
+    "required": ["explanation", "criteria_met"],
+    "additionalProperties": False,
+}
 
 GRADER_TEMPLATE = """
 Your job is to look at a conversation and a rubric item, and score the last turn (i.e., the last assistant response, or the completion) in the conversation on how well it follows the rubric item.
@@ -134,29 +145,40 @@ def score_generations_batch(
 
     def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
         _, _, _, prompt = job
-        last_error: BaseException | None = None
-        for _ in range(20):
-            text = chat_completion(
+        last_text = ""
+        messages = [
+            {"role": "system", "content": SYSTEM_MESSAGE},
+            {"role": "user", "content": prompt},
+        ]
+        for _ in range(NORMAL_FORMAT_ATTEMPTS):
+            last_text = chat_completion(
                 settings,
-                [
-                    {"role": "system", "content": SYSTEM_MESSAGE},
-                    {"role": "user", "content": prompt},
-                ],
+                messages,
             )
+            grade = _parse_grade(last_text)
+            if grade is not None:
+                return grade
+
+        constraint = local_constraint_body(settings, json_schema=GRADE_SCHEMA)
+        if constraint is not None:
             try:
-                parsed = parse_json_object(text)
-                if (
-                    parsed.get("criteria_met") is True
-                    or parsed.get("criteria_met") is False
-                ):
-                    return {
-                        "criteria_met": bool(parsed["criteria_met"]),
-                        "explanation": str(parsed.get("explanation", "")),
-                        "raw": text,
-                    }
-            except (ValueError, TypeError) as exc:
-                last_error = exc
-        raise RuntimeError(f"HealthBench judge returned invalid JSON: {last_error}")
+                last_text = chat_completion(
+                    settings,
+                    messages,
+                    extra_body=constraint,
+                )
+                grade = _parse_grade(last_text)
+                if grade is not None:
+                    return grade
+            except (RuntimeError, ValueError):
+                pass
+
+        # simple-evals retries malformed HealthBench grades until one parses.
+        while True:
+            last_text = chat_completion(settings, messages)
+            grade = _parse_grade(last_text)
+            if grade is not None:
+                return grade
 
     grades = parallel_map(
         judge, jobs, workers=settings.workers, desc="HealthBench judge"
@@ -251,6 +273,23 @@ def _clipped_mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return min(1.0, max(0.0, sum(values) / len(values)))
+
+
+def _parse_grade(text: str) -> dict[str, Any] | None:
+    try:
+        parsed = parse_json_object(text)
+    except (ValueError, TypeError):
+        return None
+    if (
+        parsed.get("criteria_met") is not True
+        and parsed.get("criteria_met") is not False
+    ):
+        return None
+    return {
+        "criteria_met": bool(parsed["criteria_met"]),
+        "explanation": str(parsed.get("explanation", "")),
+        "raw": text,
+    }
 
 
 def _bootstrap_std(values: list[float], count: int, seed: int) -> float:

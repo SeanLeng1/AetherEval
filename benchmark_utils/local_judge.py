@@ -122,7 +122,16 @@ class OfflineJudgeClient:
         if self.enable_thinking is not None:
             gen_cfg["enable_thinking"] = self.enable_thinking
 
-        supported_extra = {"top_k", "min_p", "stop", "enable_thinking"}
+        supported_extra = {
+            "top_k",
+            "min_p",
+            "stop",
+            "enable_thinking",
+            "regex",
+            "json_schema",
+            "ebnf",
+            "structural_tag",
+        }
         for key, value in (extra_body or {}).items():
             if key not in supported_extra:
                 raise ValueError(

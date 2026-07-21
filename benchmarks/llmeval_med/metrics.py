@@ -7,7 +7,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
+    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
+    local_constraint_body,
     parallel_map,
     resolve_judge_settings,
 )
@@ -21,7 +23,15 @@ DEFAULT_JUDGE_MODEL = str(
 )
 SYSTEM_MESSAGE = "You are a helpful assistant."
 THRESHOLD = 4.0
-MAX_FORMAT_ATTEMPTS = 5
+GRADE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "判断依据": {"type": "string"},
+        "得分": {"type": "string", "enum": ["[1]", "[2]", "[3]", "[4]", "[5]"]},
+    },
+    "required": ["判断依据", "得分"],
+    "additionalProperties": False,
+}
 CATEGORY_CODES = {
     "医疗知识": "MK",
     "医疗语言理解": "MLU",
@@ -73,13 +83,14 @@ def score_generations_batch(
     def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
         _, _, _, prompt = job
         last = ""
-        for attempt in range(MAX_FORMAT_ATTEMPTS):
+        messages = [
+            {"role": "system", "content": SYSTEM_MESSAGE},
+            {"role": "user", "content": prompt},
+        ]
+        for attempt in range(NORMAL_FORMAT_ATTEMPTS):
             last = chat_completion(
                 settings,
-                [
-                    {"role": "system", "content": SYSTEM_MESSAGE},
-                    {"role": "user", "content": prompt},
-                ],
+                messages,
             )
             match = re.search(r"\[(\d+)\]", last)
             if match and 1 <= int(match.group(1)) <= 5:
@@ -88,14 +99,36 @@ def score_generations_batch(
                     "raw": last,
                     "format_attempts": attempt + 1,
                 }
+
+        constraint = local_constraint_body(settings, json_schema=GRADE_SCHEMA)
+        if constraint is not None:
+            try:
+                last = chat_completion(
+                    settings,
+                    messages,
+                    extra_body=constraint,
+                )
+                match = re.search(r"\[(\d+)\]", last)
+                if match and 1 <= int(match.group(1)) <= 5:
+                    return {
+                        "score": int(match.group(1)),
+                        "raw": last,
+                        "format_attempts": NORMAL_FORMAT_ATTEMPTS + 1,
+                    }
+            except (RuntimeError, ValueError):
+                pass
+
+        # The released evaluator records -1 when no bracketed score is found.
         return {
-            "score": 0,
+            "score": -1,
             "raw": last,
-            "format_attempts": MAX_FORMAT_ATTEMPTS,
+            "format_attempts": NORMAL_FORMAT_ATTEMPTS + int(constraint is not None),
             "error": "judge returned no [1-5] score",
         }
 
-    grades = parallel_map(judge, jobs, workers=settings.workers, desc="LLMEval-Med judge")
+    grades = parallel_map(
+        judge, jobs, workers=settings.workers, desc="LLMEval-Med judge"
+    )
     results: list[list[dict[str, Any]]] = []
     offset = 0
     for generation_count in layouts:
@@ -109,9 +142,7 @@ def score_generations_batch(
                     "score": score,
                     "is_pass": score >= THRESHOLD,
                     "parsed": repeat_grades,
-                    "meta": {
-                        "judge_scores": [item["score"] for item in repeat_grades]
-                    },
+                    "meta": {"judge_scores": [item["score"] for item in repeat_grades]},
                 }
             )
         results.append(per_sample)
@@ -125,12 +156,14 @@ def aggregate(
     del metric_options
     categories: dict[str, list[float]] = defaultdict(list)
     all_scores: list[float] = []
+    judge_failures = 0
     for sample in sample_results:
         category = str(sample["meta"]["category"])
         for record in sample.get("records", []):
             score = float(record["score"])
             categories[category].append(score)
             all_scores.append(score)
+            judge_failures += sum("error" in item for item in record.get("parsed", []))
 
     metrics: dict[str, Any] = {}
     total_usable = 0
@@ -138,12 +171,15 @@ def aggregate(
     for category, code in CATEGORY_CODES.items():
         scores = categories.get(category, [])
         usable = sum(score >= THRESHOLD for score in scores)
-        metrics[f"{code}_usability_rate"] = usable / len(scores) * 100.0 if scores else 0.0
+        metrics[f"{code}_usability_rate"] = (
+            usable / len(scores) * 100.0 if scores else 0.0
+        )
         metrics[f"{code}_avg_judge_score"] = _mean(scores)
         total_usable += usable
         total_count += len(scores)
     metrics["OP"] = total_usable / total_count * 100.0 if total_count else 0.0
     metrics["avg_judge_score"] = _mean(all_scores)
+    metrics["judge_failures"] = float(judge_failures)
     metrics["__warnings__"] = [
         "MTG in the paper uses a five-dimension human evaluation with a safety veto. "
         "The released automated pipeline only supports the same averaged GPT-4o >=4 "

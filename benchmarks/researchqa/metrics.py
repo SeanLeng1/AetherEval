@@ -6,7 +6,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
+    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
+    local_constraint_body,
     parallel_map,
     resolve_judge_settings,
 )
@@ -65,32 +67,54 @@ def score_generations_batch(
         layouts.append(per_generation)
 
     def judge(
-        job: tuple[int, int, int, list[dict[str, Any]], str]
+        job: tuple[int, int, int, list[dict[str, Any]], str],
     ) -> list[dict[str, Any]]:
         _, _, _, rubrics, prompt = job
         last_output = ""
-        for _ in range(3):
+        for _ in range(NORMAL_FORMAT_ATTEMPTS):
             last_output = chat_completion(
                 settings,
                 [{"role": "user", "content": prompt}],
             )
-            labels = [line.strip() for line in last_output.splitlines() if line.strip()]
-            if len(labels) == len(rubrics) and all(label in LABELS for label in labels):
-                return [
-                    {
-                        "rubric": rubric["rubric_item"],
-                        "type": rubric.get("type", []),
-                        "label": label,
-                        "normalized_score": (LABELS[label] - 1) / 4.0,
-                    }
-                    for rubric, label in zip(rubrics, labels, strict=True)
-                ]
-        raise RuntimeError(
-            "ResearchQA judge returned the wrong number or kind of labels: "
-            f"{last_output!r}"
-        )
+            parsed = _parse_batch(rubrics, last_output)
+            if parsed is not None:
+                return parsed
 
-    batches = parallel_map(judge, jobs, workers=settings.workers, desc="ResearchQA judge")
+        label_pattern = "(" + "|".join(LABELS) + ")"
+        constraint = local_constraint_body(
+            settings,
+            regex=r"\n".join(label_pattern for _ in rubrics),
+        )
+        if constraint is not None:
+            try:
+                last_output = chat_completion(
+                    settings,
+                    [{"role": "user", "content": prompt}],
+                    extra_body=constraint,
+                )
+                parsed = _parse_batch(rubrics, last_output)
+                if parsed is not None:
+                    return parsed
+            except (RuntimeError, ValueError) as exc:
+                last_output = str(exc)
+
+        # The official ResearchQA evaluator skips the whole item when any
+        # rubric batch still has the wrong shape after its retries.
+        return [
+            {
+                "rubric": rubric["rubric_item"],
+                "type": rubric.get("type", []),
+                "label": None,
+                "normalized_score": 0.0,
+                "raw": last_output,
+                "error": "judge returned the wrong number or kind of labels",
+            }
+            for rubric in rubrics
+        ]
+
+    batches = parallel_map(
+        judge, jobs, workers=settings.workers, desc="ResearchQA judge"
+    )
     results: list[list[dict[str, Any]]] = []
     offset = 0
     for per_generation in layouts:
@@ -100,15 +124,26 @@ def score_generations_batch(
             for batch in batches[offset : offset + batch_count]:
                 rubric_grades.extend(batch)
             offset += batch_count
-            score = sum(item["normalized_score"] for item in rubric_grades) / len(
-                rubric_grades
+            judge_failed = any("error" in item for item in rubric_grades)
+            score = (
+                0.0
+                if judge_failed
+                else sum(item["normalized_score"] for item in rubric_grades)
+                / len(rubric_grades)
             )
             per_sample.append(
                 {
                     "score": score,
                     "is_pass": score >= 0.5,
                     "parsed": rubric_grades,
-                    "meta": {"rubric_grades": rubric_grades},
+                    "meta": {
+                        "rubric_grades": rubric_grades,
+                        "judge_format_failures": sum(
+                            "error" in item for item in rubric_grades
+                        ),
+                        "judge_failed": judge_failed,
+                        "_aethereval_unscored": judge_failed,
+                    },
                 }
             )
         results.append(per_sample)
@@ -123,8 +158,12 @@ def aggregate(
     values: list[float] = []
     domains: dict[str, list[float]] = defaultdict(list)
     fields: dict[str, list[float]] = defaultdict(list)
+    judge_failures = 0
     for sample in sample_results:
         for record in sample.get("records", []):
+            if record.get("meta", {}).get("judge_failed"):
+                judge_failures += 1
+                continue
             score = float(record["score"])
             values.append(score)
             domains[str(sample["meta"]["general_domain"])].append(score)
@@ -138,12 +177,32 @@ def aggregate(
             int(options.get("bootstrap_seed", 42)),
         )
         * 100.0,
+        "scored_samples": float(len(values)),
+        "judge_failures": float(judge_failures),
     }
     for name, scores in sorted(domains.items()):
         metrics[f"domain/{name}"] = _mean(scores) * 100.0
     for name, scores in sorted(fields.items()):
         metrics[f"field/{name}"] = _mean(scores) * 100.0
     return metrics
+
+
+def _parse_batch(
+    rubrics: list[dict[str, Any]],
+    text: str,
+) -> list[dict[str, Any]] | None:
+    labels = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(labels) != len(rubrics) or any(label not in LABELS for label in labels):
+        return None
+    return [
+        {
+            "rubric": rubric["rubric_item"],
+            "type": rubric.get("type", []),
+            "label": label,
+            "normalized_score": (LABELS[label] - 1) / 4.0,
+        }
+        for rubric, label in zip(rubrics, labels, strict=True)
+    ]
 
 
 def _build_judge_prompt(response: str, questions: list[str]) -> str:
@@ -159,9 +218,7 @@ def _build_judge_prompt(response: str, questions: list[str]) -> str:
         "- Completely: *mentioned with sufficient details*\n\n"
         "Only output one of the five phrases for each question, separated by newlines, and nothing else.\n\n"
         f"Response: {response}\n"
-        "Questions:\n"
-        + "\n".join(questions)
-        + "\n\nOutput:"
+        "Questions:\n" + "\n".join(questions) + "\n\nOutput:"
     )
 
 

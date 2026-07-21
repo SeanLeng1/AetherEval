@@ -4,7 +4,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
+    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
+    local_constraint_body,
     parallel_map,
     parse_json_object,
     resolve_judge_settings,
@@ -15,14 +17,21 @@ PRIMARY_METRIC = "overall_score"
 USES_LLM_JUDGE = True
 PRESERVE_EXISTING_SCORES_ON_RESUME = True
 DEFAULT_JUDGE_MODEL = str(
-    resolve_task_default_metrics("writingbench").get(
-        "judge_model", "claude-sonnet-4-5"
-    )
+    resolve_task_default_metrics("writingbench").get("judge_model", "claude-sonnet-4-5")
 )
 EVALUATE_SYSTEM = (
     "You are an expert evaluator with extensive experience in evaluating response "
     "of given query."
 )
+GRADE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        "reason": {"type": "string"},
+    },
+    "required": ["score", "reason"],
+    "additionalProperties": False,
+}
 EVALUATE_PROMPT = """
 Evaluate the Response based on the Query and Criteria provided following the Scoring Rules.
 
@@ -118,25 +127,42 @@ def score_generations_batch(
     def judge(job: tuple[int, int, int, str, str]) -> dict[str, Any]:
         _, _, _, name, prompt = job
         last_error: BaseException | None = None
-        for _ in range(15):
-            text = chat_completion(
+        last_text = ""
+        messages = [
+            {"role": "system", "content": EVALUATE_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        for _ in range(NORMAL_FORMAT_ATTEMPTS):
+            last_text = chat_completion(
                 settings,
-                [
-                    {"role": "system", "content": EVALUATE_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
+                messages,
             )
             try:
-                parsed = parse_json_object(text)
-                score = parsed.get("score")
-                reason = parsed.get("reason")
-                if isinstance(score, int) and 1 <= score <= 10 and isinstance(reason, str):
-                    return {"name": name, "score": score, "reason": reason, "raw": text}
+                return _parse_grade(name, last_text)
             except (ValueError, TypeError) as exc:
                 last_error = exc
-        raise RuntimeError(f"WritingBench judge returned invalid score: {last_error}")
 
-    grades = parallel_map(judge, jobs, workers=settings.workers, desc="WritingBench judge")
+        constraint = local_constraint_body(settings, json_schema=GRADE_SCHEMA)
+        if constraint is not None:
+            try:
+                last_text = chat_completion(
+                    settings,
+                    messages,
+                    extra_body=constraint,
+                )
+                return _parse_grade(name, last_text)
+            except (RuntimeError, ValueError, TypeError) as exc:
+                last_error = exc
+
+        # The official evaluator aborts when its format retries are exhausted.
+        raise ValueError(
+            f"WritingBench judge failed to generate a score: {last_error}; "
+            f"last response={last_text!r}"
+        )
+
+    grades = parallel_map(
+        judge, jobs, workers=settings.workers, desc="WritingBench judge"
+    )
     results: list[list[dict[str, Any]]] = []
     offset = 0
     for per_generation in layouts:
@@ -152,7 +178,8 @@ def score_generations_batch(
                     "parsed": criterion_grades,
                     "meta": {
                         "criterion_scores": {
-                            item["name"]: float(item["score"]) for item in criterion_grades
+                            item["name"]: float(item["score"])
+                            for item in criterion_grades
                         }
                     },
                 }
@@ -180,18 +207,16 @@ def aggregate(
             for dimension in sample["meta"].get("requirement_subsets", []):
                 requirement_r[str(dimension)].append(score)
             criterion_scores = record.get("meta", {}).get("criterion_scores", {})
-            for dimension, names in sample["meta"].get(
-                "requirement_criteria", {}
-            ).items():
+            for dimension, names in (
+                sample["meta"].get("requirement_criteria", {}).items()
+            ):
                 for name in names:
                     if name not in criterion_scores:
                         raise ValueError(
                             f"WritingBench criterion {name!r} is missing for "
                             f"sample {sample['sample_id']}"
                         )
-                    requirement_c[str(dimension)].append(
-                        float(criterion_scores[name])
-                    )
+                    requirement_c[str(dimension)].append(float(criterion_scores[name]))
 
     metrics: dict[str, float] = {
         "overall_raw_1_10": _mean(all_scores),
@@ -202,12 +227,8 @@ def aggregate(
     for name, values in sorted(domain2.items()):
         metrics[f"domain2/{name}"] = _mean(values) * 10.0
     for dimension in ("style", "format", "length"):
-        metrics[f"requirement/{dimension}_R"] = (
-            _mean(requirement_r[dimension]) * 10.0
-        )
-        metrics[f"requirement/{dimension}_C"] = (
-            _mean(requirement_c[dimension]) * 10.0
-        )
+        metrics[f"requirement/{dimension}_R"] = _mean(requirement_r[dimension]) * 10.0
+        metrics[f"requirement/{dimension}_C"] = _mean(requirement_c[dimension]) * 10.0
     return metrics
 
 
@@ -215,6 +236,17 @@ def _strip_thinking(text: str) -> str:
     marker = "</think>\n\n"
     pos = text.find(marker)
     return text[pos + len(marker) :] if pos >= 0 else text
+
+
+def _parse_grade(name: str, text: str) -> dict[str, Any]:
+    parsed = parse_json_object(text)
+    score = parsed.get("score")
+    reason = parsed.get("reason")
+    if not isinstance(score, int) or not 1 <= score <= 10:
+        raise ValueError("judge score must be an integer from 1 to 10")
+    if not isinstance(reason, str):
+        raise ValueError("judge reason must be a string")
+    return {"name": name, "score": score, "reason": reason, "raw": text}
 
 
 def _mean(values: list[float]) -> float:

@@ -362,6 +362,15 @@ generative judge (typically GPT-OSS), but their HealthBench reward path batches
 all rubrics into a different single prompt, so it is not exactly the official
 HealthBench judging protocol used here.
 
+Malformed judge output gets three ordinary format attempts. An internally
+managed local SGLang judge then gets one task-specific structured-output attempt
+(`json_schema` or `regex`). If that also fails, each benchmark keeps its official
+failure behavior rather than applying a shared zero-score fallback: for example,
+ResearchQA and Arena-Hard exclude failed judgments, while WritingBench raises and
+HealthBench continues retrying. Failure and exclusion counts are included in the
+reported metrics where applicable. ResearchQA and Creative Writing failures are
+left eligible for scoring again on resume, matching their upstream workflows.
+
 The benchmark folders document the pinned candidate and judge decoding settings.
 CLI generation flags override candidate defaults except for the `n>1` sampling
 guard described above. Avoid other global decoding overrides when

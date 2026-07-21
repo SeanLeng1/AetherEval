@@ -8,8 +8,11 @@ import tiktoken
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
+    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
+    local_constraint_body,
     parallel_map,
+    parse_json_object,
     resolve_judge_settings,
 )
 
@@ -54,6 +57,15 @@ LABEL_TO_SCORE = {
     "B=A": [0.5],
     "B<<A": [1.0] * 3,
     "B<A": [1.0],
+}
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "verdict": {"type": "string", "enum": ["A>>B", "A>B", "A=B", "B>A", "B>>A"]},
+    },
+    "required": ["reasoning", "verdict"],
+    "additionalProperties": False,
 }
 
 
@@ -115,20 +127,44 @@ def score_generations_batch(
 
     def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
         _, _, _, prompt = job
-        for _ in range(5):
-            text = chat_completion(
+        last_text = ""
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        for _ in range(NORMAL_FORMAT_ATTEMPTS):
+            last_text = chat_completion(
                 settings,
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+                messages,
             )
-            label = _parse_label(text)
+            label = _parse_label(last_text)
             if label is not None:
-                return {"score": label, "judgment": text}
-        raise RuntimeError("Arena-Hard-v2 judge returned no parseable verdict")
+                return {"score": label, "judgment": last_text}
 
-    games = parallel_map(judge, jobs, workers=settings.workers, desc="Arena-Hard-v2 judge")
+        constraint = local_constraint_body(settings, json_schema=VERDICT_SCHEMA)
+        if constraint is not None:
+            try:
+                last_text = chat_completion(
+                    settings,
+                    messages,
+                    extra_body=constraint,
+                )
+                label = _parse_label(last_text)
+                if label is not None:
+                    return {"score": label, "judgment": last_text}
+            except (RuntimeError, ValueError):
+                pass
+
+        # Official Arena-Hard stores null and filters the whole judgment row.
+        return {
+            "score": None,
+            "judgment": last_text,
+            "error": "judge returned no parseable verdict",
+        }
+
+    games = parallel_map(
+        judge, jobs, workers=settings.workers, desc="Arena-Hard-v2 judge"
+    )
     results: list[list[dict[str, Any]]] = []
     offset = 0
     for sample_idx, output in enumerate(generation_outputs):
@@ -136,10 +172,13 @@ def score_generations_batch(
         for gen_idx in range(len(output.generations)):
             game0, game1 = games[offset : offset + 2]
             offset += 2
-            battle_scores = LABEL_TO_SCORE[game1["score"]] + [
-                1.0 - value for value in LABEL_TO_SCORE[game0["score"]]
-            ]
-            score = sum(battle_scores) / len(battle_scores)
+            judge_failed = game0["score"] is None or game1["score"] is None
+            battle_scores: list[float] = []
+            if not judge_failed:
+                battle_scores = LABEL_TO_SCORE[game1["score"]] + [
+                    1.0 - value for value in LABEL_TO_SCORE[game0["score"]]
+                ]
+            score = sum(battle_scores) / len(battle_scores) if battle_scores else 0.0
             per_sample.append(
                 {
                     "score": score,
@@ -147,6 +186,7 @@ def score_generations_batch(
                     "parsed": [game0, game1],
                     "meta": {
                         "battle_scores": battle_scores,
+                        "judge_failed": judge_failed,
                         "candidate_metadata": candidate_metadata[sample_idx][gen_idx],
                     },
                 }
@@ -158,7 +198,7 @@ def score_generations_batch(
 def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     options = metric_options or {}
     baseline_by_uid = {
         str(sample["sample_id"]): sample["meta"]["baseline_metadata"]
@@ -166,10 +206,14 @@ def aggregate(
     }
     candidate_rows: list[dict[str, Any]] = []
     candidate_scores: list[float] = []
+    judge_failures = 0
     for sample in sample_results:
         uid = str(sample["sample_id"])
         for record in sample.get("records", []):
             meta = record.get("meta", {})
+            if meta.get("judge_failed"):
+                judge_failures += 1
+                continue
             for score in meta["battle_scores"]:
                 candidate_scores.append(float(score))
                 candidate_rows.append(
@@ -199,21 +243,40 @@ def aggregate(
                     }
                 )
 
-    median, lower, upper = _style_controlled_score(
-        cohort_rows + candidate_rows,
-        target_model="__candidate__",
-        seed=int(options.get("bootstrap_seed", 42)),
-        rounds=100,
-    )
-    return {
+    if candidate_rows:
+        median, lower, upper = _style_controlled_score(
+            cohort_rows + candidate_rows,
+            target_model="__candidate__",
+            seed=int(options.get("bootstrap_seed", 42)),
+            rounds=100,
+        )
+    else:
+        median = lower = upper = 0.0
+    metrics: dict[str, Any] = {
         "style_controlled_win_rate": median * 100.0,
         "style_controlled_ci_lower": lower * 100.0,
         "style_controlled_ci_upper": upper * 100.0,
         "raw_win_rate": _mean(candidate_scores) * 100.0,
+        "scored_judgments": float(len(candidate_scores)),
+        "judge_failures": float(judge_failures),
     }
+    if judge_failures:
+        metrics["__warnings__"] = [
+            f"{judge_failures} Arena-Hard judgments were unparseable and excluded, "
+            "matching the official result loader."
+        ]
+    return metrics
 
 
 def _parse_label(text: str) -> str | None:
+    try:
+        parsed = parse_json_object(text)
+    except (ValueError, TypeError):
+        parsed = {}
+    verdict = str(parsed.get("verdict", "")).upper()
+    if verdict in LABEL_TO_SCORE:
+        return verdict
+
     upper = text.upper()
     for pattern in (r"\[\[([AB<>=]+)\]\]", r"\[([AB<>=]+)\]"):
         matches = [match for match in re.findall(pattern, upper) if match]

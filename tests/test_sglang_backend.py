@@ -225,9 +225,7 @@ class SGLangBackendTests(unittest.TestCase):
             calls["serializer"] = response_serializer
             return behavior
 
-        grpc_module = SimpleNamespace(
-            unary_unary_rpc_method_handler=method_factory
-        )
+        grpc_module = SimpleNamespace(unary_unary_rpc_method_handler=method_factory)
 
         class Servicer:
             def Embed(self):  # noqa: N802
@@ -236,9 +234,7 @@ class SGLangBackendTests(unittest.TestCase):
         pb2_grpc = SimpleNamespace(
             sglang__scheduler__pb2=SimpleNamespace(
                 EmbedResponse=SimpleNamespace(
-                    DESCRIPTOR=SimpleNamespace(
-                        fields=[SimpleNamespace(number=4)]
-                    )
+                    DESCRIPTOR=SimpleNamespace(fields=[SimpleNamespace(number=4)])
                 )
             ),
             grpc=grpc_module,
@@ -282,9 +278,7 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(calls, [("args", "model-info", {})])
 
     def test_router_uses_requested_policy_and_log_level(self) -> None:
-        service = sglang_service.SGLangService.__new__(
-            sglang_service.SGLangService
-        )
+        service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
         service.router_policy = "round_robin"
         service.router_log_level = "error"
         service.model = "test/model"
@@ -386,9 +380,7 @@ class SGLangBackendTests(unittest.TestCase):
         worker = SimpleNamespace(close=SimpleNamespace(remote=lambda: "close-ref"))
         ray = mock.Mock()
         ray.get.side_effect = RuntimeError("actor already died")
-        service = sglang_service.SGLangService.__new__(
-            sglang_service.SGLangService
-        )
+        service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
         service._ray = ray
         service._workers = [worker]
         service._router = None
@@ -400,9 +392,7 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(service._workers, [])
 
     def test_service_adds_model_id_without_overriding_request(self) -> None:
-        service = sglang_service.SGLangService.__new__(
-            sglang_service.SGLangService
-        )
+        service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
         service._closed = False
         service.base_url = "http://127.0.0.1:18080"
         service.model = "test/default-model"
@@ -453,9 +443,12 @@ class SGLangBackendTests(unittest.TestCase):
 
     def test_server_cli_args_reject_http_sidecar_options(self) -> None:
         for key in ("log_level_http", "grpc_http_sidecar_port"):
-            with self.subTest(key=key), self.assertRaisesRegex(
-                ValueError,
-                "do not expose an HTTP sidecar",
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "do not expose an HTTP sidecar",
+                ),
             ):
                 sglang_service._server_cli_args({key: "unused"})
 
@@ -476,6 +469,21 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(params["min_p"], 0.05)
         self.assertEqual(params["seed"], 123)
         self.assertNotIn("top_k", params)
+
+    def test_sampling_params_include_structured_output_constraints(self) -> None:
+        params = sglang_backend._build_sampling_params(
+            {
+                "regex": "(yes|no)",
+                "json_schema": '{"type":"object"}',
+                "ebnf": 'root ::= "ok"',
+                "structural_tag": "tag",
+            }
+        )
+
+        self.assertEqual(params["regex"], "(yes|no)")
+        self.assertEqual(params["json_schema"], '{"type":"object"}')
+        self.assertEqual(params["ebnf"], 'root ::= "ok"')
+        self.assertEqual(params["structural_tag"], "tag")
 
     def test_grpc_single_item_batch_response_is_unwrapped(self) -> None:
         response = [
@@ -519,9 +527,7 @@ class SGLangBackendTests(unittest.TestCase):
                 )
                 _, requests, _ = service.calls[0]
                 self.assertEqual(requests[0]["text"], f"thinking={enabled}:hello")
-                self.assertNotIn(
-                    "enable_thinking", requests[0]["sampling_params"]
-                )
+                self.assertNotIn("enable_thinking", requests[0]["sampling_params"])
 
     def test_service_generation_sends_independent_router_requests(self) -> None:
         service = _FakeService()

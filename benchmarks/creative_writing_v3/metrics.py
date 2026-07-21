@@ -6,8 +6,11 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
+    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
+    local_constraint_body,
     parallel_map,
+    parse_json_object,
     resolve_judge_settings,
 )
 
@@ -28,11 +31,22 @@ CRITERIA = [
 ]
 NEGATIVE_CRITERIA = [
     line.strip()
-    for line in (ROOT / "negative_criteria.txt").read_text(encoding="utf-8").splitlines()
+    for line in (ROOT / "negative_criteria.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
     if line.strip()
 ]
 NEGATIVE_CRITERIA_SET = set(NEGATIVE_CRITERIA)
 JUDGE_PROMPT = (ROOT / "judge_prompt.txt").read_text(encoding="utf-8").rstrip("\n")
+SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        criterion: {"type": "number", "minimum": 0, "maximum": 20}
+        for criterion in CRITERIA
+    },
+    "additionalProperties": False,
+    "minProperties": 1,
+}
 
 
 def validate_metric_options(metric_options: dict[str, Any] | None = None) -> None:
@@ -58,9 +72,10 @@ def score_generations_batch(
         if sample.id != output.sample_id:
             raise ValueError("creative_writing_v3 sample/output mismatch")
         for gen_idx, generation in enumerate(output.generations):
-            if output.meta.get("creative_generation_failed") or len(
-                generation.strip()
-            ) < 500:
+            if (
+                output.meta.get("creative_generation_failed")
+                or len(generation.strip()) < 500
+            ):
                 jobs.append((sample_idx, gen_idx, ""))
                 continue
             prompt = JUDGE_PROMPT.format(
@@ -76,15 +91,46 @@ def score_generations_batch(
         _, _, prompt = job
         if not prompt:
             return {"scores": {}, "raw": "", "generation_failed": True}
-        for _ in range(5):
-            text = chat_completion(
+        last_text = ""
+        messages = [{"role": "user", "content": prompt}]
+        for _ in range(NORMAL_FORMAT_ATTEMPTS):
+            last_text = chat_completion(
                 settings,
-                [{"role": "user", "content": prompt}],
+                messages,
             )
-            scores = _parse_scores(text)
+            scores = _parse_scores(last_text)
             if scores:
-                return {"scores": scores, "raw": text, "generation_failed": False}
-        raise RuntimeError("Creative Writing judge returned no parseable scores")
+                return {
+                    "scores": scores,
+                    "raw": last_text,
+                    "generation_failed": False,
+                }
+
+        constraint = local_constraint_body(settings, json_schema=SCORE_SCHEMA)
+        if constraint is not None:
+            try:
+                last_text = chat_completion(
+                    settings,
+                    messages,
+                    extra_body=constraint,
+                )
+                scores = _parse_scores(last_text)
+                if scores:
+                    return {
+                        "scores": scores,
+                        "raw": last_text,
+                        "generation_failed": False,
+                    }
+            except (RuntimeError, ValueError):
+                pass
+
+        # Upstream leaves the task unjudged and excludes it from aggregation.
+        return {
+            "scores": {},
+            "raw": last_text,
+            "generation_failed": False,
+            "error": "judge returned no parseable scores",
+        }
 
     judged = parallel_map(
         judge, jobs, workers=settings.workers, desc="Creative Writing V3 judge"
@@ -109,6 +155,8 @@ def score_generations_batch(
                     "parsed": item,
                     "meta": {
                         "generation_failed": bool(item["generation_failed"]),
+                        "judge_failed": "error" in item,
+                        "_aethereval_unscored": "error" in item,
                         "judge_scores": scores,
                     },
                 }
@@ -123,11 +171,15 @@ def aggregate(
 ) -> dict[str, Any]:
     options = metric_options or {}
     scores: list[float] = []
-    failed = 0
+    generation_failures = 0
+    judge_failures = 0
     for sample in sample_results:
         for record in sample.get("records", []):
             if record.get("meta", {}).get("generation_failed"):
-                failed += 1
+                generation_failures += 1
+                continue
+            if record.get("meta", {}).get("judge_failed"):
+                judge_failures += 1
                 continue
             scores.append(float(record["score"]))
     raw = _mean(scores)
@@ -135,29 +187,48 @@ def aggregate(
         "creative_score_0_20": round(raw, 2),
         "eqbench_creative_score": round(raw * 5.0, 2),
         "scored_pieces": float(len(scores)),
-        "generation_failures": float(failed),
+        "generation_failures": float(generation_failures),
+        "judge_failures": float(judge_failures),
     }
     count = int(options.get("bootstrap_resamples", 1000))
     if scores and count > 0:
         rng = random.Random(int(options.get("bootstrap_seed", 42)))
-        boot = sorted(
-            _mean([rng.choice(scores) for _ in scores]) for _ in range(count)
-        )
+        boot = sorted(_mean([rng.choice(scores) for _ in scores]) for _ in range(count))
         confidence = float(options.get("bootstrap_confidence", 0.95))
         lower = int((1.0 - confidence) / 2.0 * len(boot))
         upper = min(len(boot) - 1, int((1.0 + confidence) / 2.0 * len(boot)) - 1)
         metrics["creative_score_ci_lower"] = boot[max(0, lower)]
         metrics["creative_score_ci_upper"] = boot[upper]
-    if failed:
-        metrics["__warnings__"] = [
-            f"{failed} pieces remained shorter than 500 characters after 3 attempts "
-            "and were excluded, matching upstream behavior."
-        ]
+    warnings = []
+    if generation_failures:
+        warnings.append(
+            f"{generation_failures} pieces remained shorter than 500 characters "
+            "after 3 attempts and were excluded, matching upstream behavior."
+        )
+    if judge_failures:
+        warnings.append(
+            f"{judge_failures} pieces had no parseable judge scores and were "
+            "excluded, matching upstream behavior."
+        )
+    if warnings:
+        metrics["__warnings__"] = warnings
     return metrics
 
 
 def _parse_scores(text: str) -> dict[str, float]:
     scores: dict[str, float] = {}
+    try:
+        parsed = parse_json_object(text)
+    except (ValueError, TypeError):
+        parsed = {}
+    for name, raw in parsed.items():
+        if name in SCORE_SCHEMA["properties"] and isinstance(raw, (int, float)):
+            value = float(raw)
+            if 0.0 <= value <= 20.0:
+                scores[name] = value
+    if scores:
+        return scores
+
     patterns = (
         r"(.*?):\s*(?:Score\s+)?(-?\d+(?:\.\d+)?)",
         r"(.*?):\s*\[(-?\d+(?:\.\d+)?)\]",

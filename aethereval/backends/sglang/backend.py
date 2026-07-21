@@ -29,6 +29,9 @@ def _build_sampling_params(gen_cfg: dict[str, Any]) -> dict[str, Any]:
         params["stop"] = gen_cfg["stop"]
     if gen_cfg.get("seed") is not None:
         params["seed"] = int(gen_cfg["seed"])
+    for key in ("regex", "json_schema", "ebnf", "structural_tag"):
+        if gen_cfg.get(key) is not None:
+            params[key] = gen_cfg[key]
     return params
 
 
@@ -36,8 +39,7 @@ def _extract_text(output: Any) -> str:
     if isinstance(output, list):
         if len(output) != 1:
             raise ValueError(
-                "SGLang gRPC returned an unexpected batch size: "
-                f"{len(output)}"
+                f"SGLang gRPC returned an unexpected batch size: {len(output)}"
             )
         return _extract_text(output[0])
     if isinstance(output, str):
@@ -98,8 +100,7 @@ def _extract_output_token_count(output: Any) -> int | None:
     if isinstance(output, list):
         if len(output) != 1:
             raise ValueError(
-                "SGLang gRPC returned an unexpected batch size: "
-                f"{len(output)}"
+                f"SGLang gRPC returned an unexpected batch size: {len(output)}"
             )
         return _extract_output_token_count(output[0])
     if isinstance(output, str):

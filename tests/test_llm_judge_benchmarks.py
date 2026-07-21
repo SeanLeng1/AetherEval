@@ -427,6 +427,26 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 float(item["points"]) for item in rubrics if float(item["points"]) > 0
             )
             self.assertEqual(health_score, expected_health)
+            health_attempt = 0
+
+            def health_retry(*args, **kwargs):  # noqa: ANN002, ANN003
+                nonlocal health_attempt
+                del args, kwargs
+                health_attempt += 1
+                if health_attempt % 4:
+                    return "invalid"
+                return '{"criteria_met": true, "explanation": "ok"}'
+
+            with mock.patch.object(
+                health.metrics_module,
+                "chat_completion",
+                side_effect=health_retry,
+            ):
+                health_retried = health.metrics_module.score_generations_batch(
+                    [health_sample], [health_output], options
+                )[0][0]
+            self.assertEqual(health_retried["score"], expected_health)
+            self.assertEqual(health_attempt, len(rubrics) * 4)
 
             writing = load_task("writingbench", BENCHMARKS)
             writing_sample = writing.task_module.load_samples(writing.spec.task_dir)[0]
@@ -440,6 +460,15 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                     [writing_sample], [writing_output], options
                 )[0][0]["score"]
             self.assertEqual(writing_score, 8.0)
+            with mock.patch.object(
+                writing.metrics_module,
+                "chat_completion",
+                return_value="invalid",
+            ):
+                with self.assertRaisesRegex(ValueError, "failed to generate a score"):
+                    writing.metrics_module.score_generations_batch(
+                        [writing_sample], [writing_output], options
+                    )
 
             creative = load_task("creative_writing_v3", BENCHMARKS)
             creative_sample = creative.task_module.load_samples(creative.spec.task_dir)[
@@ -460,6 +489,29 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                     [creative_sample], [creative_output], options
                 )[0][0]["score"]
             self.assertEqual(creative_score, 10.0)
+            with mock.patch.object(
+                creative.metrics_module,
+                "chat_completion",
+                return_value="invalid",
+            ):
+                creative_unscored = creative.metrics_module.score_generations_batch(
+                    [creative_sample], [creative_output], options
+                )[0][0]
+            self.assertEqual(creative_unscored["score"], 0.0)
+            self.assertIn("error", creative_unscored["parsed"])
+            self.assertTrue(creative_unscored["meta"]["judge_failed"])
+            self.assertTrue(creative_unscored["meta"]["_aethereval_unscored"])
+            creative_metrics = creative.metrics_module.aggregate(
+                [
+                    {
+                        "sample_id": creative_sample.id,
+                        "records": [creative_unscored],
+                    }
+                ],
+                {"bootstrap_resamples": 0},
+            )
+            self.assertEqual(creative_metrics["scored_pieces"], 0.0)
+            self.assertEqual(creative_metrics["judge_failures"], 1.0)
 
             research = load_task("researchqa", BENCHMARKS)
             research_samples = research.task_module.load_samples(research.spec.task_dir)
@@ -479,6 +531,44 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                     [research_sample], [research_output], options
                 )[0][0]["score"]
             self.assertEqual(research_score, 1.0)
+
+            with mock.patch.object(
+                research.metrics_module,
+                "chat_completion",
+                return_value="Not at all",
+            ) as invalid_research_judge:
+                research_unscored = research.metrics_module.score_generations_batch(
+                    [research_sample],
+                    [research_output],
+                    options,
+                )[0][0]
+            self.assertEqual(invalid_research_judge.call_count, 3)
+            self.assertEqual(research_unscored["score"], 0.0)
+            self.assertFalse(research_unscored["is_pass"])
+            self.assertTrue(research_unscored["meta"]["judge_failed"])
+            self.assertTrue(research_unscored["meta"]["_aethereval_unscored"])
+            self.assertEqual(
+                research_unscored["meta"]["judge_format_failures"],
+                len(research_sample.data["rubric"]),
+            )
+            self.assertTrue(
+                all(
+                    item["error"] == "judge returned the wrong number or kind of labels"
+                    for item in research_unscored["parsed"]
+                )
+            )
+            research_metrics = research.metrics_module.aggregate(
+                [
+                    {
+                        "sample_id": research_sample.id,
+                        "meta": research_sample.meta,
+                        "records": [research_unscored],
+                    }
+                ],
+                {"bootstrap_resamples": 0},
+            )
+            self.assertEqual(research_metrics["scored_samples"], 0.0)
+            self.assertEqual(research_metrics["judge_failures"], 1.0)
 
             medical = load_task("llmeval_med", BENCHMARKS)
             medical_sample = medical.task_module.load_samples(medical.spec.task_dir)[0]
@@ -509,12 +599,14 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 )[0][0]
             self.assertEqual(
                 invalid_judge.call_count,
-                medical.metrics_module.MAX_FORMAT_ATTEMPTS,
+                3,
             )
-            self.assertEqual(unscored["score"], 0.0)
+            self.assertEqual(unscored["score"], -1.0)
             self.assertFalse(unscored["is_pass"])
-            self.assertEqual(unscored["meta"]["judge_scores"], [0])
-            self.assertEqual(unscored["parsed"][0]["error"], "judge returned no [1-5] score")
+            self.assertEqual(unscored["meta"]["judge_scores"], [-1])
+            self.assertEqual(
+                unscored["parsed"][0]["error"], "judge returned no [1-5] score"
+            )
 
             arena = load_task("arena_hard_v2", BENCHMARKS)
             arena_sample = arena.task_module.load_samples(arena.spec.task_dir)[0]
@@ -528,12 +620,151 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                     [arena_sample], [arena_output], options
                 )[0][0]["score"]
             self.assertEqual(arena_score, 1.0)
+            with mock.patch.object(
+                arena.metrics_module,
+                "chat_completion",
+                return_value="invalid",
+            ):
+                arena_unscored = arena.metrics_module.score_generations_batch(
+                    [arena_sample], [arena_output], options
+                )[0][0]
+            self.assertEqual(arena_unscored["score"], 0.0)
+            self.assertTrue(arena_unscored["meta"]["judge_failed"])
+            self.assertTrue(all("error" in item for item in arena_unscored["parsed"]))
+            arena_metrics = arena.metrics_module.aggregate(
+                [
+                    {
+                        "sample_id": arena_sample.id,
+                        "meta": arena_sample.meta,
+                        "records": [arena_unscored],
+                    }
+                ],
+                {"bootstrap_resamples": 0},
+            )
+            self.assertEqual(arena_metrics["scored_judgments"], 0.0)
+            self.assertEqual(arena_metrics["judge_failures"], 1.0)
 
     def test_arena_style_metadata_matches_published_baseline_metadata(self) -> None:
         bundle = load_task("arena_hard_v2", BENCHMARKS)
         sample = bundle.task_module.load_samples(bundle.spec.task_dir)[0]
         actual = bundle.metrics_module._style_metadata(sample.data["baseline_answer"])
         self.assertEqual(actual, sample.meta["baseline_metadata"])
+
+    def test_local_judges_use_one_constrained_attempt_after_three_normal_attempts(
+        self,
+    ) -> None:
+        options = {
+            "judge_workers": 1,
+            "judge_max_retries": 0,
+            "judge_repeats": 1,
+            "_judge_client": object(),
+        }
+
+        def run_case(module, samples, outputs, constrained_response, key):  # noqa: ANN001
+            extra_bodies = []
+
+            def fake_completion(*args, **kwargs):  # noqa: ANN002, ANN003
+                del args
+                body = kwargs.get("extra_body")
+                extra_bodies.append(body)
+                return constrained_response if body is not None else "invalid"
+
+            with mock.patch.object(
+                module,
+                "chat_completion",
+                side_effect=fake_completion,
+            ):
+                result = module.score_generations_batch(samples, outputs, options)
+
+            self.assertEqual(len(extra_bodies) % 4, 0)
+            for start in range(0, len(extra_bodies), 4):
+                self.assertEqual(extra_bodies[start : start + 3], [None, None, None])
+                self.assertIn(key, extra_bodies[start + 3])
+            return result
+
+        health = load_task("healthbench", BENCHMARKS)
+        health_sample = health.task_module.load_samples(health.spec.task_dir)[0]
+        health_result = run_case(
+            health.metrics_module,
+            [health_sample],
+            [
+                GenerationOutput(
+                    health_sample.id,
+                    health.task_module.build_prompt(health_sample),
+                    ["answer"],
+                )
+            ],
+            '{"criteria_met":true,"explanation":"ok"}',
+            "json_schema",
+        )
+        self.assertFalse(
+            any("error" in grade for grade in health_result[0][0]["parsed"])
+        )
+
+        writing = load_task("writingbench", BENCHMARKS)
+        writing_sample = writing.task_module.load_samples(writing.spec.task_dir)[0]
+        writing_result = run_case(
+            writing.metrics_module,
+            [writing_sample],
+            [GenerationOutput(writing_sample.id, "prompt", ["answer"])],
+            '{"score":8,"reason":"ok"}',
+            "json_schema",
+        )
+        self.assertEqual(writing_result[0][0]["score"], 8.0)
+
+        creative = load_task("creative_writing_v3", BENCHMARKS)
+        creative_sample = creative.task_module.load_samples(creative.spec.task_dir)[0]
+        creative_result = run_case(
+            creative.metrics_module,
+            [creative_sample],
+            [GenerationOutput(creative_sample.id, "prompt", ["x" * 500])],
+            json.dumps({creative.metrics_module.CRITERIA[0]: 10}),
+            "json_schema",
+        )
+        self.assertFalse(creative_result[0][0]["meta"]["judge_failed"])
+
+        research = load_task("researchqa", BENCHMARKS)
+        research_sample = next(
+            sample
+            for sample in research.task_module.load_samples(research.spec.task_dir)
+            if len(sample.data["rubric"]) <= 8
+        )
+        research_result = run_case(
+            research.metrics_module,
+            [research_sample],
+            [GenerationOutput(research_sample.id, "prompt", ["answer"])],
+            "\n".join("Completely" for _ in research_sample.data["rubric"]),
+            "regex",
+        )
+        self.assertFalse(research_result[0][0]["meta"]["judge_failed"])
+
+        medical = load_task("llmeval_med", BENCHMARKS)
+        medical_sample = medical.task_module.load_samples(medical.spec.task_dir)[0]
+        medical_result = run_case(
+            medical.metrics_module,
+            [medical_sample],
+            [
+                GenerationOutput(
+                    medical_sample.id,
+                    medical.task_module.build_prompt(medical_sample),
+                    ["answer"],
+                )
+            ],
+            '{"判断依据":"ok","得分":"[4]"}',
+            "json_schema",
+        )
+        self.assertEqual(medical_result[0][0]["score"], 4.0)
+
+        arena = load_task("arena_hard_v2", BENCHMARKS)
+        arena_sample = arena.task_module.load_samples(arena.spec.task_dir)[0]
+        arena_result = run_case(
+            arena.metrics_module,
+            [arena_sample],
+            [GenerationOutput(arena_sample.id, "prompt", ["answer"])],
+            '{"reasoning":"ok","verdict":"A=B"}',
+            "json_schema",
+        )
+        self.assertFalse(arena_result[0][0]["meta"]["judge_failed"])
 
 
 if __name__ == "__main__":

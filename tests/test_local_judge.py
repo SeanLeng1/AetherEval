@@ -139,6 +139,25 @@ class OfflineJudgeTests(unittest.TestCase):
         self.assertEqual(output, "judged:grade")
         self.assertEqual(len(backend.calls), 1)
 
+    def test_structured_output_options_reach_generation_backend(self) -> None:
+        backend = _FakeBackend()
+        client = OfflineJudgeClient(
+            model="local/judge",
+            dp_size=1,
+            tensor_parallel_size=1,
+            backend=backend,
+            tokenizer=_SystemAwareTokenizer(),
+        )
+        try:
+            client.complete(
+                [{"role": "user", "content": "grade"}],
+                extra_body={"regex": "(yes|no)"},
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(backend.calls[0][1]["regex"], "(yes|no)")
+
     def test_system_role_preflight_can_reuse_backend_worker_tokenizer(self) -> None:
         backend = _BackendSystemValidator()
         client = OfflineJudgeClient(

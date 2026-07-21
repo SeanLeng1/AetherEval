@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 
 T = TypeVar("T")
 R = TypeVar("R")
+NORMAL_FORMAT_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,29 @@ def chat_completion(
     ) from last_error
 
 
+def local_constraint_body(
+    settings: JudgeSettings,
+    *,
+    regex: str | None = None,
+    json_schema: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Build an SGLang structured-output request for a local judge only."""
+
+    if settings.local_client is None:
+        return None
+    if (regex is None) == (json_schema is None):
+        raise ValueError("exactly one local judge constraint must be provided")
+    if regex is not None:
+        return {"regex": regex}
+    return {
+        "json_schema": json.dumps(
+            json_schema,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    }
+
+
 def parallel_map(
     fn: Callable[[T], R],
     items: Iterable[T],
@@ -283,7 +307,9 @@ def _extract_content(response: dict[str, Any]) -> str:
 
 __all__ = [
     "JudgeSettings",
+    "NORMAL_FORMAT_ATTEMPTS",
     "chat_completion",
+    "local_constraint_body",
     "parallel_map",
     "parse_json_object",
     "resolve_judge_settings",
