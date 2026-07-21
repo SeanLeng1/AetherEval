@@ -95,7 +95,7 @@ def _gen_args(
         gpu_memory_utilization=spec.gpu_memory_utilization,
         backend=spec.backend,
         skip_server_setup=skip_server_setup,
-        local_model_path=spec.model,
+        local_model_path=spec.model if Path(spec.model).is_dir() else None,
         result_dir=result_dir,  # absolute -> PROJECT_ROOT / abs == abs
         allow_overwrite=spec.allow_overwrite,
         run_ids=False,
@@ -278,6 +278,7 @@ def _run_generation(
                     {
                         "VLLM_ENDPOINT": endpoint.hostname,
                         "VLLM_PORT": str(endpoint.port),
+                        "RLLA_BFCL_GENERATE_URL": f"{service.base_url}/generate",
                     }
                 ),
                 _filter_bfcl_prints(not spec.verbose),
@@ -505,6 +506,22 @@ def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
 
 def compute_format_rate(result_dir: Path, model: str) -> float | None:
     """Fraction (%) of generated responses matching the ToolRL output format."""
+
+    def normalize_response(value: Any) -> str:
+        text = str(value).strip()
+        for token in ("<|im_end|>", "<|endoftext|>"):
+            while text.endswith(token):
+                text = text[: -len(token)].rstrip()
+        return text
+
+    def has_valid_format(value: Any) -> bool:
+        responses = value if isinstance(value, list) else [value]
+        texts = [normalize_response(response) for response in responses]
+        return bool(texts) and all(
+            any(re.search(pattern, text, re.DOTALL) for pattern in _FMT_PATTERNS)
+            for text in texts
+        )
+
     model_dir = result_dir / model.replace("/", "_")
     total = ok = 0
     for jf in model_dir.rglob("*_result.json"):
@@ -517,11 +534,8 @@ def compute_format_rate(result_dir: Path, model: str) -> float | None:
                     resp = json.loads(line).get("result", "")
                 except json.JSONDecodeError:
                     continue
-                if isinstance(resp, list):  # multi-turn -> per-turn strings
-                    resp = "\n".join(str(x) for x in resp)
                 total += 1
-                text = str(resp).strip()
-                if any(re.search(p, text, re.DOTALL) for p in _FMT_PATTERNS):
+                if has_valid_format(resp):
                     ok += 1
     return 100.0 * ok / total if total else None
 

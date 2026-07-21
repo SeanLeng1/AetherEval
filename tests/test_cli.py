@@ -26,6 +26,7 @@ from benchmarks.bfcl.external import (
     _raise_on_inference_errors,
     _run_generation,
     _server_command_for_spec,
+    compute_format_rate,
     parse_scores,
     write_predictions_jsonl,
 )
@@ -295,6 +296,9 @@ class ExternalCliTests(unittest.TestCase):
             observed["args"] = args
             observed["host"] = os.environ.get("VLLM_ENDPOINT")
             observed["port"] = os.environ.get("VLLM_PORT")
+            observed["generate_url"] = os.environ.get(
+                "RLLA_BFCL_GENERATE_URL"
+            )
 
         with (
             mock.patch(
@@ -311,12 +315,20 @@ class ExternalCliTests(unittest.TestCase):
             ),
             mock.patch.dict(
                 os.environ,
-                {"VLLM_ENDPOINT": "old-host", "VLLM_PORT": "1234"},
+                {
+                    "VLLM_ENDPOINT": "old-host",
+                    "VLLM_PORT": "1234",
+                    "RLLA_BFCL_GENERATE_URL": "http://old/generate",
+                },
             ),
         ):
             _run_generation(spec, Path("outputs/result"), generation_main)
             self.assertEqual(os.environ["VLLM_ENDPOINT"], "old-host")
             self.assertEqual(os.environ["VLLM_PORT"], "1234")
+            self.assertEqual(
+                os.environ["RLLA_BFCL_GENERATE_URL"],
+                "http://old/generate",
+            )
 
         service_cls.assert_called_once_with(
             model="test/model",
@@ -332,6 +344,10 @@ class ExternalCliTests(unittest.TestCase):
         self.assertTrue(observed["args"].skip_server_setup)
         self.assertEqual(observed["host"], "127.0.0.1")
         self.assertEqual(observed["port"], "18443")
+        self.assertEqual(
+            observed["generate_url"],
+            "http://127.0.0.1:18443/generate",
+        )
 
     def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
         args = build_parser().parse_args(
@@ -364,6 +380,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(resolved["backend_kwargs"]["context_length"], 32768)
         self.assertNotIn("json_model_override_args", resolved["backend_kwargs"])
         self.assertEqual(spec.max_context_length, 131072)
+        self.assertEqual(spec.sglang_server_args["context_length"], 131072)
         self.assertEqual(spec.sglang_server_args["chunked_prefill_size"], 4096)
         self.assertEqual(spec.sglang_server_args["schedule_conservativeness"], 0.3)
         self.assertEqual(
@@ -426,7 +443,7 @@ class ExternalCliTests(unittest.TestCase):
             generation_args = _gen_args(spec, out / "raw")
             self.assertEqual(spec.model_name, model_name)
             self.assertEqual(generation_args.model, [model])
-            self.assertEqual(generation_args.local_model_path, model)
+            self.assertIsNone(generation_args.local_model_path)
 
     def test_bfcl_registry_handles_slashes_and_underscores(self) -> None:
         model = "/scratch/checkpoints/my_model_v2"
@@ -504,6 +521,38 @@ class ExternalCliTests(unittest.TestCase):
             self.assertFalse(rows[1]["is_pass"])
             self.assertEqual(rows[1]["score"], 0.0)
             self.assertIn("Error during inference", rows[1]["error"])
+
+    def test_bfcl_format_rate_ignores_terminal_chat_tokens(self) -> None:
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model"
+            model_dir.mkdir(parents=True)
+            records = [
+                {
+                    "id": "simple_1",
+                    "result": (
+                        "<think>x</think>\n<tool_call>\n{}\n</tool_call>"
+                        "<|im_end|>"
+                    ),
+                },
+                {
+                    "id": "multi_turn_1",
+                    "result": [
+                        "<think>x</think><|im_end|>",
+                        "<think>y</think>\n<response>done</response><|im_end|>",
+                    ],
+                },
+                {"id": "simple_2", "result": "bare JSON {}"},
+            ]
+            (model_dir / "BFCL_simple_result.json").write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertAlmostEqual(
+                compute_format_rate(result_dir, "dry-model"),
+                200.0 / 3.0,
+            )
 
     def test_bfcl_parse_scores_reports_toolrl_columns(self) -> None:
         with TemporaryDirectory() as tmp:

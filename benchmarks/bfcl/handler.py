@@ -14,10 +14,16 @@ handler API (``_format_prompt(messages, function)`` — no ``turn_type`` arg;
 import json
 import os
 import re
+import threading
 import time
+from types import SimpleNamespace
 
+import requests
 from bfcl_eval.model_handler.local_inference.base_oss_handler import OSSHandler
 from overrides import override
+
+
+_REQUEST_STATE = threading.local()
 
 
 def _lenient_decode() -> bool:
@@ -36,6 +42,76 @@ def _env_float(name: str, default: float) -> float:
     if value is None or value == "":
         return default
     return float(value)
+
+
+def _single_generate_result(result):
+    while isinstance(result, list):
+        if len(result) != 1:
+            raise ValueError(
+                "BFCL native generation returned an unexpected batch size: "
+                f"{len(result)}"
+            )
+        result = result[0]
+    if not isinstance(result, dict):
+        raise TypeError(
+            "BFCL native generation returned an unsupported response type: "
+            f"{type(result).__name__}"
+        )
+    return result
+
+
+def _generate_text(result: dict) -> str:
+    for key in ("text", "output_text", "generated_text"):
+        if key in result:
+            return str(result[key])
+    outputs = result.get("outputs")
+    if isinstance(outputs, list) and outputs:
+        return _generate_text(_single_generate_result(outputs[0]))
+    raise ValueError("BFCL native generation response contains no generated text.")
+
+
+def _token_count(result: dict, keys: tuple[str, ...]) -> int | None:
+    for source in (result, result.get("meta_info")):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return None
+
+
+def _request_session() -> requests.Session:
+    session = getattr(_REQUEST_STATE, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.trust_env = False
+        _REQUEST_STATE.session = session
+    return session
+
+
+def _post_native_generate(url: str, payload: dict) -> dict:
+    for attempt in range(3):
+        try:
+            response = _request_session().post(url, json=payload, timeout=72000)
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 2:
+                raise
+        else:
+            if response.ok:
+                return _single_generate_result(response.json())
+            if response.status_code < 500 and response.status_code != 429:
+                raise RuntimeError(
+                    "BFCL native generation failed with HTTP "
+                    f"{response.status_code}: {response.text}"
+                )
+            if attempt == 2:
+                raise RuntimeError(
+                    "BFCL native generation failed with HTTP "
+                    f"{response.status_code}: {response.text}"
+                )
+        time.sleep(0.5 * (2**attempt))
+    raise AssertionError("unreachable")
 
 
 def _iter_json_objects(text):
@@ -279,14 +355,61 @@ class RLLAHandler(OSSHandler):
             extra_body["skip_special_tokens"] = self.skip_special_tokens
 
         start_time = time.time()
-        api_response = self.client.completions.create(
-            model=self.model_path_or_id,
-            temperature=self.temperature,
-            prompt=formatted_prompt,
-            max_tokens=leftover_tokens_count,
-            extra_body=extra_body,
-            timeout=72000,
-        )
+        generate_url = os.getenv("RLLA_BFCL_GENERATE_URL")
+        if generate_url:
+            sampling_params = {
+                "max_new_tokens": leftover_tokens_count,
+                "temperature": self.temperature,
+                **extra_body,
+            }
+            if sampling_params.get("top_k") == -1:
+                sampling_params.pop("top_k")
+            result = _post_native_generate(
+                generate_url,
+                {
+                    "model": self.model_path_or_id,
+                    "text": formatted_prompt,
+                    "sampling_params": sampling_params,
+                },
+            )
+            generated_text = _generate_text(result)
+            prompt_tokens = _token_count(
+                result,
+                ("prompt_tokens", "input_tokens", "input_token_count"),
+            )
+            completion_tokens = _token_count(
+                result,
+                (
+                    "completion_tokens",
+                    "output_tokens",
+                    "output_token_count",
+                    "num_output_tokens",
+                ),
+            )
+            api_response = SimpleNamespace(
+                choices=[SimpleNamespace(text=generated_text)],
+                usage=SimpleNamespace(
+                    prompt_tokens=(
+                        input_token_count
+                        if prompt_tokens is None
+                        else prompt_tokens
+                    ),
+                    completion_tokens=(
+                        len(self.tokenizer.tokenize(generated_text))
+                        if completion_tokens is None
+                        else completion_tokens
+                    ),
+                ),
+            )
+        else:
+            api_response = self.client.completions.create(
+                model=self.model_path_or_id,
+                temperature=self.temperature,
+                prompt=formatted_prompt,
+                max_tokens=leftover_tokens_count,
+                extra_body=extra_body,
+                timeout=72000,
+            )
         return api_response, time.time() - start_time
 
     @override

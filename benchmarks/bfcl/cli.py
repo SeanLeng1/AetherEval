@@ -104,6 +104,8 @@ def build_bfcl_spec(
             "context_length",
             backend_kwargs.get("max_model_len"),
         )
+    elif backend == "sglang":
+        backend_kwargs["context_length"] = context_length
 
     memory_fraction = (
         backend_kwargs.get("mem_fraction_static")
