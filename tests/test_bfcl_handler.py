@@ -13,6 +13,19 @@ from benchmarks.bfcl.handler import (  # noqa: E402
 
 
 class BfclHandlerTests(unittest.TestCase):
+    def test_v4_format_prompt_preserves_benchmark_system_instructions(self) -> None:
+        handler = RLLAHandler.__new__(RLLAHandler)
+        prompt = handler._format_prompt(
+            [
+                {"role": "system", "content": "Persistent memory instructions."},
+                {"role": "user", "content": "What do you remember?"},
+            ],
+            [],
+        )
+
+        self.assertIn("Persistent memory instructions.", prompt)
+        self.assertIn("What do you remember?", prompt)
+
     def test_native_generate_preserves_prompt_and_sampling(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
         handler.model_path_or_id = "test/model"

@@ -161,26 +161,72 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 default_model="judge-default",
             )
 
-        response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = (
-            b'{"choices":[{"message":{"content":"ok"}}]}'
-        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
         with mock.patch(
-            "benchmark_utils.llm_judge.urllib.request.urlopen",
+            "benchmark_utils.llm_judge.litellm.completion",
             return_value=response,
-        ) as urlopen:
+        ) as completion:
             result = chat_completion(
                 settings,
                 [{"role": "user", "content": "grade"}],
             )
 
         self.assertEqual(result, "ok")
-        request = urlopen.call_args.args[0]
-        payload = json.loads(request.data.decode("utf-8"))
+        payload = completion.call_args.kwargs
+        self.assertEqual(payload["model"], "judge-default")
         self.assertEqual(payload["temperature"], 0.25)
         self.assertEqual(payload["max_tokens"], 512)
         self.assertEqual(payload["top_p"], 0.9)
-        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(
+            payload["extra_body"]["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        self.assertEqual(payload["num_retries"], 0)
+
+    def test_litellm_uses_native_provider_routing_without_base_url(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"ANTHROPIC_API_KEY": "secret"},
+            clear=True,
+        ):
+            settings = resolve_judge_settings(
+                {}, default_model="claude-sonnet-4-5"
+            )
+
+        self.assertIsNone(settings.base_url)
+        self.assertIsNone(settings.api_key)
+        with mock.patch(
+            "benchmark_utils.llm_judge.litellm.completion",
+            return_value={"choices": [{"message": {"content": "ok"}}]},
+        ) as completion:
+            self.assertEqual(
+                chat_completion(settings, [{"role": "user", "content": "grade"}]),
+                "ok",
+            )
+        self.assertEqual(completion.call_args.kwargs["model"], "claude-sonnet-4-5")
+        self.assertNotIn("base_url", completion.call_args.kwargs)
+
+    def test_litellm_forces_openai_transport_for_custom_gateway(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AETHEREVAL_JUDGE_API_KEY": "secret",
+                "AETHEREVAL_JUDGE_BASE_URL": "http://gateway/v1",
+            },
+            clear=True,
+        ):
+            settings = resolve_judge_settings(
+                {}, default_model="claude-sonnet-4-5"
+            )
+
+        with mock.patch(
+            "benchmark_utils.llm_judge.litellm.completion",
+            return_value={"choices": [{"message": {"content": "ok"}}]},
+        ) as completion:
+            chat_completion(settings, [{"role": "user", "content": "grade"}])
+        payload = completion.call_args.kwargs
+        self.assertEqual(payload["model"], "openai/claude-sonnet-4-5")
+        self.assertEqual(payload["base_url"], "http://gateway/v1")
 
     def test_judge_cli_options_are_forwarded_to_metrics_only(self) -> None:
         args = build_parser().parse_args(

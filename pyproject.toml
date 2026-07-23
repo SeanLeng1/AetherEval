@@ -20,6 +20,7 @@ dependencies = [
   "absl-py",
   "math-verify",
   "tiktoken",
+  "litellm>=1.93.0,<2",
   "numpy",
 ]
 

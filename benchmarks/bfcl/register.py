@@ -21,11 +21,18 @@ def register_rlla_model(
 
     ``registry_name`` is the same Hugging Face id or local checkpoint path supplied via
     AetherEval's standard ``--model`` flag. ``ModelConfig.model_name`` is unused by the
-    OSS handler in BFCL v3.
+    OSS handler in BFCL v4.
     """
     ensure_bfcl_importable(project_root=project_root)
 
     from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING, ModelConfig
+    from bfcl_eval.constants.category_mapping import VERSION_PREFIX
+
+    if VERSION_PREFIX != "BFCL_v4":
+        raise RuntimeError(
+            "AetherEval's BFCL adapter requires BFCL v4 "
+            f"(installed dataset prefix: {VERSION_PREFIX!r})."
+        )
 
     from .handler import RLLAHandler
 

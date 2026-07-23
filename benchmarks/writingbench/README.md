@@ -10,4 +10,4 @@ Native implementation of the 1,000-item WritingBench release.
   response-level (`*_R`) and selected-criterion (`*_C`) metrics follow
   `calculate_scores.py` and are scaled to 0–100.
 
-The implementation is native; only judge inference uses an OpenAI-compatible API.
+The implementation is native; online judge inference uses LiteLLM provider routing.

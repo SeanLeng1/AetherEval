@@ -104,7 +104,12 @@ apibank:
   top_p: 1.0
 
 bfcl:
-  n: 1
+  # ToolRL reports BFCL-v4 as the mean of four independent evaluation runs.
+  n: 4
+  categories:
+    - live
+    - non_live
+    - multi_turn
   max_new_tokens: 4096
   temperature: 0.001
   top_p: 1.0

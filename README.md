@@ -297,11 +297,12 @@ fixed omitted-value token limit, so the otherwise-unspecified LLMEval-Med and
 ResearchQA judge limits are pinned to 4096. Both output protocols are far shorter
 than this cap.
 
-Set the judge endpoint independently from the candidate backend:
+Online judges use LiteLLM, so OpenAI, Anthropic, Gemini, and other supported
+providers share the same benchmark message templates. For native provider routing,
+set the provider's normal environment variable and omit `--judge-base-url`:
 
 ```bash
-export AETHEREVAL_JUDGE_API_KEY=<key>
-export AETHEREVAL_JUDGE_BASE_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=<key>
 
 aethereval \
   --backend sglang \
@@ -310,8 +311,9 @@ aethereval \
   --output-dir outputs
 ```
 
-For an unauthenticated local endpoint, set `AETHEREVAL_JUDGE_API_KEY=-`. Optional
-overrides are `--judge-model`, `--judge-base-url`, `--judge-api-key-env`,
+`--judge-base-url` is reserved for an OpenAI-compatible gateway or custom endpoint;
+set `AETHEREVAL_JUDGE_API_KEY=-` for an unauthenticated one. Optional overrides are
+`--judge-model`, `--judge-base-url`, `--judge-api-key-env`,
 `--judge-workers`, `--judge-timeout`, `--judge-max-retries`, and
 `--judge-repeats` (the last one controls LLMEval-Med's three-run protocol).
 Judge sampling can be overridden independently with
@@ -401,12 +403,11 @@ model and benchmark protocol call for them. BFCL is not affected because its
 official adapter builds a ToolRL completion prompt directly instead of applying
 the tokenizer chat template.
 
-Anthropic's official OpenAI-SDK compatibility endpoint can judge the two Claude
-tasks directly. Because the judge endpoint is shared by one invocation, use a
-second eval-only command unless a unified gateway routes both providers:
+LiteLLM routes the two Claude-default tasks directly through Anthropic. A second
+eval-only command is only necessary when the selected tasks use different API
+credentials or gateways:
 
 ```bash
-export AETHEREVAL_JUDGE_BASE_URL=https://api.anthropic.com/v1
 export ANTHROPIC_API_KEY=<key>
 
 aethereval \
@@ -415,7 +416,6 @@ aethereval \
   --tasks writingbench,creative_writing_v3 \
   --output-dir /output \
   --run-id production-1 \
-  --judge-api-key-env ANTHROPIC_API_KEY \
   --eval-only
 ```
 
@@ -434,8 +434,17 @@ API-Bank is a native task and should be run with `--tasks apibank`.
 
 Current external benchmarks:
 
-- `benchmarks/bfcl` — BFCL-v3 wrapper:
+- `benchmarks/bfcl` — BFCL-v4 wrapper:
   `aethereval --tasks bfcl --model <model> --output-dir outputs`
+
+BFCL defaults to `live,non_live,multi_turn` and reports each section's `Acc` and
+reference-aware ToolRL-format rate plus their unweighted `avg_acc` and `avg_format`,
+matching common comparison tables. The expected format comes from the BFCL subset and
+multi-turn ground truth, so no-tool cases require `<response>` while tool execution
+steps require `<tool_call>` and terminate with `<response>`. It runs four independent
+repetitions by default (`--n 1` for a quick single run) and reports their mean. Use
+`--categories all` for the distinct official full-V4 aggregate (including Agentic and
+Web Search).
 
 External runs use the regular `aethereval` CLI for shared runtime flags
 (`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus

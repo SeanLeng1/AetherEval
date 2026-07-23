@@ -1,4 +1,4 @@
-"""BFCL-v3 model handler for ToolRL/GDPO-style models.
+"""BFCL-v4 model handler for ToolRL/GDPO-style models.
 
 Models trained with the ToolRL recipe emit
 ``<think>...</think>\\n<tool_call>...</tool_call>\\n<response>...</response>``. BFCL's
@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import requests
 from bfcl_eval.model_handler.local_inference.base_oss_handler import OSSHandler
+from bfcl_eval.model_handler.utils import system_prompt_pre_processing_chat_model
+from bfcl_eval.utils import is_format_sensitivity
 from overrides import override
 
 
@@ -259,9 +261,23 @@ def _convert_to_format_tool(tools, count=1):
 class RLLAHandler(OSSHandler):
     """Prompt-mode handler for ToolRL/GDPO models (think/tool_call/response format)."""
 
-    def __init__(self, model_name, temperature, dtype="bfloat16"):
-        super().__init__(model_name, temperature, dtype)
-        self.is_fc_model = False  # prompt mode (ToolRL text format, not native FC)
+    def __init__(
+        self,
+        model_name,
+        temperature,
+        registry_name,
+        is_fc_model,
+        dtype="bfloat16",
+        **kwargs,
+    ):
+        super().__init__(
+            model_name,
+            temperature,
+            registry_name,
+            is_fc_model,
+            dtype=dtype,
+            **kwargs,
+        )
         # `<tool_call>`/`</tool_call>` are Qwen added-vocab special tokens; the backend
         # strips them under the default skip_special_tokens=True, leaving bare JSON the
         # decoder can't find. Keep them (same as bfcl's FC handlers, e.g. minicpm_fc).
@@ -278,6 +294,14 @@ class RLLAHandler(OSSHandler):
         is_multi_turn = any(m.get("role") == "tool" for m in messages)
         tools = _convert_to_format_tool(function)
         system_prompt = SYS.format(tools=tools, json_string=_TOOL_CALL_EXAMPLE)
+        benchmark_instructions = [
+            str(message.get("content", "")).strip()
+            for message in messages
+            if message.get("role") == "system"
+            and str(message.get("content", "")).strip()
+        ]
+        if benchmark_instructions:
+            system_prompt += "\n\n" + "\n\n".join(benchmark_instructions)
 
         user_prompt = "**Dialogue Records History**\n"
         for idx, message in enumerate(messages):
@@ -305,6 +329,25 @@ class RLLAHandler(OSSHandler):
             f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
+
+    @override
+    def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
+        functions = test_entry["function"]
+        test_entry_id = test_entry["id"]
+
+        # The regular ToolRL prompt already renders function documentation in its
+        # trained format. BFCL v4's format-sensitivity category intentionally varies
+        # that representation, so only those records receive BFCL's generated system
+        # prompt. Existing system messages (notably memory-agent instructions) remain
+        # in the conversation and are appended by _format_prompt above.
+        if is_format_sensitivity(test_entry_id):
+            test_entry["question"][0] = system_prompt_pre_processing_chat_model(
+                test_entry["question"][0],
+                functions,
+                test_entry_id,
+            )
+
+        return {"message": [], "function": functions}
 
     @override
     def _query_prompting(self, inference_data: dict):
@@ -413,7 +456,7 @@ class RLLAHandler(OSSHandler):
         return api_response, time.time() - start_time
 
     @override
-    def decode_ast(self, result, language="Python"):
+    def decode_ast(self, result, language, has_tool_call_tag):
         decoded = []
         for call in _extract_calls(result, _lenient_decode()):
             if "parameters" not in call:
@@ -422,7 +465,7 @@ class RLLAHandler(OSSHandler):
         return decoded
 
     @override
-    def decode_execute(self, result):
+    def decode_execute(self, result, has_tool_call_tag):
         calls = []
         for c in _extract_calls(result, _lenient_decode()):
             args = c.get("parameters", {})

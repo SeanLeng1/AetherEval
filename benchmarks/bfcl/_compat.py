@@ -1,12 +1,10 @@
-"""Make bfcl_eval importable under drifted optional-API-SDK versions.
+"""Make BFCL's eager model registry tolerate unused provider SDKs.
 
 ``bfcl_eval.constants.model_config`` eagerly imports every handler, including the
-API-inference ones (cohere / anthropic / together / ...). Those SDKs are pinned by
-bfcl-eval but we install it ``--no-deps`` to avoid disturbing the container's sglang
-stack, so their newer/missing versions raise at import. We only ever use the local
-sglang OSS handler, so we stub whatever the API handlers need: an import-retry loop
-fills missing modules with a permissive fake and missing attributes with dummy types,
-until ``model_config`` imports. No real API SDK behaviour is required.
+API-inference ones. AetherEval only registers its local SGLang handler, so missing
+provider-only modules may be represented by permissive placeholders. Core BFCL v4
+parser dependencies are never stubbed: doing so would silently corrupt Java and
+JavaScript scores.
 """
 
 import importlib
@@ -17,22 +15,11 @@ import types
 from pathlib import Path
 
 
-_TREE_SITTER_MODULES = (
+_REQUIRED_MODULES = (
     "tree_sitter",
     "tree_sitter_java",
     "tree_sitter_javascript",
-)
-_TREE_SITTER_DEPENDENTS = (
-    "bfcl_eval.model_handler.parser.java_parser",
-    "bfcl_eval.model_handler.parser.js_parser",
-    "bfcl_eval.model_handler.utils",
-    "bfcl_eval.constants.model_config",
-)
-_TENACITY_DEPENDENTS = (
-    "bfcl_eval.model_handler.utils",
-    "bfcl_eval.model_handler.api_inference.claude",
-    "bfcl_eval.model_handler.api_inference.cohere",
-    "bfcl_eval.constants.model_config",
+    "tenacity",
 )
 
 
@@ -56,99 +43,6 @@ def _ensure_lax_module(name: str) -> types.ModuleType:
     return lax
 
 
-class _TreeSitterLanguage:
-    def __init__(self, *args, **kwargs) -> None:
-        self.args = args
-        self.kwargs = kwargs
-
-
-class _TreeSitterNode:
-    type = ""
-    children: list = []
-    child_count = 0
-    start_byte = 0
-    end_byte = 0
-    text = b""
-
-    def child_by_field_name(self, name: str):
-        return None
-
-    def sexp(self) -> str:
-        return ""
-
-
-class _TreeSitterTree:
-    root_node = _TreeSitterNode()
-
-
-class _TreeSitterParser:
-    def __init__(self) -> None:
-        self.language = None
-
-    def set_language(self, language) -> None:
-        self.language = language
-
-    def parse(self, source) -> _TreeSitterTree:
-        return _TreeSitterTree()
-
-
-def _ensure_tree_sitter_stubs() -> None:
-    tree_sitter = types.ModuleType("tree_sitter")
-    tree_sitter.Language = _TreeSitterLanguage
-    tree_sitter.Parser = _TreeSitterParser
-    sys.modules["tree_sitter"] = tree_sitter
-
-    for module_name in ("tree_sitter_java", "tree_sitter_javascript"):
-        module = types.ModuleType(module_name)
-        module.language = lambda: object()
-        sys.modules[module_name] = module
-
-    for module_name in _TREE_SITTER_DEPENDENTS:
-        sys.modules.pop(module_name, None)
-
-
-class _RetryCondition:
-    def __or__(self, other):
-        return self
-
-    def __ror__(self, other):
-        return self
-
-
-def _retry(*args, **kwargs):
-    if len(args) == 1 and callable(args[0]) and not kwargs:
-        return args[0]
-
-    def decorator(func):
-        return func
-
-    return decorator
-
-
-def _retry_condition(*args, **kwargs) -> _RetryCondition:
-    return _RetryCondition()
-
-
-def _tenacity_value(*args, **kwargs):
-    return object()
-
-
-def _ensure_tenacity_stubs() -> None:
-    tenacity = types.ModuleType("tenacity")
-    tenacity.retry = _retry
-    tenacity.retry_if_exception_message = _retry_condition
-    tenacity.retry_if_exception_type = _retry_condition
-    tenacity.wait_random_exponential = _tenacity_value
-    sys.modules["tenacity"] = tenacity
-
-    stop = types.ModuleType("tenacity.stop")
-    stop.stop_after_attempt = _tenacity_value
-    sys.modules["tenacity.stop"] = stop
-
-    for module_name in _TENACITY_DEPENDENTS:
-        sys.modules.pop(module_name, None)
-
-
 def _set_bfcl_project_root(project_root: str | Path | None) -> None:
     if project_root is not None:
         os.environ["BFCL_PROJECT_ROOT"] = str(Path(project_root).resolve())
@@ -164,11 +58,18 @@ def ensure_bfcl_importable(
     *,
     project_root: str | Path | None = None,
 ) -> None:
-    """Import bfcl_eval.constants.model_config, patching SDK gaps until it succeeds."""
+    """Import BFCL's registry while stubbing only unused provider SDKs."""
     target = "bfcl_eval.constants.model_config"
     _set_bfcl_project_root(project_root)
-    _ensure_tree_sitter_stubs()
-    _ensure_tenacity_stubs()
+    for module_name in _REQUIRED_MODULES:
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "BFCL v4 runtime dependency is missing: "
+                    f"{module_name}. Rebuild the SGLang runtime image with the "
+                    "BFCL v4 dependencies."
+                ) from exc
     for _ in range(max_iters):
         try:
             importlib.import_module(target)
@@ -177,12 +78,11 @@ def ensure_bfcl_importable(
             missing = exc.name
             if not missing or missing.startswith("bfcl_eval"):
                 raise
-            if missing in _TREE_SITTER_MODULES:
-                _ensure_tree_sitter_stubs()
-            elif missing == "tenacity" or missing.startswith("tenacity."):
-                _ensure_tenacity_stubs()
-            else:
-                _ensure_lax_module(missing)
+            if missing in _REQUIRED_MODULES:
+                raise RuntimeError(
+                    f"BFCL v4 runtime dependency is missing: {missing}."
+                ) from exc
+            _ensure_lax_module(missing)
         except (AttributeError, ImportError) as exc:
             # e.g. "module 'cohere.types' has no attribute 'ChatResponse'"
             msg = str(exc)

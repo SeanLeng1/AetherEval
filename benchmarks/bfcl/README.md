@@ -1,16 +1,14 @@
-# BFCL-v3 (external benchmark)
+# BFCL-v4 (external benchmark)
 
-Reproduces the **Berkeley Function Calling Leaderboard v3** numbers reported by
-ToolRL-style papers (`OverallAcc`, `Non-LiveASTAcc`, `Non-LiveExecAcc`, `LiveAcc`,
-`MultiTurnAcc`, `RelevanceDetection`, `IrrelevanceDetection`) for ToolRL/GDPO-style
-models, i.e. models that emit
+Runs the official **Berkeley Function Calling Leaderboard v4** generation loop and
+scorer for ToolRL/GDPO-style models, i.e. models that emit
 `<think>…</think>\n<tool_call>…</tool_call>\n<response>…</response>`.
 
 ## Why this is an *external* benchmark
 
 AetherEval's native contract (`task.py` + `metrics.py`) is single-shot: the framework
-builds a prompt, generates one response, scores it. BFCL-v3 does not fit that — it owns
-its own generation, a **multi-turn agentic execution loop**, and AST/executable
+builds a prompt, generates one response, scores it. BFCL-v4 does not fit that — it owns
+its own generation, **multi-turn and agentic execution loops**, and AST/executable
 checkers. Faithfully reproducing it requires the official `bfcl_eval` package (its test
 data, AST checker, and multi-turn runtime), not a re-implementation.
 
@@ -24,20 +22,40 @@ benchmark can follow the same
 
 ## Requirements
 
-BFCL-**v3** data ships in `bfcl-eval==2025.6.8` (later releases moved to v4). The
-sglang container pins it (see `docker/Dockerfile.sglang`):
+The production SGLang image pins the official evaluation release
+`bfcl-eval==2025.12.17` in AetherRL's `docker/Dockerfile.sglang`. Its local parser and
+agentic dependencies are installed explicitly without replacing the image's
+SGLang/torch stack. The legacy Dockerfile in this repository is not the production
+image build source.
 
 ```bash
-pip install "bfcl-eval==2025.6.8" --no-deps   # keep the container's sglang/torch stack
+pip install "bfcl-eval==2025.12.17" --no-deps
 ```
 
-`--no-deps` skips bfcl's pinned optional API SDKs (cohere/anthropic/…); we only use the
-local **sglang** OSS handler, and [`_compat.py`](_compat.py) stubs those unused imports.
+[`_compat.py`](_compat.py) only stubs unused model-provider SDK imports. Real
+Tree-sitter parsers are mandatory so Java/JavaScript scores cannot silently degrade.
+The image does not pre-cache BFCL's `all-MiniLM-L6-v2` memory-vector encoder. Selecting
+`memory`, `agentic`, or `all` emits a warning and requires either a populated Hugging
+Face cache or network access. The default comparison-table categories never load it.
+
+The default selection is `live,non_live,multi_turn`, matching comparison tables that
+report those three sections and their macro average. It is fully offline after the BFCL
+data and model are cached. An official full V4 run (`--categories all`) also includes
+live web search and therefore requires both outbound network access and
+`SERPAPI_API_KEY`. AetherEval fails before generation when a selected collection includes
+`web_search` but the key is absent.
 
 BFCL's aligned generation defaults (`temperature`, `max_new_tokens`, `top_p`, and
 `top_k`) live under `bfcl` in `configs/task_defaults.yaml`, alongside native task
 defaults. Global generation CLI/YAML values override them in the same way as other
 tasks.
+
+BFCL also defaults to `n: 4`, matching ToolRL tables reported as the mean of four
+evaluation runs. Each run performs independent generation and official scoring with
+seeds `0,1,2,3` by default; an explicit `--seed S` uses `S,S+1,S+2,S+3`. The SGLang
+service stays loaded across all four runs. Use `--n 1` for a single diagnostic run.
+The official BFCL V4 generation default remains `temperature=0.001`, which AetherEval
+keeps for faithful comparison.
 
 ## Run
 
@@ -45,22 +63,25 @@ tasks.
 # base HF model (registry name == HF id):
 aethereval --tasks bfcl \
   --model Qwen/Qwen2.5-1.5B-Instruct \
-  --output-dir outputs --categories all --dp-size 1 --tp-size 1
+  --output-dir outputs --dp-size 1 --tp-size 1
 
 # a GDPO/GRPO checkpoint (any registry name + a local dir):
 aethereval --tasks bfcl \
   --model /path/to/hf_ckpt \
   --model-name optional-output-label \
-  --output-dir outputs --categories all --dp-size 1 --tp-size 1
+  --output-dir outputs --dp-size 1 --tp-size 1
 ```
 
 `--model` is always the actual Hugging Face ID or local checkpoint used for loading.
 Optional `--model-name` only controls the shared AetherEval output label, including for
 IDs such as `qwen2.5/huggingface`; it does not alter BFCL model registration or serving.
 
-`--categories` accepts BFCL collections/categories: `all`, `non_live`, `live`,
-`multi_turn`, or individual ones (`live_simple`, `multi_turn_base`, …). Backend defaults
-to **sglang**. BFCL inherits AetherEval's normal parallelism semantics: `--dp-size` is
+`--categories` accepts V4 collections/categories: `all`, `all_scoring`, `non_live`,
+`live`, `multi_turn`, `agentic`, `memory`, `web_search`, `format_sensitivity`, or
+individual ones (`simple_python`, `memory_vector`, …). Backend defaults to **sglang**.
+Omitting it selects `live,non_live,multi_turn`; pass `--categories all` only when the
+official V4 agentic/web-search aggregate is required.
+BFCL inherits AetherEval's normal parallelism semantics: `--dp-size` is
 the replica count and `--tp-size` is the tensor-parallel size of each replica.
 AetherEval replaces BFCL's upstream TP-only launch command with SGLang Model Gateway
 (SMG), including for one replica, using `cache_aware` routing by default:
@@ -122,19 +143,19 @@ from benchmarks.bfcl.external import ExternalRunSpec, run
 result = run(ExternalRunSpec(
     model="Qwen/Qwen2.5-1.5B-Instruct",
     output_dir=Path("outputs/bfcl-base"),
-    categories=["all"], backend="sglang", dp_size=1, tp_size=1,
+    backend="sglang", dp_size=1, tp_size=1,
 ))
-print(result.metrics, result.primary_score)   # primary_metric = "OverallAcc"
+print(result.metrics, result.primary_score)   # primary_metric = "avg_acc"
 ```
 
 ## Output
 
 ```text
 outputs/<run_id>/bfcl/
-  predictions.jsonl   # AetherEval-normalized rows, one BFCL test case per row
-  result/   # bfcl raw generations
-  score/    # bfcl leaderboard csv (data_overall.csv, data_live.csv, …)
-  summary.json   # AetherEval-style: {metrics, primary_metric, primary_score}
+  predictions.jsonl   # all runs; gen_idx identifies the evaluation run
+  result/run_01/ ... result/run_04/   # BFCL raw generations
+  score/run_01/  ... score/run_04/    # official per-run leaderboard CSVs
+  summary.json   # averaged metrics plus per-run metrics under runs[]
 ```
 
 `predictions.jsonl` follows the standard AetherEval row shape
@@ -143,30 +164,44 @@ outputs/<run_id>/bfcl/
 `meta.bfcl_record`, and the original `result/` and `score/` trees are retained for
 faithful BFCL debugging/re-scoring.
 
-`metrics` keys → ToolRL paper columns:
+Canonical `metrics` keys → official V4 CSV columns or AetherEval aggregation:
 
 | metric key              | source (`data_overall.csv`) |
 |-------------------------|-----------------------------|
-| `OverallAcc`            | `Overall Acc`               |
-| `Non-LiveASTAcc`        | `Non-Live AST Acc`          |
-| `Non-LiveExecAcc`       | `Non-Live Exec Acc`         |
-| `LiveAcc`               | `Live Acc`                  |
-| `MultiTurnAcc`          | `Multi Turn Acc`            |
-| `RelevanceDetection`    | `Relevance Detection`       |
-| `IrrelevanceDetection`  | `Irrelevance Detection`     |
-| `correct_format`        | ToolRL format check over generations |
+| `official_overall_acc`  | `Overall Acc`               |
+| `non_live_acc`          | `Non-Live AST Acc`          |
+| `live_acc`              | `Live Acc`                  |
+| `multi_turn_acc`        | `Multi Turn Acc`            |
+| `agentic_acc`           | `data_agentic.csv`: `Agentic Overall Acc` |
+| `web_search_acc`        | `Web Search Acc`            |
+| `memory_acc`            | `Memory Acc`                |
+| `relevance_detection`   | `Relevance Detection`       |
+| `irrelevance_detection` | `Irrelevance Detection`     |
+| `format_sensitivity_max_delta` | `Format Sensitivity Max Delta` |
+| `format_sensitivity_std` | `Format Sensitivity Standard Deviation` |
+| `live_format`           | reference-aware ToolRL format rate over Live completions |
+| `non_live_format`       | reference-aware ToolRL format rate over Non-Live completions |
+| `multi_turn_format`     | reference-aware ToolRL format rate over Multi-Turn completions |
+| `avg_acc`               | macro mean of Live/Non-Live/Multi-Turn Acc |
+| `avg_format`            | macro mean of Live/Non-Live/Multi-Turn Format |
 
-Snake-case aliases (`overall_acc`, `non_live_ast_acc`, etc.) and legacy aliases
-(`avg_acc`, `non_live_overall_acc`, `live_overall_acc`, `multi_turn_overall_acc`)
-are also emitted for compatibility.
+`avg_acc = (live_acc + non_live_acc + multi_turn_acc) / 3`, and the Format average
+uses the same unweighted three-way mean. This exactly matches the `Average` columns in
+Live/Non-Live/Multi-Turn comparison tables; it is intentionally different from BFCL
+V4's `official_overall_acc`, which additionally includes the Agentic benchmark with the
+leaderboard's weighting. No duplicate CamelCase or legacy aliases are emitted.
+Every displayed metric is first averaged across the four independent runs; the final
+`avg_acc` and `avg_format` are then recomputed from the three averaged section
+columns to avoid rounding drift.
 
-GDPO Table 1 reference (avg of 5 runs) for sanity-checking:
-
-```
-Qwen2.5-Instruct-1.5B  Live 37.89  Multi 0.12  Non-Live 15.63  Avg 17.88  Format 4.74
-  + GRPO               Live 50.63  Multi 2.04  Non-Live 37.87  Avg 30.18  Format 76.33
-  + GDPO               Live 55.36  Multi 2.50  Non-Live 40.58  Avg 32.81  Format 80.66
-```
+Format is an AetherEval comparison metric, not an official BFCL leaderboard column.
+It follows ToolRL's public regex-and-tag-count reward while deriving the expected shape
+from BFCL: ordinary function-calling subsets require `<tool_call>`, irrelevance subsets
+require `<response>`, and each multi-turn step is classified from that turn's official
+ground truth. A tool-requiring turn uses `<tool_call>` for execution steps and must end
+with `<response>`; `multi_turn_miss_func` and `multi_turn_miss_param` turns whose ground
+truth is empty require `<response>`. The percentage is computed over actual model
+completions, which is the same unit scored by ToolRL's format reward.
 
 ## Files
 
@@ -174,9 +209,9 @@ Qwen2.5-Instruct-1.5B  Live 37.89  Multi 0.12  Non-Live 15.63  Avg 17.88  Format
   `benchmarks/BFCL/rlla_qwen.py` prompt + `<tool_call>` decode, adapted to `bfcl_eval`.
 - `register.py` — inject the handler into bfcl's `MODEL_CONFIG_MAPPING`.
 - `external.py` — `ExternalRunSpec` / `ExternalResult` / `run()` + score parsing.
-- `_compat.py` — stub drifted optional API SDKs so `bfcl_eval` imports under `--no-deps`.
+- `_compat.py` — isolate unused provider SDK imports without stubbing scoring parsers.
 
-> Multi-turn note: BFCL's new handler API drops the per-call `turn_type`; the handler
-> infers multi-turn from tool-feedback in the message history. Single-turn (Non-Live /
-> Live, which dominate the overall report) is exact; multi-turn uses the same ToolRL
-> template.
+> Multi-turn note: BFCL's handler API drops the per-call `turn_type`; the handler
+> infers multi-turn from tool-feedback in the message history. Single-turn,
+> multi-turn, and agentic requests use the trained ToolRL template; V4 memory-agent
+> system instructions are preserved inside that template.

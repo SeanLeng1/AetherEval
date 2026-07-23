@@ -4,6 +4,7 @@ import io
 import json
 import os
 import unittest
+import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -21,19 +22,42 @@ from benchmarks.bfcl.cli import build_bfcl_spec
 from benchmarks.bfcl.external import (
     ExternalRunSpec,
     _filter_bfcl_prints,
+    _evaluation_run_paths,
     _gen_args,
     _is_allowed_zero_score_error,
+    _require_web_search_key,
     _raise_on_inference_errors,
     _run_generation,
+    _run_generations,
+    _run_seed,
     _server_command_for_spec,
-    compute_format_rate,
+    _warn_memory_vector_requirements,
+    add_comparison_metrics,
+    average_run_metrics,
+    compute_format_rates,
     parse_scores,
+    run as run_bfcl_external,
     write_predictions_jsonl,
 )
 from benchmarks.bfcl.register import register_rlla_model
 
 
 class ExternalCliTests(unittest.TestCase):
+    def test_bfcl_v4_requires_serpapi_only_for_web_search_generation(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "SERPAPI_API_KEY"):
+                _require_web_search_key(["all"])
+            _require_web_search_key(["non_live", "live", "multi_turn"])
+
+    def test_bfcl_warns_only_when_memory_vector_is_selected(self) -> None:
+        with self.assertWarnsRegex(RuntimeWarning, "all-MiniLM-L6-v2"):
+            _warn_memory_vector_requirements(["all"])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _warn_memory_vector_requirements(["live", "non_live", "multi_turn"])
+        self.assertEqual(caught, [])
+
     def test_local_judge_automatically_splits_generation_and_evaluation(self) -> None:
         args = build_parser().parse_args(
             [
@@ -179,6 +203,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.top_p, 0.9)
         self.assertEqual(spec.top_k, 50)
         self.assertEqual(spec.seed, 123)
+        self.assertEqual(spec.num_runs, 4)
         self.assertTrue(spec.verbose)
         self.assertFalse(spec.allow_overwrite)
         self.assertTrue(spec.run_generation)
@@ -206,6 +231,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.temperature, 0.25)
         self.assertEqual(spec.top_p, 0.8)
         self.assertEqual(spec.top_k, 17)
+        self.assertEqual(spec.num_runs, 1)
 
     def test_bfcl_python_spec_defaults_match_task_config(self) -> None:
         configured = resolve_task_default_gen("bfcl", {})
@@ -215,6 +241,8 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.temperature, configured["temperature"])
         self.assertEqual(spec.top_p, configured["top_p"])
         self.assertEqual(spec.top_k, configured["top_k"])
+        self.assertEqual(spec.num_runs, configured["n"])
+        self.assertEqual(spec.categories, ["live", "non_live", "multi_turn"])
 
     def test_bfcl_external_spec_supports_unified_phase_flags(self) -> None:
         generate_args = build_parser().parse_args(
@@ -294,8 +322,8 @@ class ExternalCliTests(unittest.TestCase):
 
         def generation_main(args):  # noqa: ANN001
             observed["args"] = args
-            observed["host"] = os.environ.get("VLLM_ENDPOINT")
-            observed["port"] = os.environ.get("VLLM_PORT")
+            observed["host"] = os.environ.get("LOCAL_SERVER_ENDPOINT")
+            observed["port"] = os.environ.get("LOCAL_SERVER_PORT")
             observed["generate_url"] = os.environ.get(
                 "RLLA_BFCL_GENERATE_URL"
             )
@@ -309,22 +337,18 @@ class ExternalCliTests(unittest.TestCase):
                 "benchmarks.bfcl.external._filter_bfcl_prints",
                 return_value=contextlib.nullcontext(),
             ),
-            mock.patch(
-                "benchmarks.bfcl.external._cap_bfcl_thread_pool",
-                return_value=contextlib.nullcontext(),
-            ),
             mock.patch.dict(
                 os.environ,
                 {
-                    "VLLM_ENDPOINT": "old-host",
-                    "VLLM_PORT": "1234",
+                    "LOCAL_SERVER_ENDPOINT": "old-host",
+                    "LOCAL_SERVER_PORT": "1234",
                     "RLLA_BFCL_GENERATE_URL": "http://old/generate",
                 },
             ),
         ):
             _run_generation(spec, Path("outputs/result"), generation_main)
-            self.assertEqual(os.environ["VLLM_ENDPOINT"], "old-host")
-            self.assertEqual(os.environ["VLLM_PORT"], "1234")
+            self.assertEqual(os.environ["LOCAL_SERVER_ENDPOINT"], "old-host")
+            self.assertEqual(os.environ["LOCAL_SERVER_PORT"], "1234")
             self.assertEqual(
                 os.environ["RLLA_BFCL_GENERATE_URL"],
                 "http://old/generate",
@@ -342,12 +366,133 @@ class ExternalCliTests(unittest.TestCase):
         )
         service.close.assert_called_once_with()
         self.assertTrue(observed["args"].skip_server_setup)
+        self.assertEqual(observed["args"].num_threads, spec.num_threads)
         self.assertEqual(observed["host"], "127.0.0.1")
         self.assertEqual(observed["port"], "18443")
         self.assertEqual(
             observed["generate_url"],
             "http://127.0.0.1:18443/generate",
         )
+
+    def test_bfcl_repeated_generation_reuses_server_and_advances_seed(self) -> None:
+        spec = ExternalRunSpec(
+            model="test/model",
+            output_dir=Path("outputs"),
+            backend="sglang",
+            seed=10,
+        )
+        service = mock.Mock(base_url="http://127.0.0.1:18443")
+        observed = []
+
+        def generation_main(args):  # noqa: ANN001
+            observed.append(
+                (args.result_dir, os.environ.get("RLLA_BFCL_SEED"))
+            )
+
+        with (
+            mock.patch(
+                "benchmarks.bfcl.external.SGLangService",
+                return_value=service,
+            ) as service_cls,
+            mock.patch(
+                "benchmarks.bfcl.external._filter_bfcl_prints",
+                return_value=contextlib.nullcontext(),
+            ),
+        ):
+            _run_generations(
+                spec,
+                [(0, Path("result/run_01")), (1, Path("result/run_02"))],
+                generation_main,
+            )
+
+        service_cls.assert_called_once()
+        service.close.assert_called_once()
+        self.assertEqual(
+            observed,
+            [
+                (Path("result/run_01"), "10"),
+                (Path("result/run_02"), "11"),
+            ],
+        )
+
+    def test_bfcl_four_run_paths_and_metric_average(self) -> None:
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            paths = _evaluation_run_paths(out, 4)
+
+        self.assertEqual(paths[0], (out / "result/run_01", out / "score/run_01"))
+        self.assertEqual(paths[-1], (out / "result/run_04", out / "score/run_04"))
+        self.assertEqual(_run_seed(ExternalRunSpec("m", Path("o")), 3), 3)
+
+        runs = [
+            {
+                "live_acc": 70.0 + 2 * index,
+                "non_live_acc": 80.0 + 2 * index,
+                "multi_turn_acc": 10.0 + 2 * index,
+                "live_format": 90.0,
+                "non_live_format": 80.0,
+                "multi_turn_format": 70.0,
+            }
+            for index in range(4)
+        ]
+        averaged = average_run_metrics(runs)
+
+        self.assertEqual(averaged["live_acc"], 73.0)
+        self.assertEqual(averaged["non_live_acc"], 83.0)
+        self.assertEqual(averaged["multi_turn_acc"], 13.0)
+        self.assertEqual(averaged["avg_acc"], 56.33)
+        self.assertEqual(averaged["avg_format"], 80.0)
+
+    def test_bfcl_run_writes_four_run_average_summary(self) -> None:
+        per_run_metrics = [
+            {
+                "live_acc": 70.0 + 2 * index,
+                "non_live_acc": 80.0 + 2 * index,
+                "multi_turn_acc": 10.0 + 2 * index,
+            }
+            for index in range(4)
+        ]
+        format_rates = {
+            "live": 90.0,
+            "non_live": 80.0,
+            "multi_turn": 70.0,
+        }
+        with (
+            TemporaryDirectory() as tmp,
+            mock.patch("benchmarks.bfcl.external.register_rlla_model"),
+            mock.patch("benchmarks.bfcl.external._warn_memory_vector_requirements"),
+            mock.patch(
+                "bfcl_eval.eval_checker.eval_runner.main"
+            ) as evaluation_main,
+            mock.patch(
+                "benchmarks.bfcl.external.parse_scores",
+                side_effect=per_run_metrics,
+            ),
+            mock.patch(
+                "benchmarks.bfcl.external.compute_format_rates",
+                return_value=format_rates,
+            ),
+        ):
+            out = Path(tmp) / "bfcl"
+            result = run_bfcl_external(
+                ExternalRunSpec(
+                    model="dry-model",
+                    output_dir=out,
+                    num_runs=4,
+                    run_generation=False,
+                    run_evaluation=True,
+                )
+            )
+            summary = json.loads((out / "summary.json").read_text())
+
+        self.assertEqual(evaluation_main.call_count, 4)
+        self.assertEqual(result.metrics["avg_acc"], 56.33)
+        self.assertEqual(result.metrics["avg_format"], 80.0)
+        self.assertEqual(result.primary_metric, "avg_acc")
+        self.assertEqual(summary["num_runs"], 4)
+        self.assertEqual(summary["run_seeds"], [0, 1, 2, 3])
+        self.assertEqual(len(summary["runs"]), 4)
+        self.assertEqual(summary["metrics"]["live_acc"], 73.0)
 
     def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
         args = build_parser().parse_args(
@@ -467,10 +612,10 @@ class ExternalCliTests(unittest.TestCase):
             score_model_dir = score_dir / "dry-model"
             model_dir.mkdir(parents=True)
             score_model_dir.mkdir(parents=True)
-            (model_dir / "BFCL_simple_result.json").write_text(
+            (model_dir / "BFCL_v4_simple_python_result.json").write_text(
                 json.dumps(
                     {
-                        "id": "simple_1",
+                        "id": "simple_python_1",
                         "result": "<think>x</think>",
                         "inference_input_log": {"formatted_prompt": "prompt text"},
                     }
@@ -478,17 +623,17 @@ class ExternalCliTests(unittest.TestCase):
                 + "\n"
                 + json.dumps(
                     {
-                        "id": "simple_2",
+                        "id": "simple_python_2",
                         "result": "Error during inference: BFCL prompt exceeds max context length.",
                     }
                 )
                 + "\n",
                 encoding="utf-8",
             )
-            (score_model_dir / "BFCL_simple_score.json").write_text(
+            (score_model_dir / "BFCL_v4_simple_python_score.json").write_text(
                 json.dumps({"accuracy": 0.5})
                 + "\n"
-                + json.dumps({"id": "simple_2", "valid": False})
+                + json.dumps({"id": "simple_python_2", "valid": False})
                 + "\n",
                 encoding="utf-8",
             )
@@ -507,7 +652,7 @@ class ExternalCliTests(unittest.TestCase):
             ]
             self.assertEqual(stats["prediction_records"], 2)
             self.assertEqual(stats["prediction_scored_records"], 2)
-            self.assertEqual(rows[0]["sample_id"], "simple_1")
+            self.assertEqual(rows[0]["sample_id"], "simple_python_1")
             self.assertEqual(rows[0]["gen_idx"], 0)
             self.assertEqual(rows[0]["prompt"], "prompt text")
             self.assertEqual(rows[0]["generation"], "<think>x</think>")
@@ -517,42 +662,101 @@ class ExternalCliTests(unittest.TestCase):
             self.assertIsNone(rows[0]["gold"])
             self.assertIsNone(rows[0]["error"])
             self.assertEqual(rows[0]["meta"]["benchmark"], "bfcl")
-            self.assertEqual(rows[0]["meta"]["test_category"], "simple")
+            self.assertEqual(rows[0]["meta"]["test_category"], "simple_python")
             self.assertFalse(rows[1]["is_pass"])
             self.assertEqual(rows[1]["score"], 0.0)
             self.assertIn("Error during inference", rows[1]["error"])
 
-    def test_bfcl_format_rate_ignores_terminal_chat_tokens(self) -> None:
+    def test_bfcl_format_rate_uses_single_turn_subset_expectations(self) -> None:
         with TemporaryDirectory() as tmp:
             result_dir = Path(tmp) / "result"
-            model_dir = result_dir / "dry-model"
+            model_dir = result_dir / "dry-model" / "non_live"
             model_dir.mkdir(parents=True)
-            records = [
+            tool_call_records = [
                 {
-                    "id": "simple_1",
+                    "id": "simple_python_1",
                     "result": (
                         "<think>x</think>\n<tool_call>\n{}\n</tool_call>"
                         "<|im_end|>"
                     ),
                 },
                 {
-                    "id": "multi_turn_1",
-                    "result": [
-                        "<think>x</think><|im_end|>",
-                        "<think>y</think>\n<response>done</response><|im_end|>",
-                    ],
+                    "id": "simple_python_2",
+                    "result": "<think>x</think>\n<response>done</response>",
                 },
-                {"id": "simple_2", "result": "bare JSON {}"},
+                {
+                    "id": "simple_python_3",
+                    "result": (
+                        "<think>x</think>\n<tool_call>\n{}\n</tool_call>"
+                        "<tool_call>\n{}\n</tool_call>"
+                    ),
+                },
             ]
-            (model_dir / "BFCL_simple_result.json").write_text(
-                "\n".join(json.dumps(record) for record in records) + "\n",
+            (model_dir / "BFCL_v4_simple_python_result.json").write_text(
+                "\n".join(json.dumps(record) for record in tool_call_records) + "\n",
+                encoding="utf-8",
+            )
+            response_records = [
+                {
+                    "id": "irrelevance_1",
+                    "result": (
+                        "<think>x</think>\n<response>done</response><|im_end|>"
+                    ),
+                },
+                {
+                    "id": "irrelevance_2",
+                    "result": "<think>x</think>\n<tool_call>\n{}\n</tool_call>",
+                },
+            ]
+            (model_dir / "BFCL_v4_irrelevance_result.json").write_text(
+                "\n".join(json.dumps(record) for record in response_records) + "\n",
                 encoding="utf-8",
             )
 
-            self.assertAlmostEqual(
-                compute_format_rate(result_dir, "dry-model"),
-                200.0 / 3.0,
+            rates = compute_format_rates(result_dir, "dry-model")
+
+            self.assertEqual(rates["non_live"], 40.0)
+
+    def test_bfcl_format_rate_uses_multi_turn_ground_truth_and_terminal_step(
+        self,
+    ) -> None:
+        tool_call = "<think>x</think>\n<tool_call>\n{}\n</tool_call>"
+        response = "<think>x</think>\n<response>done</response>"
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model" / "multi_turn"
+            model_dir.mkdir(parents=True)
+            records = [
+                {
+                    "id": "multi_turn_miss_param_1",
+                    "result": [[tool_call, response], [response]],
+                },
+                {
+                    "id": "multi_turn_miss_param_2",
+                    "result": [[response]],
+                },
+                {
+                    "id": "multi_turn_miss_param_3",
+                    "result": [[tool_call, tool_call]],
+                },
+            ]
+            (model_dir / "BFCL_v4_multi_turn_miss_param_result.json").write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
             )
+            ground_truth = {
+                "multi_turn_miss_param_1": [["call()"], []],
+                "multi_turn_miss_param_2": [["call()"]],
+                "multi_turn_miss_param_3": [["call()"]],
+            }
+
+            with mock.patch(
+                "benchmarks.bfcl.external._load_ground_truth_by_id",
+                return_value=ground_truth,
+            ):
+                rates = compute_format_rates(result_dir, "dry-model")
+
+            self.assertAlmostEqual(rates["multi_turn"], 400.0 / 6.0)
 
     def test_bfcl_parse_scores_reports_toolrl_columns(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -562,11 +766,14 @@ class ExternalCliTests(unittest.TestCase):
                 "Model",
                 "Overall Acc",
                 "Non-Live AST Acc",
-                "Non-Live Exec Acc",
                 "Live Acc",
                 "Multi Turn Acc",
+                "Web Search Acc",
+                "Memory Acc",
                 "Relevance Detection",
                 "Irrelevance Detection",
+                "Format Sensitivity Max Delta",
+                "Format Sensitivity Standard Deviation",
             ]
             with (score_dir / "data_overall.csv").open(
                 "w", encoding="utf-8", newline=""
@@ -578,25 +785,87 @@ class ExternalCliTests(unittest.TestCase):
                         "Model": "dry-model",
                         "Overall Acc": "38.35%",
                         "Non-Live AST Acc": "56.33%",
-                        "Non-Live Exec Acc": "63.77%",
                         "Live Acc": "57.31%",
                         "Multi Turn Acc": "0.25%",
+                        "Web Search Acc": "20.00%",
+                        "Memory Acc": "30.00%",
                         "Relevance Detection": "77.78%",
                         "Irrelevance Detection": "41.84%",
+                        "Format Sensitivity Max Delta": "12.5",
+                        "Format Sensitivity Standard Deviation": "3.25",
                     }
+                )
+            with (score_dir / "data_agentic.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as f:
+                writer = csv.DictWriter(
+                    f, fieldnames=["Model", "Agentic Overall Acc"]
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {"Model": "dry-model", "Agentic Overall Acc": "25.00%"}
                 )
 
             metrics = parse_scores(score_dir, "dry-model")
 
-            self.assertEqual(metrics["OverallAcc"], 38.35)
-            self.assertEqual(metrics["Non-LiveASTAcc"], 56.33)
-            self.assertEqual(metrics["Non-LiveExecAcc"], 63.77)
-            self.assertEqual(metrics["LiveAcc"], 57.31)
-            self.assertEqual(metrics["MultiTurnAcc"], 0.25)
-            self.assertEqual(metrics["RelevanceDetection"], 77.78)
-            self.assertEqual(metrics["IrrelevanceDetection"], 41.84)
-            self.assertEqual(metrics["avg_acc"], 38.35)
-            self.assertEqual(metrics["non_live_ast_acc"], 56.33)
+            self.assertEqual(metrics["official_overall_acc"], 38.35)
+            self.assertEqual(metrics["non_live_acc"], 56.33)
+            self.assertEqual(metrics["live_acc"], 57.31)
+            self.assertEqual(metrics["multi_turn_acc"], 0.25)
+            self.assertEqual(metrics["agentic_acc"], 25.0)
+            self.assertEqual(metrics["web_search_acc"], 20.0)
+            self.assertEqual(metrics["memory_acc"], 30.0)
+            self.assertEqual(metrics["relevance_detection"], 77.78)
+            self.assertEqual(metrics["irrelevance_detection"], 41.84)
+            self.assertEqual(metrics["format_sensitivity_max_delta"], 12.5)
+            self.assertEqual(metrics["format_sensitivity_std"], 3.25)
+            self.assertEqual(metrics["avg_acc"], 37.96)
+
+            add_comparison_metrics(
+                metrics,
+                {"live": 77.44, "non_live": 95.11, "multi_turn": 57.40},
+            )
+            self.assertEqual(metrics["live_format"], 77.44)
+            self.assertEqual(metrics["non_live_format"], 95.11)
+            self.assertEqual(metrics["multi_turn_format"], 57.4)
+            self.assertEqual(metrics["avg_format"], 76.65)
+
+            self.assertEqual(
+                set(metrics),
+                {
+                    "official_overall_acc",
+                    "non_live_acc",
+                    "live_acc",
+                    "multi_turn_acc",
+                    "agentic_acc",
+                    "web_search_acc",
+                    "memory_acc",
+                    "relevance_detection",
+                    "irrelevance_detection",
+                    "format_sensitivity_max_delta",
+                    "format_sensitivity_std",
+                    "live_format",
+                    "non_live_format",
+                    "multi_turn_format",
+                    "avg_acc",
+                    "avg_format",
+                },
+            )
+
+    def test_bfcl_comparison_metrics_match_paper_macro_average(self) -> None:
+        metrics = {
+            "live_acc": 72.73,
+            "non_live_acc": 84.75,
+            "multi_turn_acc": 12.50,
+        }
+
+        add_comparison_metrics(
+            metrics,
+            {"live": 77.44, "non_live": 95.11, "multi_turn": 57.40},
+        )
+
+        self.assertEqual(metrics["avg_acc"], 56.66)
+        self.assertEqual(metrics["avg_format"], 76.65)
 
     def test_bfcl_uses_resolved_generation_config(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -645,10 +914,10 @@ class ExternalCliTests(unittest.TestCase):
             result_dir = Path(tmp) / "result"
             model_dir = result_dir / "dry-model"
             model_dir.mkdir(parents=True)
-            (model_dir / "BFCL_simple_result.json").write_text(
+            (model_dir / "BFCL_v4_simple_python_result.json").write_text(
                 json.dumps(
                     {
-                        "id": "simple_1",
+                        "id": "simple_python_1",
                         "result": "Error during inference: Connection error.",
                     }
                 )
@@ -656,7 +925,7 @@ class ExternalCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(RuntimeError, "simple_1"):
+            with self.assertRaisesRegex(RuntimeError, "simple_python_1"):
                 _raise_on_inference_errors(result_dir, "dry-model")
 
     def test_bfcl_context_overflow_counts_as_zero_score(self) -> None:
@@ -679,7 +948,7 @@ class ExternalCliTests(unittest.TestCase):
             result_dir = Path(tmp) / "result"
             model_dir = result_dir / "dry-model"
             model_dir.mkdir(parents=True)
-            (model_dir / "BFCL_multi_turn_long_context_result.json").write_text(
+            (model_dir / "BFCL_v4_multi_turn_long_context_result.json").write_text(
                 json.dumps(
                     {
                         "id": "multi_turn_long_context_129",
@@ -689,7 +958,7 @@ class ExternalCliTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (model_dir / "BFCL_multi_turn_miss_param_result.json").write_text(
+            (model_dir / "BFCL_v4_multi_turn_miss_param_result.json").write_text(
                 json.dumps(
                     {
                         "id": "multi_turn_miss_param_190",

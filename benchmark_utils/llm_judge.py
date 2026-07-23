@@ -1,14 +1,13 @@
-"""Small OpenAI-compatible client shared by native LLM-judge benchmarks."""
+"""LiteLLM client shared by native LLM-judge benchmarks."""
 
 import json
 import os
 import time
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, TypeVar
 
+import litellm
 from tqdm.auto import tqdm
 
 T = TypeVar("T")
@@ -19,8 +18,8 @@ NORMAL_FORMAT_ATTEMPTS = 3
 @dataclass(frozen=True)
 class JudgeSettings:
     model: str
-    base_url: str
-    api_key: str
+    base_url: str | None
+    api_key: str | None
     workers: int
     timeout: float
     max_retries: int
@@ -43,28 +42,27 @@ def resolve_judge_settings(
 
     local_client = options.get("_judge_client")
     if local_client is None:
-        base_url = str(
+        raw_base_url = (
             options.get("judge_base_url")
             or os.environ.get("AETHEREVAL_JUDGE_BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
-            or "https://api.openai.com/v1"
-        ).rstrip("/")
-        if not base_url:
-            raise ValueError("judge base URL cannot be empty")
+        )
+        base_url = str(raw_base_url).rstrip("/") if raw_base_url else None
 
         explicit_key_env = options.get("judge_api_key_env")
-        key_env = str(explicit_key_env or "AETHEREVAL_JUDGE_API_KEY").strip()
-        api_key = os.environ.get(key_env)
-        if api_key is None and explicit_key_env is None:
+        if explicit_key_env is not None:
+            key_env = str(explicit_key_env).strip()
+            if not key_env:
+                raise ValueError("judge API-key environment variable cannot be empty")
+            api_key = os.environ.get(key_env)
+            if not api_key:
+                raise RuntimeError(
+                    f"LLM-judge API key environment variable {key_env} is not set."
+                )
+        else:
+            api_key = os.environ.get("AETHEREVAL_JUDGE_API_KEY")
+        if api_key is None and base_url is not None:
             api_key = os.environ.get("OPENAI_API_KEY")
-            if api_key is not None:
-                key_env = "OPENAI_API_KEY"
-        if not api_key:
-            raise RuntimeError(
-                "LLM-judge benchmark requires an API key. Set "
-                f"{key_env}, or pass --judge-api-key-env NAME. For an unauthenticated "
-                "local OpenAI-compatible endpoint, set the variable to '-'."
-            )
     else:
         base_url = "offline://local-judge"
         api_key = "-"
@@ -148,52 +146,47 @@ def chat_completion(
         template_kwargs.setdefault("enable_thinking", settings.enable_thinking)
         effective_extra_body["chat_template_kwargs"] = template_kwargs
 
-    payload: dict[str, Any] = {
-        "model": settings.model,
+    model = settings.model
+    if settings.base_url is not None and not model.startswith("openai/"):
+        # --judge-base-url is explicitly an OpenAI-compatible endpoint. The
+        # prefix selects LiteLLM's OpenAI transport while the provider prefix is
+        # stripped from the model name sent to that endpoint.
+        model = f"openai/{model}"
+
+    request_options: dict[str, Any] = {
+        "model": model,
         "messages": messages,
+        "timeout": settings.timeout,
+        "num_retries": 0,
     }
     if effective_temperature is not None:
-        payload["temperature"] = effective_temperature
+        request_options["temperature"] = effective_temperature
     if effective_max_tokens is not None:
-        payload["max_tokens"] = effective_max_tokens
+        request_options["max_tokens"] = effective_max_tokens
     if effective_top_p is not None:
-        payload["top_p"] = effective_top_p
+        request_options["top_p"] = effective_top_p
     if seed is not None:
-        payload["seed"] = int(seed)
+        request_options["seed"] = int(seed)
     if effective_extra_body:
-        payload.update(effective_extra_body)
-
-    url = settings.base_url
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json",
-    }
+        request_options["extra_body"] = effective_extra_body
+    if settings.base_url is not None:
+        request_options["base_url"] = settings.base_url
+    if settings.api_key is not None:
+        request_options["api_key"] = settings.api_key
 
     last_error: BaseException | None = None
     for attempt in range(settings.max_retries + 1):
-        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=settings.timeout) as response:
-                raw = response.read().decode("utf-8")
-            data = json.loads(raw)
-            return _extract_content(data)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            last_error = RuntimeError(
-                f"judge request failed with HTTP {exc.code}: {detail[:2000]}"
-            )
-            if exc.code not in {408, 409, 429} and exc.code < 500:
-                raise last_error from exc
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            json.JSONDecodeError,
-            ValueError,
-        ) as exc:
+            return _extract_content(litellm.completion(**request_options))
+        except Exception as exc:
             last_error = exc
+            status_code = getattr(exc, "status_code", None)
+            if (
+                isinstance(status_code, int)
+                and status_code < 500
+                and status_code not in {408, 409, 429}
+            ):
+                raise RuntimeError(f"judge request failed: {exc}") from exc
 
         if attempt < settings.max_retries:
             time.sleep(min(2**attempt, 16))
@@ -285,7 +278,9 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return value
 
 
-def _extract_content(response: dict[str, Any]) -> str:
+def _extract_content(response: Any) -> str:
+    if not isinstance(response, dict) and hasattr(response, "model_dump"):
+        response = response.model_dump()
     try:
         content = response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:

@@ -166,7 +166,7 @@ def run_selected_tasks(
         _info(
             f"external_task={task_name} model={spec.model} "
             f"backend={spec.backend} dp_size={spec.dp_size} tp_size={spec.tp_size} "
-            f"output_dir={spec.output_dir}"
+            f"num_runs={spec.num_runs} output_dir={spec.output_dir}"
         )
         result = run_bfcl(spec)
         task_summaries[task_name] = _external_summary(
@@ -383,7 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("api", "local"),
         default=None,
         help=(
-            "Judge transport: OpenAI-compatible API or an internally managed "
+            "Judge transport: LiteLLM API or an internally managed "
             "local SGLang service (default: api)."
         ),
     )
@@ -391,7 +391,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--judge-base-url",
         type=str,
         default=None,
-        help="OpenAI-compatible judge API base URL (or AETHEREVAL_JUDGE_BASE_URL).",
+        help=(
+            "Optional OpenAI-compatible judge endpoint for LiteLLM "
+            "(or AETHEREVAL_JUDGE_BASE_URL). Omit for native provider routing."
+        ),
     )
     judge_group.add_argument(
         "--judge-api-key-env",

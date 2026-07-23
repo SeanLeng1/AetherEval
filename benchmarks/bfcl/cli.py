@@ -5,7 +5,7 @@ from typing import Any
 from aethereval.config import parse_key_value_args
 from aethereval.core.task_defaults import resolve_task_default_gen
 
-from .external import ExternalRunSpec
+from .external import DEFAULT_CATEGORIES, ExternalRunSpec
 
 
 def add_bfcl_arguments(parser: argparse.ArgumentParser) -> None:
@@ -13,7 +13,10 @@ def add_bfcl_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--categories",
         default=None,
-        help="BFCL categories/collections, comma-separated.",
+        help=(
+            "BFCL categories/collections, comma-separated "
+            "(default: live,non_live,multi_turn; use all for full V4)."
+        ),
     )
     group.add_argument(
         "--num-threads",
@@ -66,7 +69,7 @@ def add_bfcl_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _split_categories(value: str | None) -> list[str]:
     if value is None:
-        return ["all"]
+        return list(DEFAULT_CATEGORIES)
     categories = [item.strip() for item in value.split(",") if item.strip()]
     if not categories:
         raise ValueError("--categories cannot be empty")
@@ -139,6 +142,7 @@ def build_bfcl_spec(
         top_p=float(_generation_value(generation, defaults, "top_p", 1.0)),
         top_k=int(_generation_value(generation, defaults, "top_k", -1)),
         seed=generation.get("seed"),
+        num_runs=int(_generation_value(generation, defaults, "n", 4)),
         verbose=bool(args.bfcl_verbose),
         allow_overwrite=bool(resolved["overwrite"]),
         run_generation=not resolved["eval_only"],
