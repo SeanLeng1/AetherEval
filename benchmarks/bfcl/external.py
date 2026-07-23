@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import warnings
 from dataclasses import dataclass, field, replace
 from importlib.metadata import PackageNotFoundError, version
@@ -18,6 +19,7 @@ from aethereval.backends.sglang.service import SGLangService
 from aethereval.core.io import model_output_name
 from aethereval.core.task_defaults import resolve_task_default_gen
 
+from .errors import is_context_length_error
 from .register import register_rlla_model
 
 # ToolRL's public format reward selects one exact shape from the reference answer and
@@ -316,12 +318,84 @@ def _evaluation_run_paths(out: Path, num_runs: int) -> list[tuple[Path, Path]]:
     ]
 
 
+def _next_corrupt_tail_path(path: Path) -> Path:
+    candidate = path.with_name(f"{path.name}.corrupt-tail")
+    index = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.corrupt-tail.{index}")
+        index += 1
+    return candidate
+
+
+def _validate_or_repair_result_jsonl(path: Path, *, repair_tail: bool) -> None:
+    """Validate one BFCL result file and recover an interrupted final write."""
+
+    with path.open("rb") as source:
+        line_index = 0
+        while True:
+            byte_offset = source.tell()
+            raw_line = source.readline()
+            if not raw_line:
+                return
+            line_index += 1
+            if not raw_line.strip():
+                continue
+            try:
+                json.loads(raw_line)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                has_later_record = any(line.strip() for line in source)
+                if repair_tail and not has_later_record:
+                    backup_path = _next_corrupt_tail_path(path)
+                    source.seek(byte_offset)
+                    with backup_path.open("wb") as backup:
+                        shutil.copyfileobj(source, backup)
+                    with path.open("r+b") as result_file:
+                        result_file.truncate(byte_offset)
+                    print(
+                        "[aethereval] BFCL resume repaired an interrupted final JSONL "
+                        f"record: file={path} line={line_index} "
+                        f"backup={backup_path}"
+                    )
+                    return
+                action = (
+                    "Rerun generation so AetherEval can repair the interrupted tail."
+                    if not repair_tail and not has_later_record
+                    else "Restore or remove this result file before resuming."
+                )
+                raise RuntimeError(
+                    "Malformed BFCL result JSONL: "
+                    f"file={path}, line={line_index}: {exc}. {action}"
+                ) from exc
+
+
+def _prepare_existing_results(
+    result_dirs: list[Path],
+    model: str,
+    *,
+    repair_tail: bool,
+) -> None:
+    model_dir_name = model.replace("/", "_")
+    for result_dir in result_dirs:
+        model_dir = result_dir / model_dir_name
+        if not model_dir.exists():
+            continue
+        for result_file in sorted(model_dir.rglob("*_result.json")):
+            _validate_or_repair_result_jsonl(result_file, repair_tail=repair_tail)
+
+
 def run(spec: ExternalRunSpec) -> ExternalResult:
     out = Path(spec.output_dir).resolve()
     run_paths = _evaluation_run_paths(out, spec.num_runs)
     for result_dir, score_dir in run_paths:
         result_dir.mkdir(parents=True, exist_ok=True)
         score_dir.mkdir(parents=True, exist_ok=True)
+
+    if not spec.allow_overwrite:
+        _prepare_existing_results(
+            [result_dir for result_dir, _ in run_paths],
+            spec.model,
+            repair_tail=spec.run_generation,
+        )
 
     if spec.run_generation or spec.run_evaluation:
         register_rlla_model(spec.model, project_root=str(out))
@@ -508,9 +582,7 @@ def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
 
 
 def _is_allowed_zero_score_error(error: str) -> bool:
-    return "BFCL prompt exceeds max context length:" in error or (
-        "Input length (" in error and "exceeds the maximum allowed length" in error
-    )
+    return is_context_length_error(error)
 
 
 def _raise_on_inference_errors(result_dir: Path, model: str) -> None:

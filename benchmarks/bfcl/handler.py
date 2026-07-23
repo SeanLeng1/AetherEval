@@ -24,8 +24,11 @@ from bfcl_eval.model_handler.utils import system_prompt_pre_processing_chat_mode
 from bfcl_eval.utils import is_format_sensitivity
 from overrides import override
 
+from .errors import is_context_length_error
+
 
 _REQUEST_STATE = threading.local()
+_NATIVE_GENERATE_TIMEOUT = (30, 1800)
 
 
 def _lenient_decode() -> bool:
@@ -95,13 +98,33 @@ def _request_session() -> requests.Session:
 def _post_native_generate(url: str, payload: dict) -> dict:
     for attempt in range(3):
         try:
-            response = _request_session().post(url, json=payload, timeout=72000)
+            response = _request_session().post(
+                url,
+                json=payload,
+                timeout=_NATIVE_GENERATE_TIMEOUT,
+            )
         except (requests.ConnectionError, requests.Timeout):
             if attempt == 2:
                 raise
         else:
             if response.ok:
-                return _single_generate_result(response.json())
+                try:
+                    response_body = response.json()
+                except ValueError as exc:
+                    if attempt == 2:
+                        raise RuntimeError(
+                            "BFCL native generation returned malformed JSON after "
+                            f"3 attempts: {response.text[:500]!r}"
+                        ) from exc
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+                else:
+                    return _single_generate_result(response_body)
+            if is_context_length_error(response.text):
+                raise RuntimeError(
+                    "BFCL native generation rejected an overlength prompt "
+                    f"(not retried), HTTP {response.status_code}: {response.text}"
+                )
             if response.status_code < 500 and response.status_code != 429:
                 raise RuntimeError(
                     "BFCL native generation failed with HTTP "
@@ -451,7 +474,7 @@ class RLLAHandler(OSSHandler):
                 prompt=formatted_prompt,
                 max_tokens=leftover_tokens_count,
                 extra_body=extra_body,
-                timeout=72000,
+                timeout=_NATIVE_GENERATE_TIMEOUT[1],
             )
         return api_response, time.time() - start_time
 

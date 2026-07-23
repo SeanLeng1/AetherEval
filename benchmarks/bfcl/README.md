@@ -97,10 +97,20 @@ BFCL's local handler sends requests to the local SGLang server concurrently. The
 package hardcodes 100 workers. AetherEval defaults to `max(16, 16 * dp_size)`, capped at
 100, so every replica receives useful batching pressure. Override with `--num-threads`;
 lower it if server logs show frequent KV-cache retractions or connection errors.
+Deterministic context-length rejections are never retried, even when SMG surfaces a
+worker rejection as HTTP 500. Other transient connection, 429, and 5xx failures retain
+the bounded retry path. A single native generation request has a 30-minute read timeout,
+preventing a dead router request from silently holding the benchmark for many hours.
 
 Upstream BFCL also prints very verbose multi-turn step logs (`ID: ..., Turn: ..., Step:
 ...`, empty-response notices, and separator lines). AetherEval filters those by default;
 use `--bfcl-verbose` only when debugging BFCL's internal turn loop.
+
+Generation resumes from existing BFCL JSONL files unless `--overwrite` is set. If a
+previous process was killed while writing the final record, AetherEval preserves the
+incomplete bytes in a neighboring `*.corrupt-tail` file, removes only that incomplete
+record, and lets BFCL regenerate its test case. Corruption before the final record is
+reported with the exact file and line and is never repaired automatically.
 
 BFCL is launched via the normal AetherEval task path, so generation/backend settings are
 resolved from the same CLI/YAML config stack as native tasks. The SGLang server may still

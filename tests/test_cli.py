@@ -25,6 +25,7 @@ from benchmarks.bfcl.external import (
     _evaluation_run_paths,
     _gen_args,
     _is_allowed_zero_score_error,
+    _prepare_existing_results,
     _require_web_search_key,
     _raise_on_inference_errors,
     _run_generation,
@@ -43,6 +44,57 @@ from benchmarks.bfcl.register import register_rlla_model
 
 
 class ExternalCliTests(unittest.TestCase):
+    def test_bfcl_resume_repairs_only_an_interrupted_final_jsonl_record(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model" / "non_live"
+            model_dir.mkdir(parents=True)
+            result_file = model_dir / "BFCL_v4_simple_python_result.json"
+            valid_record = json.dumps({"id": "simple_python_1", "result": "ok"})
+            broken_tail = b'{"id": "simple_python_2", "result": "unterminated'
+            result_file.write_bytes(valid_record.encode() + b"\n" + broken_tail)
+
+            _prepare_existing_results(
+                [result_dir],
+                "dry-model",
+                repair_tail=True,
+            )
+
+            self.assertEqual(
+                result_file.read_text(encoding="utf-8"),
+                valid_record + "\n",
+            )
+            backups = list(model_dir.glob("*.corrupt-tail"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), broken_tail)
+
+    def test_bfcl_resume_rejects_corruption_before_a_later_record(self) -> None:
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model" / "non_live"
+            model_dir.mkdir(parents=True)
+            result_file = model_dir / "BFCL_v4_simple_python_result.json"
+            result_file.write_text(
+                '{"id": "broken"\n'
+                + json.dumps({"id": "simple_python_2", "result": "ok"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Malformed BFCL result JSONL",
+            ):
+                _prepare_existing_results(
+                    [result_dir],
+                    "dry-model",
+                    repair_tail=True,
+                )
+
+            self.assertEqual(list(model_dir.glob("*.corrupt-tail*")), [])
+
     def test_bfcl_v4_requires_serpapi_only_for_web_search_generation(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "SERPAPI_API_KEY"):
@@ -942,6 +994,11 @@ class ExternalCliTests(unittest.TestCase):
                 "Error during inference: Error code: 400 - {'message': "
                 "'Input length (32764 tokens) exceeds the maximum allowed length "
                 "(32762 tokens). Use a shorter input.'}"
+            ),
+            (
+                "Error during inference: worker failed with HTTP 500: "
+                "The input (32889 tokens) is longer than the model's context "
+                "length (32768 tokens)."
             ),
         ]
         with TemporaryDirectory() as tmp:

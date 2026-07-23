@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest import mock
@@ -86,7 +87,7 @@ class BfclHandlerTests(unittest.TestCase):
                     "skip_special_tokens": False,
                 },
             },
-            timeout=72000,
+            timeout=(30, 1800),
         )
 
     def test_native_generate_does_not_retry_client_errors(self) -> None:
@@ -106,6 +107,80 @@ class BfclHandlerTests(unittest.TestCase):
                 _post_native_generate("http://router/generate", {})
 
         session.post.assert_called_once()
+
+    def test_native_generate_does_not_retry_context_error_reported_as_500(
+        self,
+    ) -> None:
+        response = mock.Mock(
+            ok=False,
+            status_code=500,
+            text=(
+                "worker failed: The input (32889 tokens) is longer than the "
+                "model's context length (32768 tokens)."
+            ),
+        )
+        session = mock.Mock()
+        session.post.return_value = response
+
+        with (
+            mock.patch(
+                "benchmarks.bfcl.handler._request_session",
+                return_value=session,
+            ),
+            mock.patch("benchmarks.bfcl.handler.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not retried"):
+                _post_native_generate("http://router/generate", {})
+
+        session.post.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_native_generate_still_retries_transient_server_errors(self) -> None:
+        failed = mock.Mock(
+            ok=False,
+            status_code=503,
+            text="worker temporarily unavailable",
+        )
+        valid = mock.Mock(ok=True)
+        valid.json.return_value = {"text": "generated answer"}
+        session = mock.Mock()
+        session.post.side_effect = [failed, valid]
+
+        with (
+            mock.patch(
+                "benchmarks.bfcl.handler._request_session",
+                return_value=session,
+            ),
+            mock.patch("benchmarks.bfcl.handler.time.sleep"),
+        ):
+            result = _post_native_generate("http://router/generate", {})
+
+        self.assertEqual(result, {"text": "generated answer"})
+        self.assertEqual(session.post.call_count, 2)
+
+    def test_native_generate_retries_malformed_json_responses(self) -> None:
+        malformed = mock.Mock(ok=True, text='{"text": "unterminated')
+        malformed.json.side_effect = json.JSONDecodeError(
+            "Unterminated string",
+            malformed.text,
+            9,
+        )
+        valid = mock.Mock(ok=True)
+        valid.json.return_value = {"text": "generated answer"}
+        session = mock.Mock()
+        session.post.side_effect = [malformed, valid]
+
+        with (
+            mock.patch(
+                "benchmarks.bfcl.handler._request_session",
+                return_value=session,
+            ),
+            mock.patch("benchmarks.bfcl.handler.time.sleep"),
+        ):
+            result = _post_native_generate("http://router/generate", {})
+
+        self.assertEqual(result, {"text": "generated answer"})
+        self.assertEqual(session.post.call_count, 2)
 
 
 if __name__ == "__main__":
