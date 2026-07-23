@@ -75,16 +75,41 @@ class SGLangBackendTests(unittest.TestCase):
                 ):
                     sglang_service._resolve_harmony_encoding_dir()
 
-    def test_normal_shutdown_signals_only_server_parent(self) -> None:
+    def test_normal_shutdown_signals_entire_server_process_group(self) -> None:
         process = mock.Mock()
+        process.pid = 12345
         process.poll.return_value = None
 
-        with mock.patch.object(sglang_service.os, "killpg") as killpg:
+        with (
+            mock.patch.object(sglang_service.os, "killpg") as killpg,
+            mock.patch.object(
+                sglang_service,
+                "_wait_for_process_group_exit",
+                return_value=True,
+            ),
+        ):
             sglang_service._stop_process(process)
 
-        process.terminate.assert_called_once_with()
+        killpg.assert_called_once_with(12345, sglang_service.signal.SIGTERM)
         process.wait.assert_called_once_with(timeout=20)
-        killpg.assert_not_called()
+
+    def test_shutdown_cleans_process_group_after_parent_already_died(self) -> None:
+        process = mock.Mock()
+        process.pid = 12345
+        process.poll.return_value = -3
+
+        with (
+            mock.patch.object(sglang_service.os, "killpg") as killpg,
+            mock.patch.object(
+                sglang_service,
+                "_wait_for_process_group_exit",
+                return_value=True,
+            ),
+        ):
+            sglang_service._stop_process(process)
+
+        killpg.assert_called_once_with(12345, sglang_service.signal.SIGTERM)
+        process.wait.assert_not_called()
 
     def test_server_actor_uses_grpc_worker_and_independent_ports(self) -> None:
         fake_process = mock.Mock()
@@ -102,12 +127,16 @@ class SGLangBackendTests(unittest.TestCase):
                 sglang_service,
                 "_wait_for_port",
             ) as wait_for_port,
+            mock.patch.object(
+                sglang_service,
+                "_free_port",
+                return_value=55000,
+            ),
         ):
             actor = sglang_service._SGLangServerActor(
                 "test/model",
                 1,
                 {},
-                55000,
             )
 
         command = popen.call_args.args[0]
@@ -145,6 +174,47 @@ class SGLangBackendTests(unittest.TestCase):
             55000,
             fake_process,
         )
+
+    def test_server_actor_retries_startup_port_collision(self) -> None:
+        first_process = mock.Mock()
+        first_process.poll.return_value = -3
+        second_process = mock.Mock()
+        fake_ray = SimpleNamespace(
+            util=SimpleNamespace(get_node_ip_address=lambda: "10.0.0.1")
+        )
+        with (
+            mock.patch.dict(sys.modules, {"ray": fake_ray}),
+            mock.patch.object(
+                sglang_service.subprocess,
+                "Popen",
+                side_effect=[first_process, second_process],
+            ) as popen,
+            mock.patch.object(
+                sglang_service,
+                "_wait_for_port",
+                side_effect=[RuntimeError("startup failed"), None],
+            ),
+            mock.patch.object(
+                sglang_service,
+                "_free_port",
+                side_effect=[45301, 45302],
+            ),
+            mock.patch.object(
+                sglang_service,
+                "_port_is_available",
+                return_value=False,
+            ),
+            mock.patch.object(sglang_service, "_stop_process") as stop_process,
+        ):
+            actor = sglang_service._SGLangServerActor(
+                "test/model",
+                1,
+                {},
+            )
+
+        self.assertEqual(popen.call_count, 2)
+        stop_process.assert_called_once_with(first_process)
+        self.assertEqual(actor.url(), "grpc://10.0.0.1:45302")
 
     def test_grpc_worker_adds_new_optional_request_fields(self) -> None:
         class Request:
@@ -350,6 +420,47 @@ class SGLangBackendTests(unittest.TestCase):
             process,
             endpoint="/readiness",
         )
+
+    def test_router_retries_startup_port_collision(self) -> None:
+        service = sglang_service.SGLangService.__new__(
+            sglang_service.SGLangService
+        )
+        service.router_policy = "cache_aware"
+        service.router_log_level = "warn"
+        service.model = "test/model"
+        service.model_kwargs = {}
+        service._harmony_encoding_dir = Path("/opt/aethereval/encodings")
+        first_process = mock.Mock()
+        first_process.poll.return_value = 1
+        second_process = mock.Mock()
+        with (
+            mock.patch.object(
+                sglang_service,
+                "_free_port",
+                side_effect=[18080, 18081, 18082, 18083],
+            ),
+            mock.patch.object(
+                sglang_service.subprocess,
+                "Popen",
+                side_effect=[first_process, second_process],
+            ) as popen,
+            mock.patch.object(
+                sglang_service,
+                "_wait_until_ready",
+                side_effect=[RuntimeError("startup failed"), None],
+            ),
+            mock.patch.object(
+                sglang_service,
+                "_port_is_available",
+                return_value=False,
+            ),
+            mock.patch.object(sglang_service, "_stop_process") as stop_process,
+        ):
+            base_url = service._start_router(["grpc://10.0.0.2:9000"])
+
+        self.assertEqual(base_url, "http://127.0.0.1:18082")
+        self.assertEqual(popen.call_count, 2)
+        stop_process.assert_called_once_with(first_process)
 
     def test_single_replica_uses_managed_service(self) -> None:
         tokenizer = _FakeTokenizer()

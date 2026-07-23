@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 
 _STARTUP_TIMEOUT_SECONDS = 1800
 _REQUEST_TIMEOUT_SECONDS = 24 * 60 * 60
+_PORT_START_ATTEMPTS = 3
 _URL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _HARMONY_ENCODING_ENV = "TIKTOKEN_ENCODINGS_BASE"
 _HARMONY_ENCODING_FILENAME = "o200k_base.tiktoken"
@@ -85,16 +86,13 @@ def _free_port(max_port: int = 65535) -> int:
             return port
 
 
-def _allocate_worker_ports(count: int) -> list[int]:
-    used: set[int] = set()
-    ports: list[int] = []
-    for _ in range(count):
-        port = _free_port(max_port=55535)
-        while port in used:
-            port = _free_port(max_port=55535)
-        used.add(port)
-        ports.append(port)
-    return ports
+def _port_is_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return False
+    return True
 
 
 def _guarded_command(command: list[str]) -> list[str]:
@@ -226,18 +224,50 @@ def _wait_for_port(
     )
 
 
-def _stop_process(process: subprocess.Popen[Any] | None) -> None:
-    if process is None or process.poll() is not None:
-        return
+def _process_group_exists(process_group_id: int) -> bool:
     try:
-        process.terminate()
-        process.wait(timeout=20)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    process_group_id: int,
+    timeout: float,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_group_exists(process_group_id):
+            return True
+        time.sleep(0.1)
+    return not _process_group_exists(process_group_id)
+
+
+def _stop_process(process: subprocess.Popen[Any] | None) -> None:
+    if process is None:
+        return
+
+    process_group_id = process.pid
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    if process.poll() is None:
+        try:
+            process.wait(timeout=20)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            pass
+
+    if not _wait_for_process_group_exit(process_group_id, timeout=5):
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             process.wait(timeout=10)
 
 
@@ -247,30 +277,9 @@ class _SGLangServerActor:
         model: str,
         tensor_parallel_size: int,
         model_kwargs: dict[str, Any],
-        port: int,
     ) -> None:
         import ray
 
-        command = _guarded_command(
-            [
-                sys.executable,
-                "-m",
-                "aethereval.backends.sglang.grpc_worker",
-                "serve",
-                "--model-path",
-                model,
-                "--tp-size",
-                str(tensor_parallel_size),
-                "--host",
-                "0.0.0.0",
-                "--port",
-                str(port),
-                "--grpc-mode",
-                "--log-level",
-                "error",
-                *_server_cli_args(model_kwargs),
-            ]
-        )
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         warning_filters = env.get("PYTHONWARNINGS", "")
@@ -284,18 +293,56 @@ class _SGLangServerActor:
         # contract. SGLang 0.5.15 uses array("q") for generated token IDs, so
         # request IDs must use the same container type.
         env["SGLANG_GRPC_TOKEN_ID_ARRAY"] = "1"
-        self._process = subprocess.Popen(
-            command,
-            env=env,
-            start_new_session=True,
-        )
         node_ip = ray.util.get_node_ip_address()
-        self._url = f"grpc://{node_ip}:{port}"
-        try:
-            _wait_for_port("127.0.0.1", port, self._process)
-        except BaseException:
-            _stop_process(self._process)
-            raise
+        self._process: subprocess.Popen[Any] | None = None
+
+        for attempt in range(_PORT_START_ATTEMPTS):
+            port = _free_port(max_port=55535)
+            command = _guarded_command(
+                [
+                    sys.executable,
+                    "-m",
+                    "aethereval.backends.sglang.grpc_worker",
+                    "serve",
+                    "--model-path",
+                    model,
+                    "--tp-size",
+                    str(tensor_parallel_size),
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    str(port),
+                    "--grpc-mode",
+                    "--log-level",
+                    "error",
+                    *_server_cli_args(model_kwargs),
+                ]
+            )
+            process = subprocess.Popen(
+                command,
+                env=env,
+                start_new_session=True,
+            )
+            self._process = process
+            try:
+                _wait_for_port("127.0.0.1", port, process)
+            except BaseException:
+                port_collision = (
+                    process.poll() is not None
+                    and not _port_is_available(port)
+                )
+                _stop_process(process)
+                self._process = None
+                if port_collision and attempt + 1 < _PORT_START_ATTEMPTS:
+                    print(
+                        "[aethereval] SGLang worker startup port collision; "
+                        f"retrying with a new port ({attempt + 2}/"
+                        f"{_PORT_START_ATTEMPTS})"
+                    )
+                    continue
+                raise
+            self._url = f"grpc://{node_ip}:{port}"
+            break
 
     def url(self) -> str:
         return self._url
@@ -360,15 +407,13 @@ class SGLangService:
             num_gpus=int(tensor_parallel_size),
         )(_SGLangServerActor)
         try:
-            worker_ports = _allocate_worker_ports(self.dp_size)
             self._workers = [
                 actor_cls.remote(
                     self.model,
                     int(tensor_parallel_size),
                     dict(self.model_kwargs),
-                    port,
                 )
-                for port in worker_ports
+                for _ in range(self.dp_size)
             ]
             worker_urls = ray.get([worker.url.remote() for worker in self._workers])
             self.base_url = self._start_router([str(url) for url in worker_urls])
@@ -377,44 +422,70 @@ class SGLangService:
             raise
 
     def _start_router(self, worker_urls: list[str]) -> str:
-        port = _free_port()
-        prometheus_port = _free_port()
-        while prometheus_port == port:
+        for attempt in range(_PORT_START_ATTEMPTS):
+            port = _free_port()
             prometheus_port = _free_port()
-        command = _guarded_command(
-            [
-                sys.executable,
-                "-m",
-                "sglang_router.launch_router",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--worker-urls",
-                *worker_urls,
-                "--log-level",
-                self.router_log_level,
-                "--prometheus-host",
-                "127.0.0.1",
-                "--prometheus-port",
-                str(prometheus_port),
-                *_router_model_cli_args(self.model, self.model_kwargs),
-            ]
-        )
-        if self.router_policy is not None:
-            command.extend(("--policy", self.router_policy))
-        env = dict(os.environ)
-        env["PYTHONUNBUFFERED"] = "1"
-        env["TQDM_DISABLE"] = "1"
-        env[_HARMONY_ENCODING_ENV] = str(self._harmony_encoding_dir)
-        self._router = subprocess.Popen(
-            command,
-            env=env,
-            start_new_session=True,
-        )
-        base_url = f"http://127.0.0.1:{port}"
-        _wait_until_ready(base_url, self._router, endpoint="/readiness")
-        return base_url
+            while prometheus_port == port:
+                prometheus_port = _free_port()
+            command = _guarded_command(
+                [
+                    sys.executable,
+                    "-m",
+                    "sglang_router.launch_router",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--worker-urls",
+                    *worker_urls,
+                    "--log-level",
+                    self.router_log_level,
+                    "--prometheus-host",
+                    "127.0.0.1",
+                    "--prometheus-port",
+                    str(prometheus_port),
+                    *_router_model_cli_args(self.model, self.model_kwargs),
+                ]
+            )
+            if self.router_policy is not None:
+                command.extend(("--policy", self.router_policy))
+            env = dict(os.environ)
+            env["PYTHONUNBUFFERED"] = "1"
+            env["TQDM_DISABLE"] = "1"
+            env[_HARMONY_ENCODING_ENV] = str(self._harmony_encoding_dir)
+            process = subprocess.Popen(
+                command,
+                env=env,
+                start_new_session=True,
+            )
+            self._router = process
+            base_url = f"http://127.0.0.1:{port}"
+            try:
+                _wait_until_ready(
+                    base_url,
+                    process,
+                    endpoint="/readiness",
+                )
+            except BaseException:
+                port_collision = (
+                    process.poll() is not None
+                    and (
+                        not _port_is_available(port)
+                        or not _port_is_available(prometheus_port)
+                    )
+                )
+                _stop_process(process)
+                self._router = None
+                if port_collision and attempt + 1 < _PORT_START_ATTEMPTS:
+                    print(
+                        "[aethereval] SMG router startup port collision; "
+                        f"retrying with new ports ({attempt + 2}/"
+                        f"{_PORT_START_ATTEMPTS})"
+                    )
+                    continue
+                raise
+            return base_url
+        raise AssertionError("unreachable")
 
     def request_many(
         self,

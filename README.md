@@ -69,6 +69,9 @@ For SGLang DP, Ray places one gRPC server actor per replica, including across
 joined worker nodes, and AetherEval starts one SMG router on the driver. SMG
 routes requests to the workers over gRPC with its default cache-aware policy.
 No SGLang server or router needs to be started manually on any node.
+Worker ports are selected on the node where each actor runs. Startup port
+collisions are retried automatically, and shutdown terminates the complete
+SGLang process group so scheduler children cannot retain GPUs or ports.
 
 Each replica is one Ray actor requesting `tp-size` GPUs, so its tensor-parallel
 group must fit on one node. For two eight-GPU nodes, `--dp-size 16 --tp-size 1`
