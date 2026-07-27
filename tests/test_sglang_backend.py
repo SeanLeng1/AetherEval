@@ -130,7 +130,7 @@ class SGLangBackendTests(unittest.TestCase):
             mock.patch.object(
                 sglang_service,
                 "_free_port",
-                return_value=55000,
+                side_effect=[55000, 56000],
             ),
         ):
             actor = sglang_service._SGLangServerActor(
@@ -160,6 +160,7 @@ class SGLangBackendTests(unittest.TestCase):
             ],
         )
         self.assertEqual(command[command.index("--port") + 1], "55000")
+        self.assertEqual(command[command.index("--nccl-port") + 1], "56000")
         self.assertIn("--grpc-mode", command)
         self.assertNotIn("--grpc-http-sidecar-port", command)
         self.assertEqual(command[command.index("--log-level") + 1], "error")
@@ -197,12 +198,12 @@ class SGLangBackendTests(unittest.TestCase):
             mock.patch.object(
                 sglang_service,
                 "_free_port",
-                side_effect=[45301, 45302],
+                side_effect=[45301, 39089, 45302, 39090],
             ),
             mock.patch.object(
                 sglang_service,
                 "_port_is_available",
-                return_value=False,
+                side_effect=[True, False],
             ),
             mock.patch.object(sglang_service, "_stop_process") as stop_process,
         ):
@@ -538,6 +539,7 @@ class SGLangBackendTests(unittest.TestCase):
                 "log_level": "info",
                 "router_log_level": "info",
                 "grpc_mode": False,
+                "nccl_port": 12345,
             }
         )
 

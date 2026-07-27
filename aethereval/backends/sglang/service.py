@@ -35,6 +35,7 @@ _CONTROLLED_SERVER_ARGS = {
     "log_level",
     "model",
     "model_path",
+    "nccl_port",
     "port",
     "router_log_level",
     "tensor_parallel_size",
@@ -298,6 +299,9 @@ class _SGLangServerActor:
 
         for attempt in range(_PORT_START_ATTEMPTS):
             port = _free_port(max_port=55535)
+            nccl_port = _free_port()
+            while nccl_port == port:
+                nccl_port = _free_port()
             command = _guarded_command(
                 [
                     sys.executable,
@@ -312,6 +316,8 @@ class _SGLangServerActor:
                     "0.0.0.0",
                     "--port",
                     str(port),
+                    "--nccl-port",
+                    str(nccl_port),
                     "--grpc-mode",
                     "--log-level",
                     "error",
@@ -329,7 +335,10 @@ class _SGLangServerActor:
             except BaseException:
                 port_collision = (
                     process.poll() is not None
-                    and not _port_is_available(port)
+                    and (
+                        not _port_is_available(port)
+                        or not _port_is_available(nccl_port)
+                    )
                 )
                 _stop_process(process)
                 self._process = None
