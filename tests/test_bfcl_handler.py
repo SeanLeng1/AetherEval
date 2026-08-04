@@ -9,11 +9,94 @@ ensure_bfcl_importable()
 
 from benchmarks.bfcl.handler import (  # noqa: E402
     RLLAHandler,
+    _convert_to_format_tool,
     _post_native_generate,
 )
 
 
 class BfclHandlerTests(unittest.TestCase):
+    def test_tool_schema_preserves_required_optional_and_nested_types(self) -> None:
+        tool = {
+            "name": "search",
+            "description": "Search with structured filters.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10},
+                    "filters": {
+                        "type": "array",
+                        "items": {
+                            "type": "dict",
+                            "properties": {
+                                "enabled": {"type": "boolean"},
+                            },
+                            "required": ["enabled"],
+                        },
+                    },
+                },
+                "required": ["query"],
+            },
+        }
+        original = json.loads(json.dumps(tool))
+
+        rendered = _convert_to_format_tool(tool)
+
+        self.assertEqual(tool, original)
+        self.assertIn('Required parameters: ["query"]', rendered)
+        self.assertIn('Optional parameters: ["limit", "filters"]', rendered)
+        self.assertIn('"type": "integer"', rendered)
+        self.assertIn('"type": "boolean"', rendered)
+        self.assertIn('"required": ["enabled"]', rendered)
+
+    def test_prompt_requires_native_json_parameter_types(self) -> None:
+        handler = RLLAHandler.__new__(RLLAHandler)
+        prompt = handler._format_prompt(
+            [{"role": "user", "content": "Use the tools."}],
+            [],
+        )
+
+        self.assertIn('"count": 3', prompt)
+        self.assertIn('"enabled": true', prompt)
+        self.assertIn('"items": ["a", "b"]', prompt)
+        self.assertIn('"options": {"limit": 2.5}', prompt)
+        self.assertIn("integer/float as JSON numbers", prompt)
+        self.assertIn("array/tuple as a JSON array", prompt)
+        self.assertIn("dict as a JSON object", prompt)
+        self.assertIn("Do not encode non-string values inside strings", prompt)
+
+    def test_multi_turn_suffix_is_used_before_first_tool_feedback(self) -> None:
+        handler = RLLAHandler.__new__(RLLAHandler)
+        messages = [{"role": "user", "content": "Start the task."}]
+
+        multi_prompt = handler._render_prompt(
+            messages,
+            [],
+            is_multi_turn=True,
+        )
+        single_prompt = handler._render_prompt(
+            messages,
+            [],
+            is_multi_turn=False,
+        )
+
+        self.assertIn("comprehensive plan", multi_prompt)
+        self.assertNotIn("given task in this turn", multi_prompt)
+        self.assertIn("given task in this turn", single_prompt)
+        self.assertNotIn("comprehensive plan", single_prompt)
+
+    def test_pre_query_processing_records_multi_turn_per_example(self) -> None:
+        handler = RLLAHandler.__new__(RLLAHandler)
+        test_entry = {
+            "id": "multi_turn_base_0",
+            "function": [],
+            "question": [[{"role": "user", "content": "Start."}]],
+        }
+
+        inference_data = handler._pre_query_processing_prompting(test_entry)
+
+        self.assertIs(inference_data["is_multi_turn"], True)
+
     def test_v4_format_prompt_preserves_benchmark_system_instructions(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
         prompt = handler._format_prompt(
@@ -35,7 +118,7 @@ class BfclHandlerTests(unittest.TestCase):
         handler.skip_special_tokens = False
         handler.tokenizer = mock.Mock()
         handler.tokenizer.tokenize.return_value = [1, 2]
-        handler._format_prompt = mock.Mock(return_value="rendered prompt")
+        handler._render_prompt = mock.Mock(return_value="rendered prompt")
         handler.client = mock.Mock()
 
         response = mock.Mock(ok=True)
@@ -67,9 +150,14 @@ class BfclHandlerTests(unittest.TestCase):
             ),
         ):
             result, _ = handler._query_prompting(
-                {"function": [], "message": []}
+                {"function": [], "message": [], "is_multi_turn": False}
             )
 
+        handler._render_prompt.assert_called_once_with(
+            [],
+            [],
+            is_multi_turn=False,
+        )
         handler.client.completions.create.assert_not_called()
         self.assertEqual(result.choices[0].text, "generated answer")
         self.assertEqual(result.usage.prompt_tokens, 7)

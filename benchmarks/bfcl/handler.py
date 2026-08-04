@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import requests
 from bfcl_eval.model_handler.local_inference.base_oss_handler import OSSHandler
 from bfcl_eval.model_handler.utils import system_prompt_pre_processing_chat_model
-from bfcl_eval.utils import is_format_sensitivity
+from bfcl_eval.utils import contain_multi_turn_interaction, is_format_sensitivity
 from overrides import override
 
 from .errors import is_context_length_error
@@ -207,12 +207,13 @@ def _extract_calls(result, lenient: bool = False):
 
 
 _TOOL_CALL_EXAMPLE = (
-    '{"name": "Tool name", "parameters": {"Parameter name": "Parameter content", '
-    '"... ...": "... ..."}}\n'
-    '{"name": "... ...", "parameters": {"... ...": "... ...", "... ...": "... ..."}}'
+    '{"name": "first_tool", "parameters": {"text": "example", "count": 3, '
+    '"enabled": true}}\n'
+    '{"name": "second_tool", "parameters": {"items": ["a", "b"], '
+    '"options": {"limit": 2.5}}}'
 )
 
-# ToolRL training system prompt (verbatim).
+# ToolRL training prompt with BFCL schema clarifications.
 SYS = """You are a helpful multi-turn dialogue assistant capable of leveraging tool calls to solve user tasks and provide structured chat responses.
 
 **Available Tools**
@@ -238,6 +239,7 @@ In your response, you can use the following tools:
 1. You must always include the `<think>` field to outline your reasoning. Provide at least one of `<tool_call>` or `<response>`. Decide whether to use `<tool_call>` (possibly multiple times), `<response>`, or both.
 2. You can invoke multiple tool calls simultaneously in the `<tool_call>` fields. Each tool call should be a JSON object with a "name" field and an "parameters" field containing a dictionary of parameters. If no parameters are needed, leave the "parameters" field an empty dictionary.
 3. Refer to the previous dialogue records in the history, including the user's queries, previous `<tool_call>`, `<response>`, and any tool feedback noted as `<obs>` (if exists).
+4. Parameter values must use the native JSON form of the declared tool type: integer/float as JSON numbers, boolean as a JSON boolean, array/tuple as a JSON array, dict as a JSON object, string as a JSON string, and any as the natural JSON value. Do not encode non-string values inside strings.
 """
 
 _SINGLE_TURN_SUFFIX = (
@@ -271,10 +273,16 @@ _SERVER_CONTEXT_MARGIN = 8
 
 def _convert_to_format_tool(tools, count=1):
     if isinstance(tools, dict):
-        params = tools["parameters"].get("properties", {})
+        parameter_schema = tools["parameters"]
+        params = parameter_schema.get("properties", {})
+        required = list(parameter_schema.get("required", []))
+        required_set = set(required)
+        optional = [name for name in params if name not in required_set]
         return (
             f"{count}. Name: {tools['name']}\nDescription: {tools['description']}\n"
-            f"Parameters: {json.dumps(params)}"
+            f"Parameters: {json.dumps(params)}\n"
+            f"Required parameters: {json.dumps(required)}\n"
+            f"Optional parameters: {json.dumps(optional)}"
         )
     if isinstance(tools, list):
         return "\n".join(_convert_to_format_tool(t, i + 1) for i, t in enumerate(tools))
@@ -313,8 +321,11 @@ class RLLAHandler(OSSHandler):
 
     @override
     def _format_prompt(self, messages, function):
-        # Multi-turn once tool feedback has entered the history; single-turn otherwise.
-        is_multi_turn = any(m.get("role") == "tool" for m in messages)
+        """Render a standalone prompt through the BFCL handler API."""
+        return self._render_prompt(messages, function, is_multi_turn=False)
+
+    def _render_prompt(self, messages, function, *, is_multi_turn):
+        """Render a prompt with example-level interaction metadata."""
         tools = _convert_to_format_tool(function)
         system_prompt = SYS.format(tools=tools, json_string=_TOOL_CALL_EXAMPLE)
         benchmark_instructions = [
@@ -370,7 +381,14 @@ class RLLAHandler(OSSHandler):
                 test_entry_id,
             )
 
-        return {"message": [], "function": functions}
+        return {
+            "message": [],
+            "function": functions,
+            # Keep this per example rather than on the shared handler instance. The BFCL
+            # id is available before turn one, so multi-turn planning must not wait for
+            # the first tool observation to enter the message history.
+            "is_multi_turn": contain_multi_turn_interaction(test_entry_id),
+        }
 
     @override
     def _query_prompting(self, inference_data: dict):
@@ -381,7 +399,11 @@ class RLLAHandler(OSSHandler):
         # ToolRL evaluated with offline vLLM (no such penalty); mirror that here.
         function = inference_data["function"]
         message = inference_data["message"]
-        formatted_prompt = self._format_prompt(message, function)
+        formatted_prompt = self._render_prompt(
+            message,
+            function,
+            is_multi_turn=inference_data["is_multi_turn"],
+        )
         inference_data["inference_input_log"] = {"formatted_prompt": formatted_prompt}
 
         max_tokens = _env_int("RLLA_BFCL_MAX_TOKENS", 4096)

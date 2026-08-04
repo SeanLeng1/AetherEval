@@ -1,7 +1,7 @@
 # BFCL-v4 (external benchmark)
 
-Runs the official **Berkeley Function Calling Leaderboard v4** generation loop and
-scorer for ToolRL/GDPO-style models, i.e. models that emit
+Runs the **Berkeley Function Calling Leaderboard v4** generation loop and checker for
+ToolRL/GDPO-style models, i.e. models that emit
 `<think>…</think>\n<tool_call>…</tool_call>\n<response>…</response>`.
 
 ## Why this is an *external* benchmark
@@ -11,6 +11,14 @@ builds a prompt, generates one response, scores it. BFCL-v4 does not fit that �
 its own generation, **multi-turn and agentic execution loops**, and AST/executable
 checkers. Faithfully reproducing it requires the official `bfcl_eval` package (its test
 data, AST checker, and multi-turn runtime), not a re-implementation.
+
+AetherEval makes one documented scoring equivalence for ToolRL-style JSON output. When
+the tool schema declares an `integer`, `float`, or `boolean`, its canonical quoted JSON
+scalar is treated as the same value (`"2"` = `2`, `"2.5"` = `2.5`, and `"true"` =
+`true`). String parameters remain strings; arrays, objects, malformed scalar strings,
+missing arguments, and function names remain strict. The same schema-aware rule is used
+before multi-turn execution. Consequently, AetherEval's reported accuracy is the BFCL
+checker with scalar-quotation equivalence, rather than the unmodified leaderboard score.
 
 So BFCL is wrapped here as an **external benchmark**: a self-contained extension under
 `benchmarks/bfcl/` with an explicit `run()` API. It does not provide native
@@ -51,7 +59,7 @@ defaults. Global generation CLI/YAML values override them in the same way as oth
 tasks.
 
 BFCL also defaults to `n: 4`, matching ToolRL tables reported as the mean of four
-evaluation runs. Each run performs independent generation and official scoring with
+evaluation runs. Each run performs independent generation and BFCL scoring with
 seeds `0,1,2,3` by default; an explicit `--seed S` uses `S,S+1,S+2,S+3`. The SGLang
 service stays loaded across all four runs. Use `--n 1` for a single diagnostic run.
 The official BFCL V4 generation default remains `temperature=0.001`, which AetherEval
@@ -164,7 +172,7 @@ print(result.metrics, result.primary_score)   # primary_metric = "avg_acc"
 outputs/<run_id>/bfcl/
   predictions.jsonl   # all runs; gen_idx identifies the evaluation run
   result/run_01/ ... result/run_04/   # BFCL raw generations
-  score/run_01/  ... score/run_04/    # official per-run leaderboard CSVs
+  score/run_01/  ... score/run_04/    # per-run BFCL CSVs (with scalar equivalence)
   summary.json   # averaged metrics plus per-run metrics under runs[]
 ```
 
@@ -174,7 +182,7 @@ outputs/<run_id>/bfcl/
 `meta.bfcl_record`, and the original `result/` and `score/` trees are retained for
 faithful BFCL debugging/re-scoring.
 
-Canonical `metrics` keys → official V4 CSV columns or AetherEval aggregation:
+Canonical `metrics` keys → V4 CSV columns or AetherEval aggregation:
 
 | metric key              | source (`data_overall.csv`) |
 |-------------------------|-----------------------------|
@@ -215,13 +223,16 @@ completions, which is the same unit scored by ToolRL's format reward.
 
 ## Files
 
-- `handler.py` — `RLLAHandler` (bfcl `OSSHandler`): faithful ToolRL
-  `benchmarks/BFCL/rlla_qwen.py` prompt + `<tool_call>` decode, adapted to `bfcl_eval`.
+- `handler.py` — `RLLAHandler` (bfcl `OSSHandler`): ToolRL-compatible
+  `benchmarks/BFCL/rlla_qwen.py` prompt + `<tool_call>` decode, adapted to `bfcl_eval`
+  with explicit BFCL parameter-schema guidance.
 - `register.py` — inject the handler into bfcl's `MODEL_CONFIG_MAPPING`.
 - `external.py` — `ExternalRunSpec` / `ExternalResult` / `run()` + score parsing.
 - `_compat.py` — isolate unused provider SDK imports without stubbing scoring parsers.
 
-> Multi-turn note: BFCL's handler API drops the per-call `turn_type`; the handler
-> infers multi-turn from tool-feedback in the message history. Single-turn,
-> multi-turn, and agentic requests use the trained ToolRL template; V4 memory-agent
-> system instructions are preserved inside that template.
+> Prompt-adapter note: BFCL's handler API drops the per-call `turn_type`, so the
+> handler records multi-turn status from each test-entry id and carries it in the
+> example's inference data. The multi-turn planning suffix therefore applies from
+> turn one without shared handler state. Tool schemas preserve property types and
+> explicitly list required and optional parameters; V4 memory-agent system
+> instructions remain inside the trained ToolRL template.

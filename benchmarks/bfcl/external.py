@@ -21,6 +21,7 @@ from aethereval.core.task_defaults import resolve_task_default_gen
 
 from .errors import is_context_length_error
 from .register import register_rlla_model
+from .scoring import install_scalar_quotation_tolerance
 
 # ToolRL's public format reward selects one exact shape from the reference answer and
 # checks both the regex and tag counts. BFCL does not ship ToolRL-formatted references,
@@ -423,9 +424,10 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
             _raise_on_inference_errors(result_dir, spec.model)
 
         if spec.run_evaluation:
-            from bfcl_eval.eval_checker.eval_runner import main as evaluation_main
+            from bfcl_eval.eval_checker import eval_runner
 
-            evaluation_main(
+            install_scalar_quotation_tolerance()
+            eval_runner.main(
                 [spec.model], list(spec.categories), str(result_dir), str(score_dir)
             )
 
