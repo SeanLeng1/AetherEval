@@ -15,7 +15,7 @@ from benchmarks.bfcl.handler import (  # noqa: E402
 
 
 class BfclHandlerTests(unittest.TestCase):
-    def test_tool_schema_preserves_required_optional_and_nested_types(self) -> None:
+    def test_tool_schema_matches_public_toolrl_prompt(self) -> None:
         tool = {
             "name": "search",
             "description": "Search with structured filters.",
@@ -43,27 +43,22 @@ class BfclHandlerTests(unittest.TestCase):
         rendered = _convert_to_format_tool(tool)
 
         self.assertEqual(tool, original)
-        self.assertIn('Required parameters: ["query"]', rendered)
-        self.assertIn('Optional parameters: ["limit", "filters"]', rendered)
+        self.assertNotIn("Required parameters:", rendered)
+        self.assertNotIn("Optional parameters:", rendered)
         self.assertIn('"type": "integer"', rendered)
         self.assertIn('"type": "boolean"', rendered)
         self.assertIn('"required": ["enabled"]', rendered)
 
-    def test_prompt_requires_native_json_parameter_types(self) -> None:
+    def test_prompt_matches_public_toolrl_example(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
         prompt = handler._format_prompt(
             [{"role": "user", "content": "Use the tools."}],
             [],
         )
 
-        self.assertIn('"count": 3', prompt)
-        self.assertIn('"enabled": true', prompt)
-        self.assertIn('"items": ["a", "b"]', prompt)
-        self.assertIn('"options": {"limit": 2.5}', prompt)
-        self.assertIn("integer/float as JSON numbers", prompt)
-        self.assertIn("array/tuple as a JSON array", prompt)
-        self.assertIn("dict as a JSON object", prompt)
-        self.assertIn("Do not encode non-string values inside strings", prompt)
+        self.assertIn('"name": "Tool name"', prompt)
+        self.assertIn('"Parameter name": "Parameter content"', prompt)
+        self.assertNotIn("integer/float as JSON numbers", prompt)
 
     def test_multi_turn_suffix_is_used_before_first_tool_feedback(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
@@ -97,7 +92,7 @@ class BfclHandlerTests(unittest.TestCase):
 
         self.assertIs(inference_data["is_multi_turn"], True)
 
-    def test_format_prompt_preserves_benchmark_system_instructions(self) -> None:
+    def test_format_prompt_ignores_benchmark_system_instructions_like_toolrl(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
         prompt = handler._format_prompt(
             [
@@ -107,7 +102,7 @@ class BfclHandlerTests(unittest.TestCase):
             [],
         )
 
-        self.assertIn("Persistent memory instructions.", prompt)
+        self.assertNotIn("Persistent memory instructions.", prompt)
         self.assertIn("What do you remember?", prompt)
 
     def test_native_generate_preserves_prompt_and_sampling(self) -> None:

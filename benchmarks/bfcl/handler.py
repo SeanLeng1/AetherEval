@@ -206,13 +206,13 @@ def _extract_calls(result, lenient: bool = False):
 
 
 _TOOL_CALL_EXAMPLE = (
-    '{"name": "first_tool", "parameters": {"text": "example", "count": 3, '
-    '"enabled": true}}\n'
-    '{"name": "second_tool", "parameters": {"items": ["a", "b"], '
-    '"options": {"limit": 2.5}}}'
+    '{"name": "Tool name", "parameters": {"Parameter name": "Parameter content", '
+    '"... ...": "... ..."}}\n'
+    '{"name": "... ...", "parameters": {"... ...": "... ...", '
+    '"... ...": "... ..."}}'
 )
 
-# ToolRL training prompt with BFCL schema clarifications.
+# Public ToolRL BFCL prompt, kept verbatim for comparable evaluation.
 SYS = """You are a helpful multi-turn dialogue assistant capable of leveraging tool calls to solve user tasks and provide structured chat responses.
 
 **Available Tools**
@@ -238,7 +238,6 @@ In your response, you can use the following tools:
 1. You must always include the `<think>` field to outline your reasoning. Provide at least one of `<tool_call>` or `<response>`. Decide whether to use `<tool_call>` (possibly multiple times), `<response>`, or both.
 2. You can invoke multiple tool calls simultaneously in the `<tool_call>` fields. Each tool call should be a JSON object with a "name" field and an "parameters" field containing a dictionary of parameters. If no parameters are needed, leave the "parameters" field an empty dictionary.
 3. Refer to the previous dialogue records in the history, including the user's queries, previous `<tool_call>`, `<response>`, and any tool feedback noted as `<obs>` (if exists).
-4. Parameter values must use the native JSON form of the declared tool type: integer/float as JSON numbers, boolean as a JSON boolean, array/tuple as a JSON array, dict as a JSON object, string as a JSON string, and any as the natural JSON value. Do not encode non-string values inside strings.
 """
 
 _SINGLE_TURN_SUFFIX = (
@@ -259,7 +258,7 @@ _RETRY_SUFFIX = (
     "respond directly without additional tool calls. If you encounter an error during tool "
     "execution or the task remains unfinished, retry with the one or more necessary tool calls "
     "according to your thought and plan until completion. Based on the tool execution feedback, "
-    "reflect on if understanding or selection of tool is wrong, what tool calling step is "
+    "reflect on if understanding or selectioin of tool is wrong, what tool calling step is "
     "missing, and how to achieve the task goal from now on."
 )
 
@@ -272,16 +271,10 @@ _SERVER_CONTEXT_MARGIN = 8
 
 def _convert_to_format_tool(tools, count=1):
     if isinstance(tools, dict):
-        parameter_schema = tools["parameters"]
-        params = parameter_schema.get("properties", {})
-        required = list(parameter_schema.get("required", []))
-        required_set = set(required)
-        optional = [name for name in params if name not in required_set]
+        params = tools["parameters"].get("properties", {})
         return (
             f"{count}. Name: {tools['name']}\nDescription: {tools['description']}\n"
-            f"Parameters: {json.dumps(params)}\n"
-            f"Required parameters: {json.dumps(required)}\n"
-            f"Optional parameters: {json.dumps(optional)}"
+            f"Parameters: {json.dumps(params)}"
         )
     if isinstance(tools, list):
         return "\n".join(_convert_to_format_tool(t, i + 1) for i, t in enumerate(tools))
@@ -305,23 +298,18 @@ class RLLAHandler(OSSHandler):
             self.max_context_length = max_context_length
 
     @override
-    def _format_prompt(self, messages, function):
-        """Render a standalone prompt through the BFCL handler API."""
-        is_multi_turn = any(message.get("role") == "tool" for message in messages)
-        return self._render_prompt(messages, function, is_multi_turn=is_multi_turn)
+    def _format_prompt(self, messages, function, turn_type="single_turn"):
+        """Render a standalone prompt through ToolRL's original handler API."""
+        return self._render_prompt(
+            messages,
+            function,
+            is_multi_turn=turn_type == "multi_turn",
+        )
 
     def _render_prompt(self, messages, function, *, is_multi_turn):
         """Render a prompt with example-level interaction metadata."""
         tools = _convert_to_format_tool(function)
         system_prompt = SYS.format(tools=tools, json_string=_TOOL_CALL_EXAMPLE)
-        benchmark_instructions = [
-            str(message.get("content", "")).strip()
-            for message in messages
-            if message.get("role") == "system"
-            and str(message.get("content", "")).strip()
-        ]
-        if benchmark_instructions:
-            system_prompt += "\n\n" + "\n\n".join(benchmark_instructions)
 
         user_prompt = "**Dialogue Records History**\n"
         for idx, message in enumerate(messages):

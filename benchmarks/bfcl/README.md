@@ -109,12 +109,15 @@ outputs/<model_name>/<run_id>/bfcl/
 | `overall_acc` | official V3 `Overall Acc` |
 | `overall_format` | unweighted mean of the three section format rates |
 
-Official V3 defines `Overall Acc` as the unweighted mean of Live, Non-Live, and
-Multi-Turn accuracy. Format is an AetherEval comparison metric, not an official BFCL
-CSV column. Ordinary calling categories require `<tool_call>`, irrelevance categories
-require `<response>`, and multi-turn expectations come from each turn's official
-ground truth. Tool-execution steps require `<tool_call>` and a completed turn ends with
-`<response>`.
+Official V3 defines `Overall Acc` as the unweighted mean of Live Overall, Non-Live
+Overall, and Multi-Turn Overall accuracy. The exposed `non_live_acc` is the paper-style
+AST summary, whereas Non-Live Overall also includes irrelevance detection; consequently,
+the three displayed split columns do not in general average exactly to `overall_acc`.
+Format is an AetherEval comparison metric, not an official BFCL CSV column;
+`overall_format` is the unweighted mean of the three displayed section format rates.
+Ordinary calling categories require `<tool_call>`, irrelevance categories require
+`<response>`, and multi-turn expectations come from each turn's official ground truth.
+Tool-execution steps require `<tool_call>` and a completed turn ends with `<response>`.
 
 `predictions.jsonl` follows AetherEval's normal row shape. `gen_idx` identifies the
 repeat and `meta.evaluation_repeat` is its one-based index; the original BFCL record is
