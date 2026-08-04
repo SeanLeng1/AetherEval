@@ -1,4 +1,4 @@
-"""BFCL-v4 model handler for ToolRL/GDPO-style models.
+"""BFCL V3 model handler for ToolRL/GDPO-style models.
 
 Models trained with the ToolRL recipe emit
 ``<think>...</think>\\n<tool_call>...</tool_call>\\n<response>...</response>``. BFCL's
@@ -6,9 +6,8 @@ default handlers don't speak that format, so we subclass bfcl_eval's prompt-mode
 ``OSSHandler`` to (1) render the ToolRL system+dialogue prompt and (2) decode the
 ``<tool_call>`` block into BFCL's AST / executable forms.
 
-Ported from ToolRL ``benchmarks/BFCL/rlla_qwen.py`` and adapted to the new bfcl_eval
-handler API (``_format_prompt(messages, function)`` — no ``turn_type`` arg;
-``decode_ast(result, language, has_tool_call_tag)``).
+Ported from ToolRL ``benchmarks/BFCL/rlla_qwen.py`` and adapted to BFCL V3's
+prompt-mode handler API.
 """
 
 import json
@@ -20,11 +19,11 @@ from types import SimpleNamespace
 
 import requests
 from bfcl_eval.model_handler.local_inference.base_oss_handler import OSSHandler
-from bfcl_eval.model_handler.utils import system_prompt_pre_processing_chat_model
-from bfcl_eval.utils import contain_multi_turn_interaction, is_format_sensitivity
+from bfcl_eval.model_handler.utils import func_doc_language_specific_pre_processing
 from overrides import override
 
 from .errors import is_context_length_error
+from .scoring import normalize_multi_turn_tool_calls
 
 
 _REQUEST_STATE = threading.local()
@@ -292,23 +291,9 @@ def _convert_to_format_tool(tools, count=1):
 class RLLAHandler(OSSHandler):
     """Prompt-mode handler for ToolRL/GDPO models (think/tool_call/response format)."""
 
-    def __init__(
-        self,
-        model_name,
-        temperature,
-        registry_name,
-        is_fc_model,
-        dtype="bfloat16",
-        **kwargs,
-    ):
-        super().__init__(
-            model_name,
-            temperature,
-            registry_name,
-            is_fc_model,
-            dtype=dtype,
-            **kwargs,
-        )
+    def __init__(self, model_name, temperature, dtype="bfloat16"):
+        super().__init__(model_name, temperature, dtype)
+        self.is_fc_model = False
         # `<tool_call>`/`</tool_call>` are Qwen added-vocab special tokens; the backend
         # strips them under the default skip_special_tokens=True, leaving bare JSON the
         # decoder can't find. Keep them (same as bfcl's FC handlers, e.g. minicpm_fc).
@@ -322,7 +307,8 @@ class RLLAHandler(OSSHandler):
     @override
     def _format_prompt(self, messages, function):
         """Render a standalone prompt through the BFCL handler API."""
-        return self._render_prompt(messages, function, is_multi_turn=False)
+        is_multi_turn = any(message.get("role") == "tool" for message in messages)
+        return self._render_prompt(messages, function, is_multi_turn=is_multi_turn)
 
     def _render_prompt(self, messages, function, *, is_multi_turn):
         """Render a prompt with example-level interaction metadata."""
@@ -366,28 +352,16 @@ class RLLAHandler(OSSHandler):
 
     @override
     def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
-        functions = test_entry["function"]
-        test_entry_id = test_entry["id"]
-
-        # The regular ToolRL prompt already renders function documentation in its
-        # trained format. BFCL v4's format-sensitivity category intentionally varies
-        # that representation, so only those records receive BFCL's generated system
-        # prompt. Existing system messages (notably memory-agent instructions) remain
-        # in the conversation and are appended by _format_prompt above.
-        if is_format_sensitivity(test_entry_id):
-            test_entry["question"][0] = system_prompt_pre_processing_chat_model(
-                test_entry["question"][0],
-                functions,
-                test_entry_id,
-            )
+        test_category = test_entry["id"].rsplit("_", 1)[0]
+        functions = func_doc_language_specific_pre_processing(
+            test_entry["function"],
+            test_category,
+        )
 
         return {
             "message": [],
             "function": functions,
-            # Keep this per example rather than on the shared handler instance. The BFCL
-            # id is available before turn one, so multi-turn planning must not wait for
-            # the first tool observation to enter the message history.
-            "is_multi_turn": contain_multi_turn_interaction(test_entry_id),
+            "is_multi_turn": test_category.startswith("multi_turn_"),
         }
 
     @override
@@ -402,7 +376,10 @@ class RLLAHandler(OSSHandler):
         formatted_prompt = self._render_prompt(
             message,
             function,
-            is_multi_turn=inference_data["is_multi_turn"],
+            is_multi_turn=inference_data.get(
+                "is_multi_turn",
+                any(item.get("role") == "tool" for item in message),
+            ),
         )
         inference_data["inference_input_log"] = {"formatted_prompt": formatted_prompt}
 
@@ -478,9 +455,7 @@ class RLLAHandler(OSSHandler):
                 choices=[SimpleNamespace(text=generated_text)],
                 usage=SimpleNamespace(
                     prompt_tokens=(
-                        input_token_count
-                        if prompt_tokens is None
-                        else prompt_tokens
+                        input_token_count if prompt_tokens is None else prompt_tokens
                     ),
                     completion_tokens=(
                         len(self.tokenizer.tokenize(generated_text))
@@ -501,7 +476,7 @@ class RLLAHandler(OSSHandler):
         return api_response, time.time() - start_time
 
     @override
-    def decode_ast(self, result, language, has_tool_call_tag):
+    def decode_ast(self, result, language="Python"):
         decoded = []
         for call in _extract_calls(result, _lenient_decode()):
             if "parameters" not in call:
@@ -510,9 +485,12 @@ class RLLAHandler(OSSHandler):
         return decoded
 
     @override
-    def decode_execute(self, result, has_tool_call_tag):
+    def decode_execute(self, result):
         calls = []
-        for c in _extract_calls(result, _lenient_decode()):
+        decoded_calls = normalize_multi_turn_tool_calls(
+            _extract_calls(result, _lenient_decode())
+        )
+        for c in decoded_calls:
             args = c.get("parameters", {})
             arg_str = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
             calls.append(f"{c['name']}({arg_str})")

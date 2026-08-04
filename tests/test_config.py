@@ -45,6 +45,7 @@ class ConfigTests(unittest.TestCase):
                 "  model: test/model\n"
                 "  model_name: test-model-label\n"
                 "  tasks: [ifeval]\n"
+                "  num_repeats: 3\n"
                 "runtime:\n"
                 "  dp_size: 2\n"
                 "  tp_size: 1\n"
@@ -96,6 +97,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(resolved["model_name"], "test-model-label")
             self.assertEqual(resolved["backend"], "vllm")
             self.assertEqual(resolved["tasks"], "ifeval")
+            self.assertEqual(resolved["num_repeats"], 3)
             self.assertFalse(resolved["inspect"])
             self.assertFalse(resolved["generate_only"])
             self.assertFalse(resolved["eval_only"])

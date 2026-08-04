@@ -47,7 +47,7 @@ def resolve_task_default_gen(
             {
                 key: value
                 for key, value in override.items()
-                if key not in {"generation", "metrics"}
+                if key not in {"generation", "metrics", "num_repeats"}
             }
         )
         nested_generation = override.get("generation")
@@ -59,6 +59,24 @@ def resolve_task_default_gen(
                 )
             merged.update(nested_generation)
     return merged
+
+
+def resolve_task_num_repeats(
+    task_name: str,
+    runtime_override: int | None = None,
+) -> int:
+    """Resolve whole-benchmark repetitions independently of generation ``n``."""
+    raw_value = (
+        runtime_override
+        if runtime_override is not None
+        else _load_task_default_overrides().get(task_name, {}).get("num_repeats", 1)
+    )
+    value = int(raw_value)
+    if value < 1:
+        raise ValueError(
+            f"num_repeats for task '{task_name}' must be >= 1, got {value}"
+        )
+    return value
 
 
 def resolve_task_default_metrics(

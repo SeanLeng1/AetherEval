@@ -1,4 +1,4 @@
-"""BFCL-v4 external benchmark extension for AetherEval (wraps bfcl_eval)."""
+"""BFCL V3 external benchmark extension for AetherEval."""
 
 from .register import DEFAULT_REGISTRY_NAME, register_rlla_model
 

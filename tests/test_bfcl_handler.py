@@ -97,7 +97,7 @@ class BfclHandlerTests(unittest.TestCase):
 
         self.assertIs(inference_data["is_multi_turn"], True)
 
-    def test_v4_format_prompt_preserves_benchmark_system_instructions(self) -> None:
+    def test_format_prompt_preserves_benchmark_system_instructions(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
         prompt = handler._format_prompt(
             [

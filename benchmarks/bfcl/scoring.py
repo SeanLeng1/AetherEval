@@ -1,20 +1,17 @@
-"""Narrow AetherEval scoring adaptations for BFCL.
+"""Narrow, schema-aware scoring adaptations for BFCL V3.
 
-BFCL's Python AST checker treats a JSON scalar encoded as a string as a type error,
-even when the tool schema makes the intended scalar unambiguous. ToolRL training data
-frequently serializes such arguments (for example, ``"2"`` for an integer).  The
-adapter below makes only those schema-authorized scalar quotations equivalent. It does
-not coerce strings for string/any parameters, containers, malformed values, missing
-arguments, or function names.
+ToolRL data can serialize a typed JSON scalar as a string, such as ``"2"`` for
+an integer or ``"true"`` for a boolean. BFCL correctly checks the declared
+parameter type, but that representation mismatch would otherwise become a
+false negative. This module only normalizes canonical JSON scalars when the
+tool schema explicitly declares the target type.
 """
-
-from __future__ import annotations
 
 import functools
 import importlib
 import json
 import math
-from typing import Callable
+from collections.abc import Callable
 
 
 def _coerce_quoted_scalar(value, declared_type: str):
@@ -41,112 +38,148 @@ def _coerce_quoted_scalar(value, declared_type: str):
     return parsed if math.isfinite(parsed) else value
 
 
+def _normalize_schema_value(value, schema):
+    """Return a non-mutating normalization authorized by one BFCL schema."""
+    if not isinstance(schema, dict):
+        return value
+
+    declared_type = schema.get("type")
+    if declared_type in {"integer", "float", "boolean"}:
+        return _coerce_quoted_scalar(value, declared_type)
+
+    if declared_type in {"array", "tuple"} and isinstance(value, (list, tuple)):
+        item_schema = schema.get("items")
+        if not isinstance(item_schema, dict):
+            return value
+        normalized = [_normalize_schema_value(item, item_schema) for item in value]
+        return tuple(normalized) if isinstance(value, tuple) else normalized
+
+    if declared_type in {"dict", "object"} and isinstance(value, dict):
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return value
+        return {
+            key: _normalize_schema_value(item, properties.get(key))
+            for key, item in value.items()
+        }
+
+    return value
+
+
+def _descriptions_by_name(
+    func_descriptions,
+    name_converter: Callable[[str], str] | None = None,
+) -> dict[str, dict]:
+    descriptions = (
+        func_descriptions
+        if isinstance(func_descriptions, list)
+        else [func_descriptions]
+    )
+    result = {}
+    for description in descriptions:
+        if not isinstance(description, dict) or not isinstance(
+            description.get("name"), str
+        ):
+            continue
+        name = description["name"]
+        result[name] = description
+        if name_converter is not None:
+            result[name_converter(name)] = description
+    return result
+
+
+def _normalize_parameters(parameters, description):
+    if not isinstance(parameters, dict) or not isinstance(description, dict):
+        return parameters
+    parameter_schema = description.get("parameters")
+    if not isinstance(parameter_schema, dict):
+        return parameters
+    properties = parameter_schema.get("properties")
+    if not isinstance(properties, dict):
+        return parameters
+    return {
+        name: _normalize_schema_value(value, properties.get(name))
+        for name, value in parameters.items()
+    }
+
+
 def _normalize_python_calls(
     func_descriptions,
     model_output,
     *,
     name_converter: Callable[[str], str] | None = None,
 ):
-    """Return a non-mutating, schema-aware normalization of decoded Python calls."""
+    """Normalize BFCL's decoded ``[{function: parameters}]`` representation."""
     if not isinstance(model_output, list):
         return model_output
 
-    descriptions = (
-        func_descriptions if isinstance(func_descriptions, list) else [func_descriptions]
-    )
-    descriptions_by_name = {}
-    for description in descriptions:
-        if not isinstance(description, dict) or "name" not in description:
-            continue
-        name = description["name"]
-        descriptions_by_name[name] = description
-        if name_converter is not None:
-            descriptions_by_name[name_converter(name)] = description
-
+    descriptions = _descriptions_by_name(func_descriptions, name_converter)
     normalized_output = []
     for call in model_output:
         if not isinstance(call, dict):
             normalized_output.append(call)
             continue
-
-        normalized_call = call
-        for function_name, parameters in call.items():
-            description = descriptions_by_name.get(function_name)
-            if description is None or not isinstance(parameters, dict):
-                continue
-            properties = (
-                description.get("parameters", {}).get("properties", {})
-            )
-            normalized_parameters = parameters
-            for parameter_name, value in parameters.items():
-                parameter_schema = properties.get(parameter_name)
-                if not isinstance(parameter_schema, dict):
-                    continue
-                normalized = _coerce_quoted_scalar(
-                    value,
-                    str(parameter_schema.get("type", "")),
+        normalized_output.append(
+            {
+                function_name: _normalize_parameters(
+                    parameters,
+                    descriptions.get(function_name),
                 )
-                if type(normalized) is type(value):
-                    continue
-                if normalized_parameters is parameters:
-                    normalized_parameters = dict(parameters)
-                normalized_parameters[parameter_name] = normalized
-
-            if normalized_parameters is not parameters:
-                if normalized_call is call:
-                    normalized_call = dict(call)
-                normalized_call[function_name] = normalized_parameters
-
-        normalized_output.append(normalized_call)
+                for function_name, parameters in call.items()
+            }
+        )
     return normalized_output
 
 
-def _decoded_calls_to_execute(model_output) -> list[str]:
-    calls = []
-    for call in model_output:
-        if not isinstance(call, dict):
-            continue
-        for function_name, parameters in call.items():
-            if not isinstance(parameters, dict):
+@functools.lru_cache(maxsize=1)
+def _multi_turn_descriptions_by_name() -> dict[str, dict]:
+    from bfcl_eval.constants.category_mapping import (
+        MULTI_TURN_FUNC_DOC_FILE_MAPPING,
+    )
+    from bfcl_eval.constants.eval_config import MULTI_TURN_FUNC_DOC_PATH
+    from bfcl_eval.utils import load_file
+
+    descriptions = {}
+    for filename in MULTI_TURN_FUNC_DOC_FILE_MAPPING.values():
+        for description in load_file(MULTI_TURN_FUNC_DOC_PATH / filename):
+            name = description.get("name")
+            if not isinstance(name, str):
                 continue
-            arguments = ", ".join(
-                f"{name}={value!r}" for name, value in parameters.items()
-            )
-            calls.append(f"{function_name}({arguments})")
-    return calls
+            if name in descriptions:
+                raise RuntimeError(
+                    "BFCL V3 multi-turn schemas contain a duplicate function "
+                    f"name: {name!r}."
+                )
+            descriptions[name] = description
+    return descriptions
 
 
-class _SchemaAwareExecutionHandler:
-    """Per-entry proxy adding scalar normalization to multi-turn execution."""
-
-    def __init__(self, handler, func_descriptions):
-        self._handler = handler
-        self._func_descriptions = func_descriptions
-
-    def __getattr__(self, name):
-        return getattr(self._handler, name)
-
-    def decode_execute(self, result, has_tool_call_tag):
-        from bfcl_eval.constants.enums import ReturnFormat
-
-        decoded = self._handler.decode_ast(
-            result,
-            ReturnFormat.PYTHON,
-            has_tool_call_tag,
+def normalize_multi_turn_tool_calls(calls):
+    """Normalize handler ``[{name, parameters}]`` calls using V3 function docs."""
+    if not isinstance(calls, list):
+        return calls
+    descriptions = _multi_turn_descriptions_by_name()
+    normalized = []
+    for call in calls:
+        if not isinstance(call, dict):
+            normalized.append(call)
+            continue
+        item = dict(call)
+        item["parameters"] = _normalize_parameters(
+            call.get("parameters", {}),
+            descriptions.get(call.get("name")),
         )
-        normalized = _normalize_python_calls(self._func_descriptions, decoded)
-        return _decoded_calls_to_execute(normalized)
+        normalized.append(item)
+    return normalized
 
 
 def install_scalar_quotation_tolerance() -> None:
-    """Install the pinned-BFCL hooks once for the current evaluation process."""
+    """Install the BFCL V3 single-turn checker hook once per process."""
     eval_runner = importlib.import_module("bfcl_eval.eval_checker.eval_runner")
     if getattr(eval_runner, "_aethereval_scalar_quotation_tolerance", False):
         return
 
-    ast_module = importlib.import_module(
-        "bfcl_eval.eval_checker.ast_eval.ast_checker"
-    )
+    ast_module = importlib.import_module("bfcl_eval.eval_checker.ast_eval.ast_checker")
     original_ast_checker = eval_runner.ast_checker
 
     @functools.wraps(original_ast_checker)
@@ -158,7 +191,7 @@ def install_scalar_quotation_tolerance() -> None:
         test_category,
         model_name,
     ):
-        if language == ast_module.Language.PYTHON:
+        if language == "Python":
             model_output = _normalize_python_calls(
                 func_description,
                 model_output,
@@ -176,31 +209,7 @@ def install_scalar_quotation_tolerance() -> None:
             model_name,
         )
 
-    original_multi_turn_entry = eval_runner._evaluate_single_multi_turn_entry
-
-    @functools.wraps(original_multi_turn_entry)
-    def evaluate_single_multi_turn_entry(
-        handler,
-        test_entry_id,
-        model_result_list,
-        ground_truth_list,
-        prompt_entry,
-        model_name,
-        test_category,
-    ):
-        handler = _SchemaAwareExecutionHandler(handler, prompt_entry["function"])
-        return original_multi_turn_entry(
-            handler,
-            test_entry_id,
-            model_result_list,
-            ground_truth_list,
-            prompt_entry,
-            model_name,
-            test_category,
-        )
-
     eval_runner.ast_checker = ast_checker
-    eval_runner._evaluate_single_multi_turn_entry = evaluate_single_multi_turn_entry
     eval_runner._aethereval_scalar_quotation_tolerance = True
 
 

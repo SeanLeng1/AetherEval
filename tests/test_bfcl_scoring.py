@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest import mock
 
 from benchmarks.bfcl._compat import ensure_bfcl_importable
 
@@ -8,7 +9,6 @@ ensure_bfcl_importable()
 from benchmarks.bfcl.handler import RLLAHandler  # noqa: E402
 from benchmarks.bfcl.register import register_rlla_model  # noqa: E402
 from benchmarks.bfcl.scoring import (  # noqa: E402
-    _SchemaAwareExecutionHandler,
     _normalize_python_calls,
     install_scalar_quotation_tolerance,
 )
@@ -26,6 +26,20 @@ def _tool_schema():
                 "enabled": {"type": "boolean"},
                 "label": {"type": "string"},
                 "items": {"type": "array", "items": {"type": "integer"}},
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "dict",
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "limit": {"type": "integer"},
+                        },
+                    },
+                },
+                "options": {
+                    "type": "dict",
+                    "properties": {"threshold": {"type": "float"}},
+                },
             },
             "required": ["count", "ratio", "enabled", "label", "items"],
         },
@@ -42,6 +56,8 @@ class BfclScoringTests(unittest.TestCase):
                     "enabled": "true",
                     "label": "2",
                     "items": "[1, 2]",
+                    "filters": [{"enabled": "false", "limit": "3"}],
+                    "options": {"threshold": "0.5", "unknown": "true"},
                 }
             }
         ]
@@ -57,6 +73,14 @@ class BfclScoringTests(unittest.TestCase):
         self.assertIs(normalized[0]["typed_tool"]["enabled"], True)
         self.assertEqual(normalized[0]["typed_tool"]["label"], "2")
         self.assertEqual(normalized[0]["typed_tool"]["items"], "[1, 2]")
+        self.assertEqual(
+            normalized[0]["typed_tool"]["filters"],
+            [{"enabled": False, "limit": 3}],
+        )
+        self.assertEqual(
+            normalized[0]["typed_tool"]["options"],
+            {"threshold": 0.5, "unknown": "true"},
+        )
 
     def test_invalid_or_ambiguous_scalar_strings_remain_strict(self) -> None:
         output = [
@@ -78,7 +102,6 @@ class BfclScoringTests(unittest.TestCase):
         register_rlla_model(registry_name)
         install_scalar_quotation_tolerance()
 
-        from bfcl_eval.constants.enums import Language
         from bfcl_eval.eval_checker import eval_runner
 
         first_checker = eval_runner.ast_checker
@@ -109,8 +132,8 @@ class BfclScoringTests(unittest.TestCase):
                     }
                 }
             ],
-            Language.PYTHON,
-            "simple_python",
+            "Python",
+            "simple",
             registry_name,
         )
 
@@ -121,7 +144,6 @@ class BfclScoringTests(unittest.TestCase):
         register_rlla_model(registry_name)
         install_scalar_quotation_tolerance()
 
-        from bfcl_eval.constants.enums import Language
         from bfcl_eval.eval_checker import eval_runner
 
         result = eval_runner.ast_checker(
@@ -148,8 +170,8 @@ class BfclScoringTests(unittest.TestCase):
                     }
                 }
             ],
-            Language.PYTHON,
-            "simple_python",
+            "Python",
+            "simple",
             registry_name,
         )
 
@@ -158,22 +180,22 @@ class BfclScoringTests(unittest.TestCase):
 
     def test_multi_turn_execution_uses_same_schema_aware_rule(self) -> None:
         handler = RLLAHandler.__new__(RLLAHandler)
-        proxy = _SchemaAwareExecutionHandler(handler, [_tool_schema()])
         result = (
-            '<think>Call the tool.</think>\n<tool_call>\n'
+            "<think>Call the tool.</think>\n<tool_call>\n"
             '{"name":"typed_tool","parameters":{"count":"2",'
             '"ratio":"2.5","enabled":"false","label":"2",'
             '"items":[1,2]}}\n</tool_call>'
         )
 
-        calls = proxy.decode_execute(result, has_tool_call_tag=False)
+        with mock.patch(
+            "benchmarks.bfcl.scoring._multi_turn_descriptions_by_name",
+            return_value={"typed_tool": _tool_schema()},
+        ):
+            calls = handler.decode_execute(result)
 
         self.assertEqual(
             calls,
-            [
-                "typed_tool(count=2, ratio=2.5, enabled=False, "
-                "label='2', items=[1, 2])"
-            ],
+            ["typed_tool(count=2, ratio=2.5, enabled=False, label='2', items=[1, 2])"],
         )
 
 

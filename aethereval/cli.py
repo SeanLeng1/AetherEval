@@ -11,7 +11,7 @@ from .config import load_yaml_config, resolve_run_arguments
 from .core.io import ensure_dir, model_output_name, run_output_dir
 from .core.run_summary import build_run_summary, load_task_summaries, phase_name
 from .core.runner import inspect_prompts, run_evaluation
-from .core.task_defaults import resolve_task_default_gen
+from .core.task_defaults import resolve_task_default_gen, resolve_task_num_repeats
 from .core.task_register import list_task_default_gens, list_tasks, parse_task_names
 
 EXTERNAL_TASKS = ("bfcl",)
@@ -118,6 +118,7 @@ def run_selected_tasks(
                 dp_size=resolved["dp_size"],
                 tensor_parallel_size=resolved["tp_size"],
                 gen_overrides=resolved["gen_overrides"],
+                num_repeats=resolved["num_repeats"],
                 bootstrap_resamples=resolved["bootstrap_resamples"],
                 bootstrap_seed=resolved["bootstrap_seed"],
                 bootstrap_confidence=resolved["bootstrap_confidence"],
@@ -166,7 +167,7 @@ def run_selected_tasks(
         _info(
             f"external_task={task_name} model={spec.model} "
             f"backend={spec.backend} dp_size={spec.dp_size} tp_size={spec.tp_size} "
-            f"num_runs={spec.num_runs} output_dir={spec.output_dir}"
+            f"num_repeats={spec.num_repeats} output_dir={spec.output_dir}"
         )
         result = run_bfcl(spec)
         task_summaries[task_name] = _external_summary(
@@ -238,6 +239,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional run id. Default: <model_suffix_lower>.",
+    )
+    run_group.add_argument(
+        "--num-repeats",
+        type=int,
+        default=None,
+        help=(
+            "Override independent whole-benchmark repetitions for every selected "
+            "task. Omit to use each task's default; this is distinct from --n."
+        ),
     )
     run_group.add_argument(
         "--overwrite",
@@ -534,6 +544,8 @@ def main() -> None:
                 for task_name in EXTERNAL_TASKS
             }
         )
+        for task_name, defaults in payload.items():
+            defaults["num_repeats"] = resolve_task_num_repeats(task_name)
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     cfg = load_yaml_config(args.config)
@@ -564,6 +576,8 @@ def main() -> None:
     }
     if explicit_gen_overrides:
         _info(f"generation_overrides={explicit_gen_overrides}")
+    if resolved["num_repeats"] is not None:
+        _info(f"num_repeats_override={resolved['num_repeats']}")
     if resolved["backend_kwargs"]:
         _info(f"backend_model_kwargs={resolved['backend_kwargs']}")
 

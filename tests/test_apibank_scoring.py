@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 
+from aethereval.core.task_defaults import resolve_task_num_repeats
 from aethereval.core.types import Sample
 from benchmarks.apibank.metrics import (
     PRIMARY_METRIC,
@@ -44,6 +45,9 @@ def _scored(raw: str, answer=ANSWER) -> dict:
 
 
 class ApiBankScoringTests(unittest.TestCase):
+    def test_default_uses_four_full_benchmark_repeats(self) -> None:
+        self.assertEqual(resolve_task_num_repeats("apibank"), 4)
+
     def test_exact_match(self) -> None:
         record = _scored(RAW_MATCH)
         self.assertEqual(record["score"], 1)

@@ -102,6 +102,12 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
 
     output_dir = _pick(args.output_dir, _cfg_get(cfg, "output_dir", "run"), "outputs")
     run_id = _pick(args.run_id, _cfg_get(cfg, "run_id", "run"))
+    num_repeats = _pick(
+        getattr(args, "num_repeats", None),
+        _cfg_get(cfg, "num_repeats", "run"),
+    )
+    if num_repeats is not None and int(num_repeats) < 1:
+        raise ValueError("num_repeats must be >= 1")
     overwrite = bool(_pick(args.overwrite, _cfg_get(cfg, "overwrite", "run"), False))
     inspect = bool(
         _pick(getattr(args, "inspect", None), _cfg_get(cfg, "inspect", "run"), False)
@@ -317,6 +323,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "eval_only": eval_only,
         "output_dir": output_dir,
         "run_id": run_id,
+        "num_repeats": int(num_repeats) if num_repeats is not None else None,
         "overwrite": overwrite,
         "dp_size": dp_size,
         "tp_size": tp_size,

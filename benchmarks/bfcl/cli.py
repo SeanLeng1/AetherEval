@@ -1,9 +1,13 @@
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
 from aethereval.config import parse_key_value_args
-from aethereval.core.task_defaults import resolve_task_default_gen
+from aethereval.core.task_defaults import (
+    resolve_task_default_gen,
+    resolve_task_num_repeats,
+)
 
 from .external import DEFAULT_CATEGORIES, ExternalRunSpec
 
@@ -15,7 +19,7 @@ def add_bfcl_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "BFCL categories/collections, comma-separated "
-            "(default: live,non_live,multi_turn; use all for full V4)."
+            "(default: live,non_live,multi_turn; use all for full V3)."
         ),
     )
     group.add_argument(
@@ -86,6 +90,31 @@ def _generation_value(
     return value if value is not None else defaults.get(key, fallback)
 
 
+def _resolve_num_repeats(
+    resolved: dict[str, Any],
+    output_dir: Path,
+) -> int:
+    runtime_override = resolved.get("num_repeats")
+    if not resolved.get("eval_only"):
+        return resolve_task_num_repeats("bfcl", runtime_override)
+
+    summary_path = output_dir / "summary.json"
+    if not summary_path.exists():
+        return resolve_task_num_repeats("bfcl", runtime_override)
+    with summary_path.open("r", encoding="utf-8") as file:
+        saved_summary = json.load(file)
+    saved_repeats = saved_summary.get("num_repeats")
+    if saved_repeats is None:
+        return resolve_task_num_repeats("bfcl", runtime_override)
+    saved_repeats = int(saved_repeats)
+    if runtime_override is not None and int(runtime_override) != saved_repeats:
+        raise ValueError(
+            "BFCL eval-only num_repeats conflicts with the saved summary: "
+            f"requested={runtime_override}, saved={saved_repeats}."
+        )
+    return resolve_task_num_repeats("bfcl", saved_repeats)
+
+
 def build_bfcl_spec(
     args: argparse.Namespace,
     resolved: dict[str, Any],
@@ -101,6 +130,12 @@ def build_bfcl_spec(
 
     defaults = resolve_task_default_gen("bfcl", {})
     generation = resolved["gen_overrides"]
+    n = int(_generation_value(generation, defaults, "n", 1))
+    if n != 1:
+        raise ValueError(
+            "BFCL supports exactly one generation per test interaction (n=1); "
+            "use --num-repeats for independent full benchmark runs."
+        )
     context_length = args.bfcl_context_length
     if context_length is None:
         context_length = backend_kwargs.get(
@@ -142,7 +177,7 @@ def build_bfcl_spec(
         top_p=float(_generation_value(generation, defaults, "top_p", 1.0)),
         top_k=int(_generation_value(generation, defaults, "top_k", -1)),
         seed=generation.get("seed"),
-        num_runs=int(_generation_value(generation, defaults, "n", 4)),
+        num_repeats=_resolve_num_repeats(resolved, output_dir),
         verbose=bool(args.bfcl_verbose),
         allow_overwrite=bool(resolved["overwrite"]),
         run_generation=not resolved["eval_only"],

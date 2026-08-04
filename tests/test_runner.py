@@ -771,6 +771,55 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(backend.last_gen_cfg["n"], 1)
             self.assertEqual(int(backend.last_gen_cfg["top_k"]), -1)
 
+    def test_num_repeats_is_distinct_from_n_and_averages_complete_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+
+            out = Path(tmp) / "outputs"
+            backend = FakeBackend()
+            generated = run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="repeated",
+                backend=backend,
+                benchmarks_dir=root,
+                num_repeats=2,
+                generate_only=True,
+            )
+            self.assertEqual(generated["results"]["toy"]["metrics"], {})
+
+            result = run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="repeated",
+                benchmarks_dir=root,
+                eval_only=True,
+            )
+
+            summary = result["results"]["toy"]
+            task_dir = out / "fake-model" / "repeated" / "toy"
+            self.assertEqual(backend.calls, 2)
+            self.assertEqual(summary["n"], 1)
+            self.assertEqual(summary["num_repeats"], 2)
+            self.assertEqual(summary["total_records"], 4)
+            self.assertEqual(summary["metrics"]["accuracy_first"], 1.0)
+            self.assertEqual(summary["primary_score"], 1.0)
+            self.assertFalse((task_dir / "predictions.jsonl").exists())
+            self.assertTrue((task_dir / "run_01" / "predictions.jsonl").exists())
+            self.assertTrue((task_dir / "run_02" / "predictions.jsonl").exists())
+
+            run_1 = json.loads(
+                (task_dir / "run_01" / "run_config.json").read_text()
+            )
+            run_2 = json.loads(
+                (task_dir / "run_02" / "run_config.json").read_text()
+            )
+            self.assertEqual(run_1["generation_config"]["seed"], 0)
+            self.assertEqual(run_2["generation_config"]["seed"], 1)
+
     def test_default_run_id_uses_model_suffix_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"

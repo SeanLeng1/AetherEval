@@ -16,7 +16,7 @@ from .io import (
 )
 from .run_summary import build_run_summary, load_task_summaries, phase_name
 from .task_register import BENCHMARKS_DIR, discover_tasks, load_task, parse_task_names
-from .task_defaults import resolve_task_default_metrics
+from .task_defaults import resolve_task_default_metrics, resolve_task_num_repeats
 from .types import (
     GenerationInput,
     GenerationOutput,
@@ -992,6 +992,251 @@ def _run_single_task(
     return summary
 
 
+def _repeat_generation_overrides(
+    task_module: Any,
+    gen_overrides: dict[str, Any],
+    repeat_index: int,
+) -> tuple[dict[str, Any], int]:
+    overrides = dict(gen_overrides)
+    requested_seed = overrides.get("seed")
+    if requested_seed is None:
+        requested_seed = task_module.DEFAULT_GEN.get("seed")
+    base_seed = int(requested_seed) if requested_seed is not None else 0
+    seed = base_seed + repeat_index
+    overrides["seed"] = seed
+    return overrides, seed
+
+
+def _average_repeat_metrics(
+    repeat_summaries: list[dict[str, Any]],
+) -> dict[str, float]:
+    if not repeat_summaries:
+        return {}
+    metrics_per_repeat = [summary.get("metrics", {}) for summary in repeat_summaries]
+    common_keys = set(metrics_per_repeat[0]).intersection(
+        *(set(metrics) for metrics in metrics_per_repeat[1:])
+    )
+    return {
+        str(key): sum(float(metrics[key]) for metrics in metrics_per_repeat)
+        / len(metrics_per_repeat)
+        for key in sorted(common_keys)
+        if all(
+            isinstance(metrics.get(key), (int, float))
+            and not isinstance(metrics.get(key), bool)
+            for metrics in metrics_per_repeat
+        )
+    }
+
+
+def _aggregate_repeat_token_usage(
+    repeat_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    total_prompt_tokens = sum(
+        int(summary.get("token_usage", {}).get("total_prompt_tokens", 0))
+        for summary in repeat_summaries
+    )
+    total_response_tokens = sum(
+        int(summary.get("token_usage", {}).get("total_response_tokens", 0))
+        for summary in repeat_summaries
+    )
+    total_records = sum(int(summary.get("total_records", 0)) for summary in repeat_summaries)
+    return {
+        "avg_prompt_tokens": (
+            total_prompt_tokens / total_records if total_records else None
+        ),
+        "avg_response_tokens": (
+            total_response_tokens / total_records if total_records else None
+        ),
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_response_tokens": total_response_tokens,
+    }
+
+
+def _run_repeated_task(
+    *,
+    num_repeats: int,
+    task_name: str,
+    task_module: Any,
+    metrics_module: Any,
+    task_dir: Path,
+    backend: GenerationBackend | None,
+    task_output_dir: Path,
+    gen_overrides: dict[str, Any],
+    metric_options: dict[str, Any],
+    overwrite: bool,
+    run_config_common: dict[str, Any],
+    tokenizer_getter: Callable[[], Any],
+    generate_only: bool,
+    eval_only: bool,
+) -> dict[str, Any]:
+    if num_repeats == 1:
+        summary = _run_single_task(
+            task_name=task_name,
+            task_module=task_module,
+            metrics_module=metrics_module,
+            task_dir=task_dir,
+            backend=backend,
+            task_output_dir=task_output_dir,
+            gen_overrides=gen_overrides,
+            metric_options=metric_options,
+            overwrite=overwrite,
+            run_config_common={**run_config_common, "num_repeats": 1},
+            tokenizer_getter=tokenizer_getter,
+            generate_only=generate_only,
+            eval_only=eval_only,
+        )
+        summary["num_repeats"] = 1
+        write_json(task_output_dir / "summary.json", summary)
+        return summary
+
+    repeat_summaries: list[dict[str, Any]] = []
+    repeat_metadata: list[dict[str, Any]] = []
+    for repeat_index in range(num_repeats):
+        repeat_number = repeat_index + 1
+        repeat_dir = task_output_dir / f"run_{repeat_number:02d}"
+        repeat_overrides, seed = _repeat_generation_overrides(
+            task_module,
+            gen_overrides,
+            repeat_index,
+        )
+        _info(
+            f"[{task_name}] repeat={repeat_number}/{num_repeats} seed={seed}"
+        )
+        summary = _run_single_task(
+            task_name=task_name,
+            task_module=task_module,
+            metrics_module=metrics_module,
+            task_dir=task_dir,
+            backend=backend,
+            task_output_dir=repeat_dir,
+            gen_overrides=repeat_overrides,
+            metric_options=metric_options,
+            overwrite=overwrite,
+            run_config_common={
+                **run_config_common,
+                "num_repeats": num_repeats,
+                "repeat": repeat_number,
+            },
+            tokenizer_getter=tokenizer_getter,
+            generate_only=generate_only,
+            eval_only=eval_only,
+        )
+        repeat_summaries.append(summary)
+        repeat_metadata.append(
+            {
+                "repeat": repeat_number,
+                "seed": seed,
+                "output_dir": str(repeat_dir),
+                "metrics": summary.get("metrics", {}),
+                "primary_metric": summary.get("primary_metric"),
+                "primary_score": summary.get("primary_score"),
+            }
+        )
+
+    metrics = _average_repeat_metrics(repeat_summaries)
+    primary_metrics = {
+        summary.get("primary_metric")
+        for summary in repeat_summaries
+        if summary.get("primary_metric") is not None
+    }
+    if len(primary_metrics) > 1:
+        raise ValueError(
+            f"[{task_name}] repeated runs produced inconsistent primary metrics: "
+            f"{sorted(primary_metrics)}"
+        )
+    primary_metric = next(iter(primary_metrics), None)
+    primary_score = (
+        float(metrics[primary_metric])
+        if primary_metric is not None and primary_metric in metrics
+        else None
+    )
+    warning_values = [
+        str(warning)
+        for summary in repeat_summaries
+        for warning in summary.get("warnings", [])
+    ]
+    warnings = list(dict.fromkeys(warning_values))
+    summary = {
+        "task": task_name,
+        "phase": phase_name(generate_only=generate_only, eval_only=eval_only),
+        "num_samples": repeat_summaries[0]["num_samples"],
+        "n": repeat_summaries[0]["n"],
+        "num_repeats": num_repeats,
+        "existing_records": sum(
+            int(item.get("existing_records", 0)) for item in repeat_summaries
+        ),
+        "new_records": sum(
+            int(item.get("new_records", 0)) for item in repeat_summaries
+        ),
+        "rescored_records": sum(
+            int(item.get("rescored_records", 0)) for item in repeat_summaries
+        ),
+        "total_records": sum(
+            int(item.get("total_records", 0)) for item in repeat_summaries
+        ),
+        "unscored_records": sum(
+            int(item.get("unscored_records", 0)) for item in repeat_summaries
+        ),
+        "generation_complete": all(
+            bool(item.get("generation_complete")) for item in repeat_summaries
+        ),
+        "evaluation_complete": all(
+            bool(item.get("evaluation_complete")) for item in repeat_summaries
+        ),
+        "metrics": metrics,
+        "token_usage": _aggregate_repeat_token_usage(repeat_summaries),
+        "primary_metric": primary_metric,
+        "primary_score": primary_score,
+        "warnings": warnings,
+        "repeats": repeat_metadata,
+    }
+    ensure_dir(task_output_dir)
+    write_json(task_output_dir / "summary.json", summary)
+    write_json(
+        task_output_dir / "run_config.json",
+        {
+            **run_config_common,
+            "task": task_name,
+            "num_repeats": num_repeats,
+            "repeat_seeds": [item["seed"] for item in repeat_metadata],
+            "phase": summary["phase"],
+        },
+    )
+    _info(
+        f"[{task_name}] repeats complete: num_repeats={num_repeats} "
+        f"primary_metric={primary_metric} primary_score={primary_score}"
+    )
+    return summary
+
+
+def _resolve_task_num_repeats_for_phase(
+    *,
+    task_name: str,
+    task_output_dir: Path,
+    runtime_override: int | None,
+    eval_only: bool,
+) -> int:
+    if not eval_only:
+        return resolve_task_num_repeats(task_name, runtime_override)
+
+    run_config_path = task_output_dir / "run_config.json"
+    if not run_config_path.exists():
+        return resolve_task_num_repeats(task_name, runtime_override)
+    with run_config_path.open("r", encoding="utf-8") as file:
+        saved_config = json.load(file)
+    saved_repeats = saved_config.get("num_repeats")
+    if saved_repeats is None:
+        return resolve_task_num_repeats(task_name, runtime_override)
+
+    saved_repeats = int(saved_repeats)
+    if runtime_override is not None and int(runtime_override) != saved_repeats:
+        raise ValueError(
+            f"[{task_name}] eval-only num_repeats={runtime_override} conflicts "
+            f"with the saved run config value {saved_repeats}."
+        )
+    return resolve_task_num_repeats(task_name, saved_repeats)
+
+
 def run_evaluation(
     *,
     model: str,
@@ -1001,6 +1246,7 @@ def run_evaluation(
     dp_size: int = 1,
     tensor_parallel_size: int = 1,
     gen_overrides: dict[str, Any] | None = None,
+    num_repeats: int | None = None,
     bootstrap_resamples: int = 1000,
     bootstrap_seed: int = 42,
     bootstrap_confidence: float = 0.95,
@@ -1191,7 +1437,14 @@ def run_evaluation(
                     f"{getattr(task_backend, 'name', type(task_backend).__name__)}"
                 )
             try:
-                summary = _run_single_task(
+                task_num_repeats = _resolve_task_num_repeats_for_phase(
+                    task_name=task_name,
+                    task_output_dir=task_output_dir,
+                    runtime_override=num_repeats,
+                    eval_only=eval_only,
+                )
+                summary = _run_repeated_task(
+                    num_repeats=task_num_repeats,
                     task_name=task_name,
                     task_module=bundle.task_module,
                     metrics_module=bundle.metrics_module,

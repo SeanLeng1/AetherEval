@@ -1,4 +1,4 @@
-"""External-benchmark API for BFCL-v4 in AetherEval."""
+"""External-benchmark API for BFCL V3 in AetherEval."""
 
 import builtins
 import contextlib
@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import warnings
 from dataclasses import dataclass, field, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -17,7 +16,10 @@ from urllib.parse import urlsplit
 
 from aethereval.backends.sglang.service import SGLangService
 from aethereval.core.io import model_output_name
-from aethereval.core.task_defaults import resolve_task_default_gen
+from aethereval.core.task_defaults import (
+    resolve_task_default_gen,
+    resolve_task_num_repeats,
+)
 
 from .errors import is_context_length_error
 from .register import register_rlla_model
@@ -42,6 +44,7 @@ _NOISY_BFCL_MESSAGES = {
     "Failed to decode the model response. Proceed to next turn.",
 }
 _DEFAULT_GEN = resolve_task_default_gen("bfcl", {})
+_DEFAULT_NUM_REPEATS = resolve_task_num_repeats("bfcl")
 DEFAULT_CATEGORIES = tuple(
     _DEFAULT_GEN.get("categories", ("live", "non_live", "multi_turn"))
 )
@@ -79,7 +82,7 @@ class ExternalRunSpec:
     allow_overwrite: bool = True
     run_generation: bool = True
     run_evaluation: bool = True
-    num_runs: int = int(_DEFAULT_GEN.get("n", 4))
+    num_repeats: int = _DEFAULT_NUM_REPEATS
 
     @property
     def num_gpus(self) -> int:
@@ -155,6 +158,34 @@ def _handler_env(spec: ExternalRunSpec) -> dict[str, str | None]:
     }
 
 
+@contextlib.contextmanager
+def _cap_bfcl_thread_pool(max_workers: int):
+    """Cap BFCL V3's hard-coded 100-request local inference pool."""
+    if max_workers <= 0:
+        raise ValueError("BFCL num_threads must be positive.")
+
+    from bfcl_eval.model_handler.local_inference import base_oss_handler
+
+    original = base_oss_handler.ThreadPoolExecutor
+
+    def capped_thread_pool_executor(*args, **kwargs):
+        requested = kwargs.get("max_workers")
+        if requested is None and args:
+            requested = args[0]
+        capped = max_workers if requested is None else min(int(requested), max_workers)
+        if args:
+            args = (capped, *args[1:])
+        else:
+            kwargs["max_workers"] = capped
+        return original(*args, **kwargs)
+
+    base_oss_handler.ThreadPoolExecutor = capped_thread_pool_executor
+    try:
+        yield
+    finally:
+        base_oss_handler.ThreadPoolExecutor = original
+
+
 def _remove_command_options(command: list[str], option_names: set[str]) -> list[str]:
     cleaned: list[str] = []
     skip_value = False
@@ -188,6 +219,7 @@ def _patch_bfcl_server_command(spec: ExternalRunSpec):
     from bfcl_eval.model_handler.local_inference import base_oss_handler
 
     original = base_oss_handler.subprocess.Popen
+
     def patched_popen(*args, **kwargs):
         if args:
             args = (
@@ -275,15 +307,18 @@ def _run_generations(
             with (
                 _temporary_env(
                     {
+                        "VLLM_ENDPOINT": endpoint.hostname,
+                        "VLLM_PORT": str(endpoint.port),
                         "LOCAL_SERVER_ENDPOINT": endpoint.hostname,
                         "LOCAL_SERVER_PORT": str(endpoint.port),
                         "RLLA_BFCL_GENERATE_URL": f"{service.base_url}/generate",
                     }
                 ),
                 _filter_bfcl_prints(not spec.verbose),
+                _cap_bfcl_thread_pool(spec.num_threads),
             ):
                 for run_index, result_dir in runs:
-                    run_spec = replace(spec, seed=_run_seed(spec, run_index))
+                    run_spec = replace(spec, seed=_repeat_seed(spec, run_index))
                     with _temporary_env(_handler_env(run_spec)):
                         generation_main(
                             _gen_args(run_spec, result_dir, skip_server_setup=True)
@@ -293,29 +328,30 @@ def _run_generations(
         return
 
     for run_index, result_dir in runs:
-        run_spec = replace(spec, seed=_run_seed(spec, run_index))
+        run_spec = replace(spec, seed=_repeat_seed(spec, run_index))
         with (
             _temporary_env(_handler_env(run_spec)),
             _filter_bfcl_prints(not spec.verbose),
+            _cap_bfcl_thread_pool(run_spec.num_threads),
             _patch_bfcl_server_command(run_spec),
         ):
             generation_main(_gen_args(run_spec, result_dir))
 
 
-def _run_seed(spec: ExternalRunSpec, run_index: int) -> int:
-    return (spec.seed if spec.seed is not None else 0) + run_index
+def _repeat_seed(spec: ExternalRunSpec, repeat_index: int) -> int:
+    return (spec.seed if spec.seed is not None else 0) + repeat_index
 
 
-def _evaluation_run_paths(out: Path, num_runs: int) -> list[tuple[Path, Path]]:
-    if num_runs <= 0:
-        raise ValueError("BFCL n/num_runs must be positive.")
+def _evaluation_run_paths(out: Path, num_repeats: int) -> list[tuple[Path, Path]]:
+    if num_repeats <= 0:
+        raise ValueError("BFCL num_repeats must be positive.")
     result_root = out / "result"
     score_root = out / "score"
-    if num_runs == 1:
+    if num_repeats == 1:
         return [(result_root, score_root)]
     return [
         (result_root / f"run_{index + 1:02d}", score_root / f"run_{index + 1:02d}")
-        for index in range(num_runs)
+        for index in range(num_repeats)
     ]
 
 
@@ -386,7 +422,7 @@ def _prepare_existing_results(
 
 def run(spec: ExternalRunSpec) -> ExternalResult:
     out = Path(spec.output_dir).resolve()
-    run_paths = _evaluation_run_paths(out, spec.num_runs)
+    run_paths = _evaluation_run_paths(out, spec.num_repeats)
     for result_dir, score_dir in run_paths:
         result_dir.mkdir(parents=True, exist_ok=True)
         score_dir.mkdir(parents=True, exist_ok=True)
@@ -400,10 +436,8 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
 
     if spec.run_generation or spec.run_evaluation:
         register_rlla_model(spec.model, project_root=str(out))
-        _warn_memory_vector_requirements(spec.categories)
 
     if spec.run_generation:
-        _require_web_search_key(spec.categories)
         from bfcl_eval._llm_response_generation import main as generation_main
 
         _run_generations(
@@ -412,8 +446,8 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
             generation_main,
         )
 
-    run_metrics: list[dict[str, float]] = []
-    run_summaries: list[dict[str, Any]] = []
+    repeat_metrics: list[dict[str, float]] = []
+    repeat_summaries: list[dict[str, Any]] = []
     prediction_stats: dict[str, int | str] = {
         "predictions_path": str(out / "predictions.jsonl"),
         "prediction_records": 0,
@@ -431,13 +465,13 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
                 [spec.model], list(spec.categories), str(result_dir), str(score_dir)
             )
 
-        metrics = parse_scores(score_dir, spec.model)
+        metrics = parse_scores(score_dir) if spec.run_evaluation else {}
         add_comparison_metrics(metrics, compute_format_rates(result_dir, spec.model))
         if spec.run_evaluation and not metrics:
             raise RuntimeError(
-                f"BFCL evaluation run {run_index + 1} produced no metrics."
+                f"BFCL evaluation repeat {run_index + 1} produced no metrics."
             )
-        run_metrics.append(metrics)
+        repeat_metrics.append(metrics)
         stats = write_predictions_jsonl(
             out=out,
             result_dir=result_dir,
@@ -452,20 +486,18 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
         prediction_stats["prediction_scored_records"] = int(
             prediction_stats["prediction_scored_records"]
         ) + int(stats["prediction_scored_records"])
-        run_summaries.append(
+        repeat_summaries.append(
             {
-                "run": run_index + 1,
-                "seed": _run_seed(spec, run_index),
+                "repeat": run_index + 1,
+                "seed": _repeat_seed(spec, run_index),
                 "result_dir": str(result_dir),
                 "score_dir": str(score_dir),
                 "metrics": metrics,
             }
         )
 
-    metrics = average_run_metrics(run_metrics)
-    primary_metric = (
-        "avg_acc" if "avg_acc" in metrics else "official_overall_acc"
-    )
+    metrics = average_repeat_metrics(repeat_metrics)
+    primary_metric = "overall_acc"
     primary_score = float(metrics.get(primary_metric, 0.0))
     _write_summary(
         out,
@@ -474,7 +506,7 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
         primary_metric,
         primary_score,
         prediction_stats,
-        run_summaries,
+        repeat_summaries,
     )
     return ExternalResult(
         metrics,
@@ -485,20 +517,22 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
     )
 
 
-def average_run_metrics(runs: list[dict[str, float]]) -> dict[str, float]:
-    if not runs:
+def average_repeat_metrics(repeats: list[dict[str, float]]) -> dict[str, float]:
+    if not repeats:
         return {}
-    common_keys = set(runs[0]).intersection(*(set(metrics) for metrics in runs[1:]))
+    common_keys = set(repeats[0]).intersection(
+        *(set(metrics) for metrics in repeats[1:])
+    )
     averaged = {
-        key: round(sum(metrics[key] for metrics in runs) / len(runs), 2)
+        key: round(sum(metrics[key] for metrics in repeats) / len(repeats), 2)
         for key in common_keys
     }
-    add_comparison_metrics(averaged, {})
+    _add_overall_metrics(averaged)
     return averaged
 
 
 def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
-    """Parse BFCL v4's official leaderboard CSVs into report metrics."""
+    """Parse BFCL V3's official leaderboard CSV into the four report scores."""
     csv_path = score_dir / "data_overall.csv"
     if not csv_path.exists():
         return None
@@ -522,16 +556,10 @@ def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
             return None  # "N/A" (category not run)
 
     report_mapping = {
-        "official_overall_acc": ("Overall Acc",),
+        "overall_acc": ("Overall Acc",),
         "non_live_acc": ("Non-Live AST Acc",),
         "live_acc": ("Live Acc",),
         "multi_turn_acc": ("Multi Turn Acc",),
-        "web_search_acc": ("Web Search Acc",),
-        "memory_acc": ("Memory Acc",),
-        "relevance_detection": ("Relevance Detection",),
-        "irrelevance_detection": ("Irrelevance Detection",),
-        "format_sensitivity_max_delta": ("Format Sensitivity Max Delta",),
-        "format_sensitivity_std": ("Format Sensitivity Standard Deviation",),
     }
     out: dict[str, float] = {}
     for metric, columns in report_mapping.items():
@@ -539,47 +567,18 @@ def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
         if value is not None:
             out[metric] = value
 
-    agentic_csv = score_dir / "data_agentic.csv"
-    if agentic_csv.exists():
-        with agentic_csv.open(newline="", encoding="utf-8") as f:
-            agentic_rows = list(csv.DictReader(f))
-        if agentic_rows:
-            raw_agentic = agentic_rows[0].get("Agentic Overall Acc")
-            try:
-                agentic = float(str(raw_agentic).replace("%", "").strip())
-            except (TypeError, ValueError):
-                pass
-            else:
-                out["agentic_acc"] = agentic
     return out or None
 
 
-def _read_category_jsons(score_dir: Path, model: str) -> dict[str, float]:
-    """Fallback: aggregate per-category ``*_score.json`` (first line = {accuracy,...})."""
-    model_dir = score_dir / model.replace("/", "_")
-    score_files = list(model_dir.rglob("*_score.json")) if model_dir.exists() else []
-    if not score_files:
-        return {}
-
-    per_cat: dict[str, float] = {}
-    for jf in score_files:
-        cat = jf.stem.split("_score")[0]
-        cat = cat.split("_", 2)[-1] if cat.startswith("BFCL") else cat
-        with open(jf) as f:
-            head = json.loads(f.readline())
-        if isinstance(head, dict) and "accuracy" in head:
-            per_cat[cat] = float(head["accuracy"]) * 100.0
-
-    # Do not synthesize V4 top-level metrics here: their official hierarchy and
-    # 10/10/10/30/40 weighting cannot be reconstructed by a flat category mean.
-    return {f"cat/{key}": value for key, value in per_cat.items()}
-
-
-def parse_scores(score_dir: Path, model: str) -> dict[str, float]:
-    metrics = _read_overall_csv(score_dir) or {}
+def parse_scores(score_dir: Path) -> dict[str, float]:
+    """Read only BFCL V3's official aggregate report; never synthesize scores."""
+    metrics = _read_overall_csv(score_dir)
     if not metrics:
-        metrics = _read_category_jsons(score_dir, model)
-    add_comparison_metrics(metrics, {})
+        raise RuntimeError(
+            "BFCL evaluation did not produce a parseable official report at "
+            f"{score_dir / 'data_overall.csv'}."
+        )
+    _add_overall_metrics(metrics)
     return metrics
 
 
@@ -627,16 +626,12 @@ def compute_format_rates(result_dir: Path, model: str) -> dict[str, float]:
     """Reference-aware ToolRL format percentages for BFCL comparison sections."""
 
     model_dir = result_dir / model.replace("/", "_")
-    counts = {
-        section: {"total": 0, "ok": 0}
-        for section, _, _ in _COMPARISON_SECTIONS
-    }
+    counts = {section: {"total": 0, "ok": 0} for section, _, _ in _COMPARISON_SECTIONS}
     for jf in model_dir.rglob("*_result.json"):
-        relative_parts = jf.relative_to(model_dir).parts
-        section = relative_parts[0] if len(relative_parts) > 1 else None
+        category = _result_file_category(jf)
+        section = _comparison_section(category)
         if section not in counts:
             continue
-        category = _result_file_category(jf)
         multi_turn_ground_truth = (
             _load_ground_truth_by_id(category)
             if category.startswith("multi_turn_")
@@ -681,11 +676,12 @@ def _has_expected_toolrl_format(value: Any, expected: str) -> bool:
 
 
 def _load_ground_truth_by_id(category: str) -> dict[str, Any]:
-    from bfcl_eval.utils import load_ground_truth_entry
+    from bfcl_eval.constants.eval_config import POSSIBLE_ANSWER_PATH
+    from bfcl_eval.utils import find_file_with_suffix, load_file
 
     return {
         str(entry["id"]): entry["ground_truth"]
-        for entry in load_ground_truth_entry(category)
+        for entry in load_file(find_file_with_suffix(POSSIBLE_ANSWER_PATH, category))
     }
 
 
@@ -734,20 +730,28 @@ def add_comparison_metrics(
     metrics: dict[str, float],
     format_rates: dict[str, float],
 ) -> None:
-    """Add the macro averages used by Live/Non-Live/Multi-Turn tables."""
+    """Add section format rates and V3-style macro overall scores."""
     for section, _, format_key in _COMPARISON_SECTIONS:
         if section in format_rates:
             metrics[format_key] = round(format_rates[section], 2)
 
+    _add_overall_metrics(metrics)
+
+
+def _add_overall_metrics(metrics: dict[str, float]) -> None:
     accuracy_keys = [item[1] for item in _COMPARISON_SECTIONS]
-    if all(key in metrics for key in accuracy_keys):
-        average = round(sum(metrics[key] for key in accuracy_keys) / 3.0, 2)
-        metrics["avg_acc"] = average
+    if "overall_acc" not in metrics and all(key in metrics for key in accuracy_keys):
+        metrics["overall_acc"] = round(
+            sum(metrics[key] for key in accuracy_keys) / len(accuracy_keys),
+            2,
+        )
 
     format_keys = [item[2] for item in _COMPARISON_SECTIONS]
     if all(key in metrics for key in format_keys):
-        average = round(sum(metrics[key] for key in format_keys) / 3.0, 2)
-        metrics["avg_format"] = average
+        metrics["overall_format"] = round(
+            sum(metrics[key] for key in format_keys) / len(format_keys),
+            2,
+        )
 
 
 def _as_generation_text(value: Any) -> str:
@@ -773,50 +777,30 @@ def _result_error(value: Any) -> str | None:
 
 def _result_file_category(path: Path) -> str:
     name = path.name
-    if name.endswith("_result.json"):
-        name = name[: -len("_result.json")]
+    for suffix in ("_result.json", "_score.json"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
     name = re.sub(r"^BFCL_v\d+_", "", name)
     return name
 
 
-def _require_web_search_key(categories: list[str]) -> None:
-    from bfcl_eval.constants.category_mapping import TEST_COLLECTION_MAPPING
-
-    expanded = _expand_categories(categories, TEST_COLLECTION_MAPPING)
-    if any(category.startswith("web_search") for category in expanded) and not os.getenv(
-        "SERPAPI_API_KEY"
-    ):
-        raise RuntimeError(
-            "BFCL v4 web-search generation requires SERPAPI_API_KEY. "
-            "Set it for an official full-v4 run, or select categories that exclude "
-            "web_search (the resulting score is not a full BFCL v4 "
-            "official_overall_acc)."
-        )
-
-
-def _warn_memory_vector_requirements(categories: list[str]) -> None:
-    from bfcl_eval.constants.category_mapping import TEST_COLLECTION_MAPPING
-
-    expanded = _expand_categories(categories, TEST_COLLECTION_MAPPING)
-    if "memory_vector" in expanded:
-        warnings.warn(
-            "BFCL memory_vector is selected, but all-MiniLM-L6-v2 is not cached "
-            "in the AetherEval image. Pre-populate the Hugging Face cache or allow "
-            "network access; offline execution without a cache will fail in the "
-            "official BFCL backend.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-
-def _expand_categories(
-    categories: list[str],
-    collection_mapping: dict[str, list[str]],
-) -> set[str]:
-    expanded: set[str] = set()
-    for category in categories:
-        expanded.update(collection_mapping.get(category, [category]))
-    return expanded
+def _comparison_section(category: str) -> str | None:
+    if category.startswith("multi_turn_"):
+        return "multi_turn"
+    if category.startswith("live_"):
+        return "live"
+    if category in {
+        "simple",
+        "irrelevance",
+        "parallel",
+        "multiple",
+        "parallel_multiple",
+        "java",
+        "javascript",
+    }:
+        return "non_live"
+    return None
 
 
 def _bfcl_package_version() -> str:
@@ -938,7 +922,7 @@ def write_predictions_jsonl(
                         "error": _result_error(raw_result),
                         "meta": {
                             "benchmark": "bfcl",
-                            "evaluation_run": gen_idx + 1,
+                            "evaluation_repeat": gen_idx + 1,
                             "test_category": category,
                             "result_file": str(result_file.relative_to(result_dir)),
                             "score_available": score is not None,
@@ -966,11 +950,11 @@ def _write_summary(
     primary_metric: str,
     primary_score: float,
     prediction_stats: dict[str, int | str],
-    run_summaries: list[dict[str, Any]],
+    repeat_summaries: list[dict[str, Any]],
 ) -> None:
     summary = {
         "benchmark": "bfcl",
-        "benchmark_version": "v4",
+        "benchmark_version": "v3",
         "bfcl_eval_version": _bfcl_package_version(),
         "external": True,
         "model": spec.model,
@@ -992,9 +976,11 @@ def _write_summary(
         "top_k": spec.top_k,
         "repetition_penalty": spec.repetition_penalty,
         "seed": spec.seed,
-        "num_runs": spec.num_runs,
-        "run_seeds": [_run_seed(spec, index) for index in range(spec.num_runs)],
-        "runs": run_summaries,
+        "num_repeats": spec.num_repeats,
+        "repeat_seeds": [
+            _repeat_seed(spec, index) for index in range(spec.num_repeats)
+        ],
+        "repeats": repeat_summaries,
         "verbose": spec.verbose,
         "metrics": metrics,
         **prediction_stats,

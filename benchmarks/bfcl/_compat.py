@@ -2,7 +2,7 @@
 
 ``bfcl_eval.constants.model_config`` eagerly imports every handler, including the
 API-inference ones. AetherEval only registers its local SGLang handler, so missing
-provider-only modules may be represented by permissive placeholders. Core BFCL v4
+provider-only modules may be represented by permissive placeholders. Core BFCL V3
 parser dependencies are never stubbed: doing so would silently corrupt Java and
 JavaScript scores.
 """
@@ -65,11 +65,11 @@ def ensure_bfcl_importable(
         try:
             importlib.import_module(module_name)
         except ModuleNotFoundError as exc:
-                raise RuntimeError(
-                    "BFCL v4 runtime dependency is missing: "
-                    f"{module_name}. Rebuild the SGLang runtime image with the "
-                    "BFCL v4 dependencies."
-                ) from exc
+            raise RuntimeError(
+                "BFCL V3 runtime dependency is missing: "
+                f"{module_name}. Rebuild the SGLang runtime image with the "
+                "BFCL V3 dependencies."
+            ) from exc
     for _ in range(max_iters):
         try:
             importlib.import_module(target)
@@ -80,7 +80,7 @@ def ensure_bfcl_importable(
                 raise
             if missing in _REQUIRED_MODULES:
                 raise RuntimeError(
-                    f"BFCL v4 runtime dependency is missing: {missing}."
+                    f"BFCL V3 runtime dependency is missing: {missing}."
                 ) from exc
             _ensure_lax_module(missing)
         except (AttributeError, ImportError) as exc:

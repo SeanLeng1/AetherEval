@@ -31,10 +31,17 @@ APIBank defaults live in `configs/task_defaults.yaml`:
 ```yaml
 apibank:
   n: 1
+  num_repeats: 4
   max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
 ```
+
+`n` is the number of completions generated for each prompt and remains `1` for
+APIBank. `num_repeats` reruns the complete benchmark independently. The default four
+repeats are stored under `run_01` through `run_04`, and the task-level `summary.json`
+reports the arithmetic mean of every numeric metric. Use `--num-repeats 1` for a
+single diagnostic run.
 
 That matches the reference greedy generation setup in the parts that belong to the
 generation request. Backend context length remains a normal AetherEval runtime setting
@@ -42,16 +49,21 @@ such as `--max-model-len` for vLLM or `--context-length` for SGLang.
 
 ## Output
 
-The task uses the standard native output layout:
+With the default four repeats, the task uses the repeated native output layout:
 
 ```text
 outputs/<run_id>/apibank/
-  predictions.jsonl
+  run_01/predictions.jsonl
+  run_02/predictions.jsonl
+  run_03/predictions.jsonl
+  run_04/predictions.jsonl
   run_config.json
-  summary.json
+  summary.json                 # arithmetic mean across repeats
 ```
 
-Per-generation `meta` in `predictions.jsonl` includes `correct_score`,
+Each repeat directory also contains its own `summary.json` and `run_config.json`.
+With `--num-repeats 1`, files remain directly under `apibank/`. Per-generation `meta`
+in `predictions.jsonl` includes `correct_score`,
 `format_score`, `length_score`, and `think_word_count`.
 
 ## Metrics

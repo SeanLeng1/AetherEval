@@ -434,21 +434,23 @@ their own generation loop, agent runtime, or reference output layout. These live
 `benchmarks/<name>/` with an `external.py` API. The CLI task router still lets you
 select them with `--tasks`; it dispatches them to their external runner internally.
 
-API-Bank is a native task and should be run with `--tasks apibank`.
+API-Bank is a native task and should be run with `--tasks apibank`. It keeps `n=1`
+and defaults to four complete benchmark repetitions (`num_repeats: 4`), whose numeric
+metrics are averaged. Use `--num-repeats 1` for a quick single run.
 
 Current external benchmarks:
 
-- `benchmarks/bfcl` — BFCL-v4 wrapper:
+- `benchmarks/bfcl` — BFCL V3 wrapper (`bfcl-eval==2025.6.8`):
   `aethereval --tasks bfcl --model <model> --output-dir outputs`
 
 BFCL defaults to `live,non_live,multi_turn` and reports each section's `Acc` and
-reference-aware ToolRL-format rate plus their unweighted `avg_acc` and `avg_format`,
-matching common comparison tables. The expected format comes from the BFCL subset and
+reference-aware ToolRL-format rate plus `overall_acc` and `overall_format`,
+matching common V3 comparison tables. The expected format comes from the BFCL subset and
 multi-turn ground truth, so no-tool cases require `<response>` while tool execution
 steps require `<tool_call>` and terminate with `<response>`. It runs four independent
-repetitions by default (`--n 1` for a quick single run) and reports their mean. Use
-`--categories all` for the distinct official full-V4 aggregate (including Agentic and
-Web Search).
+repetitions by default (`--num-repeats 1` for a quick single run) and reports their
+mean. BFCL keeps `n=1`; `--n` controls completions per prompt, not full benchmark
+repetitions. In V3 these three collections together are the full benchmark.
 
 External runs use the regular `aethereval` CLI for shared runtime flags
 (`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
