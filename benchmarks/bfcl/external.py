@@ -22,8 +22,7 @@ from aethereval.core.task_defaults import (
 )
 
 from .errors import is_context_length_error
-from .register import register_rlla_model
-from .scoring import install_scalar_quotation_tolerance
+from .register import prepare_bfcl_model
 
 # ToolRL's public format reward selects one exact shape from the reference answer and
 # checks both the regex and tag counts. BFCL does not ship ToolRL-formatted references,
@@ -45,6 +44,7 @@ _NOISY_BFCL_MESSAGES = {
 }
 _DEFAULT_GEN = resolve_task_default_gen("bfcl", {})
 _DEFAULT_NUM_REPEATS = resolve_task_num_repeats("bfcl")
+_DEFAULT_HANDLER = str(_DEFAULT_GEN.get("handler", "toolrl"))
 DEFAULT_CATEGORIES = tuple(
     _DEFAULT_GEN.get("categories", ("live", "non_live", "multi_turn"))
 )
@@ -60,6 +60,7 @@ class ExternalRunSpec:
     model: str  # Hugging Face id or local checkpoint path
     output_dir: Path  # AetherEval run dir; result/ + score/ go under it
     model_name: str | None = None  # Logical/output label; never used for loading
+    handler: str = _DEFAULT_HANDLER
     categories: list[str] = field(default_factory=lambda: list(DEFAULT_CATEGORIES))
     backend: str = "sglang"  # tmux0 container ships sglang
     dp_size: int = 1
@@ -78,6 +79,7 @@ class ExternalRunSpec:
     top_k: int = int(_DEFAULT_GEN.get("top_k", -1))
     repetition_penalty: float = 1.0
     seed: int | None = None
+    enable_thinking: bool | None = None
     verbose: bool = False
     allow_overwrite: bool = True
     run_generation: bool = True
@@ -145,16 +147,21 @@ def _temporary_env(values: dict[str, str | None]):
 
 def _handler_env(spec: ExternalRunSpec) -> dict[str, str | None]:
     return {
-        "RLLA_BFCL_MAX_TOKENS": str(spec.max_tokens),
-        "RLLA_BFCL_MAX_CONTEXT_LENGTH": (
+        "AETHEREVAL_BFCL_MAX_TOKENS": str(spec.max_tokens),
+        "AETHEREVAL_BFCL_MAX_CONTEXT_LENGTH": (
             str(spec.max_context_length)
             if spec.max_context_length is not None
             else None
         ),
-        "RLLA_BFCL_TOP_P": str(spec.top_p),
-        "RLLA_BFCL_TOP_K": str(spec.top_k),
-        "RLLA_BFCL_REPETITION_PENALTY": str(spec.repetition_penalty),
-        "RLLA_BFCL_SEED": str(spec.seed) if spec.seed is not None else None,
+        "AETHEREVAL_BFCL_TOP_P": str(spec.top_p),
+        "AETHEREVAL_BFCL_TOP_K": str(spec.top_k),
+        "AETHEREVAL_BFCL_REPETITION_PENALTY": str(spec.repetition_penalty),
+        "AETHEREVAL_BFCL_SEED": str(spec.seed) if spec.seed is not None else None,
+        "AETHEREVAL_BFCL_ENABLE_THINKING": (
+            str(spec.enable_thinking).lower()
+            if spec.enable_thinking is not None
+            else None
+        ),
     }
 
 
@@ -311,7 +318,7 @@ def _run_generations(
                         "VLLM_PORT": str(endpoint.port),
                         "LOCAL_SERVER_ENDPOINT": endpoint.hostname,
                         "LOCAL_SERVER_PORT": str(endpoint.port),
-                        "RLLA_BFCL_GENERATE_URL": f"{service.base_url}/generate",
+                        "AETHEREVAL_BFCL_GENERATE_URL": f"{service.base_url}/generate",
                     }
                 ),
                 _filter_bfcl_prints(not spec.verbose),
@@ -435,7 +442,11 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
         )
 
     if spec.run_generation or spec.run_evaluation:
-        register_rlla_model(spec.model, project_root=str(out))
+        prepare_bfcl_model(
+            spec.model,
+            handler_profile=spec.handler,
+            project_root=str(out),
+        )
 
     if spec.run_generation:
         from bfcl_eval._llm_response_generation import main as generation_main
@@ -460,13 +471,19 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
         if spec.run_evaluation:
             from bfcl_eval.eval_checker import eval_runner
 
-            install_scalar_quotation_tolerance()
             eval_runner.main(
-                [spec.model], list(spec.categories), str(result_dir), str(score_dir)
+                [spec.model],
+                list(spec.categories),
+                str(result_dir),
+                str(score_dir),
             )
 
         metrics = parse_scores(score_dir) if spec.run_evaluation else {}
-        add_comparison_metrics(metrics, compute_format_rates(result_dir, spec.model))
+        if spec.handler == "toolrl":
+            add_comparison_metrics(
+                metrics,
+                compute_format_rates(result_dir, spec.model),
+            )
         if spec.run_evaluation and not metrics:
             raise RuntimeError(
                 f"BFCL evaluation repeat {run_index + 1} produced no metrics."
@@ -477,6 +494,7 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
             result_dir=result_dir,
             score_dir=score_dir,
             model=spec.model,
+            handler=spec.handler,
             gen_idx=run_index,
             append=run_index > 0,
         )
@@ -876,6 +894,7 @@ def write_predictions_jsonl(
     result_dir: Path,
     score_dir: Path,
     model: str,
+    handler: str,
     gen_idx: int = 0,
     append: bool = False,
 ) -> dict[str, int | str]:
@@ -922,6 +941,7 @@ def write_predictions_jsonl(
                         "error": _result_error(raw_result),
                         "meta": {
                             "benchmark": "bfcl",
+                            "handler": handler,
                             "evaluation_repeat": gen_idx + 1,
                             "test_category": category,
                             "result_file": str(result_file.relative_to(result_dir)),
@@ -959,6 +979,7 @@ def _write_summary(
         "external": True,
         "model": spec.model,
         "model_name": model_output_name(spec.model, spec.model_name),
+        "handler": spec.handler,
         "backend": spec.backend,
         "categories": list(spec.categories),
         "num_gpus": spec.num_gpus,
@@ -976,6 +997,7 @@ def _write_summary(
         "top_k": spec.top_k,
         "repetition_penalty": spec.repetition_penalty,
         "seed": spec.seed,
+        "enable_thinking": spec.enable_thinking,
         "num_repeats": spec.num_repeats,
         "repeat_seeds": [
             _repeat_seed(spec, index) for index in range(spec.num_repeats)

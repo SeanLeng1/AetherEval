@@ -1,8 +1,13 @@
 # BFCL V3 (external benchmark)
 
 Runs the official Berkeley Function Calling Leaderboard V3 generation loop and
-evaluator for ToolRL/GDPO-style models that emit
-`<think>…</think>\n<tool_call>…</tool_call>\n<response>…</response>`.
+evaluator. A selectable handler profile separates the model's output protocol from
+its architecture and tokenizer chat template.
+
+- `toolrl` (default) evaluates ToolRL/GDPO-style models that emit
+  `<think>…</think>\n<tool_call>…</tool_call>\n<response>…</response>`.
+- `official` reuses the prompt and decoder of an exact prompt-mode model registration
+  from the installed BFCL V3 package.
 
 ## Why it is external
 
@@ -21,19 +26,14 @@ The runtime must also contain the real Tree-sitter Python, Java, and JavaScript
 parsers. `_compat.py` may stub unused online-provider SDKs, but it never stubs scoring
 dependencies.
 
-## Scoring equivalence
+## Standard scoring
 
-AetherEval makes one narrow correction for ToolRL-style JSON serialization. If the
-official tool schema declares an `integer`, `float`, or `boolean`, the corresponding
-canonical JSON scalar encoded as a string is normalized before official scoring or
-multi-turn execution. Examples include `"2"` → `2`, `"2.5"` → `2.5`, and `"true"` →
-`true`.
-
-The rule is recursive for schema-declared array/tuple items and dict properties. It
-does not coerce string/any parameters, entire containers encoded as strings,
-undeclared fields, malformed values such as `"True"`, missing arguments, or function
-names. This prevents representation-only false negatives without making the checker
-generally lenient.
+Both handler profiles use BFCL V3's official checker without value normalization.
+For example, a schema-declared integer emitted as the JSON string `"2"` is not changed
+to the JSON number `2` before scoring or multi-turn execution. AetherRL separately
+handles stringified values in its training reward because some ToolRL ground-truth
+annotations are stringified; that training-data correction is intentionally not part
+of the benchmark protocol.
 
 ## Defaults and execution
 
@@ -43,6 +43,7 @@ BFCL V3 benchmark. Generation settings live under `bfcl` in
 
 - `n: 1`: one generation at each BFCL interaction.
 - `num_repeats: 4`: four complete benchmark runs, averaged at the end.
+- `handler: toolrl`: ToolRL prompt/output protocol.
 - `temperature: 0.001`, `top_p: 1.0`, `top_k: -1`.
 - `max_new_tokens: 4096`.
 
@@ -62,6 +63,32 @@ aethereval \
 `--model` is always the actual Hugging Face ID or checkpoint path. Optional
 `--model-name` only controls the AetherEval output label, including when the model ID
 contains `/` or `_`.
+
+Use `--bfcl-handler official` for an unmodified model that has an exact prompt-mode
+entry in `bfcl-eval==2025.6.8`, for example:
+
+```bash
+aethereval \
+  --tasks bfcl \
+  --model google/gemma-3-12b-it \
+  --bfcl-handler official \
+  --output-dir outputs
+```
+
+This pinned BFCL release includes official Gemma 3 handlers, but not Gemma 4 or
+Qwen2.5 model registrations. ToolRL-trained models and arbitrary local checkpoints
+should use `toolrl`. Native function-calling (`is_fc_model=True`) registrations are
+also rejected explicitly because they require a different structured transport.
+
+The ToolRL instruction and serialized dialogue history are model-independent content.
+Their outer chat envelope is rendered with the selected model tokenizer's
+`apply_chat_template(..., add_generation_prompt=True)`; Qwen therefore receives
+ChatML, while Gemma receives Gemma turn markers. If a template rejects the `system`
+role (as Gemma-family templates commonly do), AetherEval folds the complete system
+instruction into the user message before applying that same model template. A model
+without a usable chat template fails clearly instead of silently receiving Qwen
+tokens. `--enable-thinking` and `--no-enable-thinking` are forwarded to compatible
+BFCL tokenizer templates too.
 
 `--categories` accepts the official V3 collections `all`, `live`, `non_live`,
 `multi_turn`, `single_turn`, `ast`, `python`, and `non_python`, or individual V3
@@ -96,7 +123,8 @@ outputs/<model_name>/<run_id>/bfcl/
   summary.json
 ```
 
-`summary.json` contains the mean across complete repeats. The canonical metric set is:
+`summary.json` contains the mean across complete repeats. In `toolrl` mode, the
+canonical metric set is:
 
 | metric | definition |
 |---|---|
@@ -118,6 +146,8 @@ Format is an AetherEval comparison metric, not an official BFCL CSV column;
 Ordinary calling categories require `<tool_call>`, irrelevance categories require
 `<response>`, and multi-turn expectations come from each turn's official ground truth.
 Tool-execution steps require `<tool_call>` and a completed turn ends with `<response>`.
+The `official` profile reports only BFCL's official accuracy metrics because ToolRL
+tag-format rates do not apply to an official model-specific output protocol.
 
 `predictions.jsonl` follows AetherEval's normal row shape. `gen_idx` identifies the
 repeat and `meta.evaluation_repeat` is its one-based index; the original BFCL record is

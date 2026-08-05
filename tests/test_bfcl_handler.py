@@ -7,14 +7,99 @@ from benchmarks.bfcl._compat import ensure_bfcl_importable
 
 ensure_bfcl_importable()
 
-from benchmarks.bfcl.handler import (  # noqa: E402
-    RLLAHandler,
+from benchmarks.bfcl.handlers import (  # noqa: E402
+    OfficialPromptHandlerAdapter,
+    ToolRLHandler,
+)
+from benchmarks.bfcl.handlers.common import (  # noqa: E402
+    post_native_generate,
+)
+from benchmarks.bfcl.handlers.toolrl import (  # noqa: E402
     _convert_to_format_tool,
-    _post_native_generate,
+    _render_with_model_chat_template,
+    _tool_call_tags_are_special,
 )
 
 
+class _TemplateTokenizer:
+    def __init__(self, *, reject_system: bool = False):
+        self.reject_system = reject_system
+        self.calls = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tokenize,
+        add_generation_prompt,
+        **kwargs,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+                "kwargs": kwargs,
+            }
+        )
+        if self.reject_system and messages[0]["role"] == "system":
+            raise ValueError("System role not supported")
+        body = "\n".join(
+            f"<{message['role']}>{message['content']}" for message in messages
+        )
+        return f"<model-template>{body}<assistant>"
+
+
 class BfclHandlerTests(unittest.TestCase):
+    def test_official_adapter_preserves_prompt_and_uses_native_generate(self) -> None:
+        class UpstreamPromptHandler:
+            def _format_prompt(self, messages, function):
+                return f"official:{messages[0]['content']}:{len(function)}"
+
+        class AdaptedHandler(OfficialPromptHandlerAdapter, UpstreamPromptHandler):
+            pass
+
+        handler = AdaptedHandler()
+        handler.model_path_or_id = "official/model"
+        handler.temperature = 0.2
+        handler.max_context_length = 8192
+        handler.tokenizer = mock.Mock()
+        handler.tokenizer.tokenize.return_value = [1, 2]
+
+        response = mock.Mock(ok=True)
+        response.json.return_value = {
+            "text": "official answer",
+            "meta_info": {"prompt_tokens": 2, "completion_tokens": 2},
+        }
+        session = mock.Mock()
+        session.post.return_value = response
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "AETHEREVAL_BFCL_GENERATE_URL": "http://router/generate",
+                    "AETHEREVAL_BFCL_MAX_TOKENS": "64",
+                },
+                clear=False,
+            ),
+            mock.patch(
+                "benchmarks.bfcl.handlers.common._request_session",
+                return_value=session,
+            ),
+        ):
+            result, _ = handler._query_prompting(
+                {
+                    "message": [{"role": "user", "content": "hello"}],
+                    "function": [{"name": "tool"}],
+                }
+            )
+
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["text"], "official:hello:1")
+        self.assertEqual(payload["sampling_params"]["max_new_tokens"], 64)
+        self.assertEqual(result.choices[0].text, "official answer")
+
     def test_tool_schema_matches_public_toolrl_prompt(self) -> None:
         tool = {
             "name": "search",
@@ -50,7 +135,8 @@ class BfclHandlerTests(unittest.TestCase):
         self.assertIn('"required": ["enabled"]', rendered)
 
     def test_prompt_matches_public_toolrl_example(self) -> None:
-        handler = RLLAHandler.__new__(RLLAHandler)
+        handler = ToolRLHandler.__new__(ToolRLHandler)
+        handler.tokenizer = _TemplateTokenizer()
         prompt = handler._format_prompt(
             [{"role": "user", "content": "Use the tools."}],
             [],
@@ -59,9 +145,15 @@ class BfclHandlerTests(unittest.TestCase):
         self.assertIn('"name": "Tool name"', prompt)
         self.assertIn('"Parameter name": "Parameter content"', prompt)
         self.assertNotIn("integer/float as JSON numbers", prompt)
+        self.assertNotIn("<|im_start|>", prompt)
+        self.assertEqual(
+            [message["role"] for message in handler.tokenizer.calls[0]["messages"]],
+            ["system", "user"],
+        )
 
     def test_multi_turn_suffix_is_used_before_first_tool_feedback(self) -> None:
-        handler = RLLAHandler.__new__(RLLAHandler)
+        handler = ToolRLHandler.__new__(ToolRLHandler)
+        handler.tokenizer = _TemplateTokenizer()
         messages = [{"role": "user", "content": "Start the task."}]
 
         multi_prompt = handler._render_prompt(
@@ -81,7 +173,7 @@ class BfclHandlerTests(unittest.TestCase):
         self.assertNotIn("comprehensive plan", single_prompt)
 
     def test_pre_query_processing_records_multi_turn_per_example(self) -> None:
-        handler = RLLAHandler.__new__(RLLAHandler)
+        handler = ToolRLHandler.__new__(ToolRLHandler)
         test_entry = {
             "id": "multi_turn_base_0",
             "function": [],
@@ -92,8 +184,11 @@ class BfclHandlerTests(unittest.TestCase):
 
         self.assertIs(inference_data["is_multi_turn"], True)
 
-    def test_format_prompt_ignores_benchmark_system_instructions_like_toolrl(self) -> None:
-        handler = RLLAHandler.__new__(RLLAHandler)
+    def test_format_prompt_ignores_benchmark_system_instructions_like_toolrl(
+        self,
+    ) -> None:
+        handler = ToolRLHandler.__new__(ToolRLHandler)
+        handler.tokenizer = _TemplateTokenizer()
         prompt = handler._format_prompt(
             [
                 {"role": "system", "content": "Persistent memory instructions."},
@@ -105,14 +200,59 @@ class BfclHandlerTests(unittest.TestCase):
         self.assertNotIn("Persistent memory instructions.", prompt)
         self.assertIn("What do you remember?", prompt)
 
+    def test_gemma_style_template_folds_unsupported_system_role(self) -> None:
+        tokenizer = _TemplateTokenizer(reject_system=True)
+        with mock.patch.dict(
+            os.environ,
+            {"AETHEREVAL_BFCL_ENABLE_THINKING": "false"},
+            clear=False,
+        ):
+            prompt = _render_with_model_chat_template(
+                tokenizer,
+                "ToolRL system instructions",
+                "Dialogue history",
+            )
+
+        self.assertEqual(len(tokenizer.calls), 2)
+        self.assertEqual(tokenizer.calls[0]["messages"][0]["role"], "system")
+        self.assertEqual(tokenizer.calls[1]["messages"][0]["role"], "user")
+        folded_content = tokenizer.calls[1]["messages"][0]["content"]
+        self.assertIn("ToolRL system instructions", folded_content)
+        self.assertIn("Dialogue history", folded_content)
+        self.assertEqual(
+            tokenizer.calls[1]["kwargs"],
+            {"enable_thinking": False},
+        )
+        self.assertIn("<model-template>", prompt)
+        self.assertNotIn("<|im_start|>", prompt)
+
+    def test_missing_chat_template_fails_instead_of_assuming_qwen(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "usable chat template"):
+            _render_with_model_chat_template(
+                object(),
+                "ToolRL system instructions",
+                "Dialogue history",
+            )
+
+    def test_special_tool_tags_control_output_token_stripping(self) -> None:
+        qwen_tokenizer = mock.Mock()
+        qwen_tokenizer.all_special_tokens = ["<tool_call>", "</tool_call>"]
+        gemma_tokenizer = mock.Mock()
+        gemma_tokenizer.all_special_tokens = ["<bos>", "<eos>"]
+        gemma_tokenizer.added_tokens_decoder = {}
+
+        self.assertTrue(_tool_call_tags_are_special(qwen_tokenizer))
+        self.assertFalse(_tool_call_tags_are_special(gemma_tokenizer))
+
     def test_native_generate_preserves_prompt_and_sampling(self) -> None:
-        handler = RLLAHandler.__new__(RLLAHandler)
+        handler = ToolRLHandler.__new__(ToolRLHandler)
         handler.model_path_or_id = "test/model"
         handler.temperature = 0.001
         handler.max_context_length = 32768
         handler.skip_special_tokens = False
         handler.tokenizer = mock.Mock()
         handler.tokenizer.tokenize.return_value = [1, 2]
+        handler.tokenizer.all_special_tokens = ["<tool_call>", "</tool_call>"]
         handler._render_prompt = mock.Mock(return_value="rendered prompt")
         handler.client = mock.Mock()
 
@@ -131,16 +271,16 @@ class BfclHandlerTests(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "RLLA_BFCL_GENERATE_URL": "http://router/generate",
-                    "RLLA_BFCL_MAX_TOKENS": "123",
-                    "RLLA_BFCL_TOP_P": "0.9",
-                    "RLLA_BFCL_TOP_K": "-1",
-                    "RLLA_BFCL_REPETITION_PENALTY": "1.0",
+                    "AETHEREVAL_BFCL_GENERATE_URL": "http://router/generate",
+                    "AETHEREVAL_BFCL_MAX_TOKENS": "123",
+                    "AETHEREVAL_BFCL_TOP_P": "0.9",
+                    "AETHEREVAL_BFCL_TOP_K": "-1",
+                    "AETHEREVAL_BFCL_REPETITION_PENALTY": "1.0",
                 },
                 clear=False,
             ),
             mock.patch(
-                "benchmarks.bfcl.handler._request_session",
+                "benchmarks.bfcl.handlers.common._request_session",
                 return_value=session,
             ),
         ):
@@ -183,13 +323,28 @@ class BfclHandlerTests(unittest.TestCase):
         session.post.return_value = response
 
         with mock.patch(
-            "benchmarks.bfcl.handler._request_session",
+            "benchmarks.bfcl.handlers.common._request_session",
             return_value=session,
         ):
             with self.assertRaisesRegex(RuntimeError, "input is too long"):
-                _post_native_generate("http://router/generate", {})
+                post_native_generate("http://router/generate", {})
 
         session.post.assert_called_once()
+
+    def test_toolrl_execution_keeps_json_value_types_strict(self) -> None:
+        handler = ToolRLHandler.__new__(ToolRLHandler)
+        result = (
+            "<think>Call the tool.</think>\n<tool_call>\n"
+            '{"name":"typed_tool","parameters":'
+            '{"count":"2","enabled":"true"}}\n</tool_call>'
+        )
+
+        calls = handler.decode_execute(result)
+
+        self.assertEqual(
+            calls,
+            ["typed_tool(count='2', enabled='true')"],
+        )
 
     def test_native_generate_does_not_retry_context_error_reported_as_500(
         self,
@@ -207,13 +362,13 @@ class BfclHandlerTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "benchmarks.bfcl.handler._request_session",
+                "benchmarks.bfcl.handlers.common._request_session",
                 return_value=session,
             ),
-            mock.patch("benchmarks.bfcl.handler.time.sleep") as sleep,
+            mock.patch("benchmarks.bfcl.handlers.common.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(RuntimeError, "not retried"):
-                _post_native_generate("http://router/generate", {})
+                post_native_generate("http://router/generate", {})
 
         session.post.assert_called_once()
         sleep.assert_not_called()
@@ -231,12 +386,12 @@ class BfclHandlerTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "benchmarks.bfcl.handler._request_session",
+                "benchmarks.bfcl.handlers.common._request_session",
                 return_value=session,
             ),
-            mock.patch("benchmarks.bfcl.handler.time.sleep"),
+            mock.patch("benchmarks.bfcl.handlers.common.time.sleep"),
         ):
-            result = _post_native_generate("http://router/generate", {})
+            result = post_native_generate("http://router/generate", {})
 
         self.assertEqual(result, {"text": "generated answer"})
         self.assertEqual(session.post.call_count, 2)
@@ -255,12 +410,12 @@ class BfclHandlerTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "benchmarks.bfcl.handler._request_session",
+                "benchmarks.bfcl.handlers.common._request_session",
                 return_value=session,
             ),
-            mock.patch("benchmarks.bfcl.handler.time.sleep"),
+            mock.patch("benchmarks.bfcl.handlers.common.time.sleep"),
         ):
-            result = _post_native_generate("http://router/generate", {})
+            result = post_native_generate("http://router/generate", {})
 
         self.assertEqual(result, {"text": "generated answer"})
         self.assertEqual(session.post.call_count, 2)

@@ -10,10 +10,21 @@ from aethereval.core.task_defaults import (
 )
 
 from .external import DEFAULT_CATEGORIES, ExternalRunSpec
+from .register import HANDLER_PROFILES
 
 
 def add_bfcl_arguments(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("BFCL")
+    group.add_argument(
+        "--bfcl-handler",
+        choices=HANDLER_PROFILES,
+        default=None,
+        help=(
+            "BFCL output protocol: toolrl for <tool_call>/<response> models "
+            "(default), or official for an exact prompt-mode model registered "
+            "by the installed BFCL V3 package."
+        ),
+    )
     group.add_argument(
         "--categories",
         default=None,
@@ -153,6 +164,7 @@ def build_bfcl_spec(
     return ExternalRunSpec(
         model=str(resolved["model"]),
         model_name=resolved["model_name"],
+        handler=args.bfcl_handler or str(defaults.get("handler", "toolrl")),
         output_dir=Path(output_dir),
         categories=_split_categories(args.categories),
         backend=backend,
@@ -177,6 +189,7 @@ def build_bfcl_spec(
         top_p=float(_generation_value(generation, defaults, "top_p", 1.0)),
         top_k=int(_generation_value(generation, defaults, "top_k", -1)),
         seed=generation.get("seed"),
+        enable_thinking=generation.get("enable_thinking"),
         num_repeats=_resolve_num_repeats(resolved, output_dir),
         verbose=bool(args.bfcl_verbose),
         allow_overwrite=bool(resolved["overwrite"]),

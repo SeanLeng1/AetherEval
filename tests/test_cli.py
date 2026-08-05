@@ -41,7 +41,7 @@ from benchmarks.bfcl.external import (
     run as run_bfcl_external,
     write_predictions_jsonl,
 )
-from benchmarks.bfcl.register import register_rlla_model
+from benchmarks.bfcl.register import prepare_bfcl_model
 
 
 class ExternalCliTests(unittest.TestCase):
@@ -208,6 +208,8 @@ class ExternalCliTests(unittest.TestCase):
                 "bfcl",
                 "--model",
                 "rlla-gdpo",
+                "--bfcl-handler",
+                "official",
                 "--backend",
                 "sglang",
                 "--output-dir",
@@ -228,6 +230,7 @@ class ExternalCliTests(unittest.TestCase):
                 "50",
                 "--seed",
                 "123",
+                "--no-enable-thinking",
                 "--num-threads",
                 "8",
                 "--num-repeats",
@@ -241,6 +244,7 @@ class ExternalCliTests(unittest.TestCase):
         resolved = resolve_run_arguments(args, {})
         spec = build_bfcl_spec(args, resolved, Path(args.output_dir))
 
+        self.assertEqual(spec.handler, "official")
         self.assertEqual(spec.categories, ["non_live", "live"])
         self.assertEqual(spec.num_gpus, 4)
         self.assertEqual(spec.dp_size, 1)
@@ -252,6 +256,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.top_p, 0.9)
         self.assertEqual(spec.top_k, 50)
         self.assertEqual(spec.seed, 123)
+        self.assertIs(spec.enable_thinking, False)
         self.assertEqual(spec.num_repeats, 2)
         self.assertTrue(spec.verbose)
         self.assertFalse(spec.allow_overwrite)
@@ -268,6 +273,7 @@ class ExternalCliTests(unittest.TestCase):
             "benchmarks.bfcl.cli.resolve_task_default_gen",
             return_value={
                 "n": 1,
+                "handler": "official",
                 "max_new_tokens": 1234,
                 "temperature": 0.25,
                 "top_p": 0.8,
@@ -277,6 +283,7 @@ class ExternalCliTests(unittest.TestCase):
             spec = build_bfcl_spec(args, resolved, Path("outputs"))
 
         self.assertEqual(spec.max_tokens, 1234)
+        self.assertEqual(spec.handler, "official")
         self.assertEqual(spec.temperature, 0.25)
         self.assertEqual(spec.top_p, 0.8)
         self.assertEqual(spec.top_k, 17)
@@ -292,6 +299,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.top_k, configured["top_k"])
         self.assertEqual(spec.num_repeats, resolve_task_num_repeats("bfcl"))
         self.assertEqual(spec.categories, ["live", "non_live", "multi_turn"])
+        self.assertEqual(spec.handler, "toolrl")
 
     def test_bfcl_external_spec_supports_unified_phase_flags(self) -> None:
         generate_args = build_parser().parse_args(
@@ -373,7 +381,7 @@ class ExternalCliTests(unittest.TestCase):
             observed["args"] = args
             observed["host"] = os.environ.get("LOCAL_SERVER_ENDPOINT")
             observed["port"] = os.environ.get("LOCAL_SERVER_PORT")
-            observed["generate_url"] = os.environ.get("RLLA_BFCL_GENERATE_URL")
+            observed["generate_url"] = os.environ.get("AETHEREVAL_BFCL_GENERATE_URL")
 
         with (
             mock.patch(
@@ -389,7 +397,7 @@ class ExternalCliTests(unittest.TestCase):
                 {
                     "LOCAL_SERVER_ENDPOINT": "old-host",
                     "LOCAL_SERVER_PORT": "1234",
-                    "RLLA_BFCL_GENERATE_URL": "http://old/generate",
+                    "AETHEREVAL_BFCL_GENERATE_URL": "http://old/generate",
                 },
             ),
         ):
@@ -397,7 +405,7 @@ class ExternalCliTests(unittest.TestCase):
             self.assertEqual(os.environ["LOCAL_SERVER_ENDPOINT"], "old-host")
             self.assertEqual(os.environ["LOCAL_SERVER_PORT"], "1234")
             self.assertEqual(
-                os.environ["RLLA_BFCL_GENERATE_URL"],
+                os.environ["AETHEREVAL_BFCL_GENERATE_URL"],
                 "http://old/generate",
             )
 
@@ -432,7 +440,7 @@ class ExternalCliTests(unittest.TestCase):
         observed = []
 
         def generation_main(args):  # noqa: ANN001
-            observed.append((args.result_dir, os.environ.get("RLLA_BFCL_SEED")))
+            observed.append((args.result_dir, os.environ.get("AETHEREVAL_BFCL_SEED")))
 
         with (
             mock.patch(
@@ -504,7 +512,7 @@ class ExternalCliTests(unittest.TestCase):
         }
         with (
             TemporaryDirectory() as tmp,
-            mock.patch("benchmarks.bfcl.external.register_rlla_model"),
+            mock.patch("benchmarks.bfcl.external.prepare_bfcl_model"),
             mock.patch("bfcl_eval.eval_checker.eval_runner.main") as evaluation_main,
             mock.patch(
                 "benchmarks.bfcl.external.parse_scores",
@@ -535,6 +543,34 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(summary["repeat_seeds"], [0, 1, 2, 3])
         self.assertEqual(len(summary["repeats"]), 4)
         self.assertEqual(summary["metrics"]["live_acc"], 73.0)
+        self.assertEqual(summary["handler"], "toolrl")
+
+    def test_bfcl_official_handler_omits_toolrl_format_metrics(self) -> None:
+        with (
+            TemporaryDirectory() as tmp,
+            mock.patch("benchmarks.bfcl.external.prepare_bfcl_model"),
+            mock.patch("bfcl_eval.eval_checker.eval_runner.main"),
+            mock.patch(
+                "benchmarks.bfcl.external.parse_scores",
+                return_value={"overall_acc": 42.0},
+            ),
+            mock.patch(
+                "benchmarks.bfcl.external.compute_format_rates"
+            ) as compute_format,
+        ):
+            result = run_bfcl_external(
+                ExternalRunSpec(
+                    model="google/gemma-3-12b-it",
+                    output_dir=Path(tmp),
+                    handler="official",
+                    num_repeats=1,
+                    run_generation=False,
+                    run_evaluation=True,
+                )
+            )
+
+        self.assertEqual(result.metrics, {"overall_acc": 42.0})
+        compute_format.assert_not_called()
 
     def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
         args = build_parser().parse_args(
@@ -635,7 +671,7 @@ class ExternalCliTests(unittest.TestCase):
     def test_bfcl_registry_handles_slashes_and_underscores(self) -> None:
         model = "/scratch/checkpoints/my_model_v2"
         with TemporaryDirectory() as tmp:
-            register_rlla_model(model, project_root=tmp)
+            prepare_bfcl_model(model, project_root=tmp)
 
         from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING
 
@@ -644,6 +680,33 @@ class ExternalCliTests(unittest.TestCase):
         evaluator_key = model.replace("/", "_").replace("_", "/")
         self.assertIs(MODEL_CONFIG_MAPPING[model], MODEL_CONFIG_MAPPING[evaluator_key])
         self.assertEqual(MODEL_CONFIG_MAPPING[model].model_name, model)
+
+    def test_bfcl_official_profile_wraps_registered_prompt_handler(self) -> None:
+        from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING
+
+        model = "google/gemma-3-12b-it"
+        original = MODEL_CONFIG_MAPPING[model]
+        try:
+            with TemporaryDirectory() as tmp:
+                prepare_bfcl_model(
+                    model,
+                    handler_profile="official",
+                    project_root=tmp,
+                )
+            adapted = MODEL_CONFIG_MAPPING[model]
+            self.assertTrue(adapted.model_handler._aethereval_official_adapter)
+            self.assertTrue(issubclass(adapted.model_handler, original.model_handler))
+        finally:
+            MODEL_CONFIG_MAPPING[model] = original
+
+    def test_bfcl_official_profile_rejects_unregistered_checkpoint(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "exact prompt-mode model ID"):
+                prepare_bfcl_model(
+                    "/scratch/custom-gemma",
+                    handler_profile="official",
+                    project_root=tmp,
+                )
 
     def test_bfcl_predictions_jsonl_uses_aethereval_schema(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -685,6 +748,7 @@ class ExternalCliTests(unittest.TestCase):
                 result_dir=result_dir,
                 score_dir=score_dir,
                 model="dry-model",
+                handler="toolrl",
             )
 
             predictions_path = out / "predictions.jsonl"
@@ -704,6 +768,7 @@ class ExternalCliTests(unittest.TestCase):
             self.assertIsNone(rows[0]["gold"])
             self.assertIsNone(rows[0]["error"])
             self.assertEqual(rows[0]["meta"]["benchmark"], "bfcl")
+            self.assertEqual(rows[0]["meta"]["handler"], "toolrl")
             self.assertEqual(rows[0]["meta"]["test_category"], "simple")
             self.assertEqual(rows[0]["meta"]["evaluation_repeat"], 1)
             self.assertFalse(rows[1]["is_pass"])

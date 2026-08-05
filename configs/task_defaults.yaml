@@ -106,6 +106,7 @@ apibank:
 
 bfcl:
   # ToolRL reports BFCL V3 as the mean of four independent evaluation runs.
+  handler: toolrl
   n: 1
   num_repeats: 4
   categories:

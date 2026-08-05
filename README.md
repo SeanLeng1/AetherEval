@@ -451,6 +451,10 @@ steps require `<tool_call>` and terminate with `<response>`. It runs four indepe
 repetitions by default (`--num-repeats 1` for a quick single run) and reports their
 mean. BFCL keeps `n=1`; `--n` controls completions per prompt, not full benchmark
 repetitions. In V3 these three collections together are the full benchmark.
+The default `--bfcl-handler toolrl` accepts arbitrary ToolRL-trained checkpoints;
+`--bfcl-handler official` instead reuses an exact prompt-mode model registration from
+the pinned BFCL package and reports official accuracy metrics without ToolRL format
+columns.
 
 External runs use the regular `aethereval` CLI for shared runtime flags
 (`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
