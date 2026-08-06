@@ -272,6 +272,10 @@ OpenAI-compatible chat-completions endpoint only for judging:
 
 - `llmeval_med` — 667 items, multi-turn generation, GPT-4o judge, primary `OP`.
 - `healthbench` — 5,000 items, GPT-4.1 judge, primary rubric `score`.
+- `rar-medical` — official ScaleAI RaR-Medicine test split, Gemma-4 judge,
+  primary weighted rubric `score`.
+- `rar-science` — official ScaleAI RaR-Science test split, Gemma-4 judge,
+  primary weighted rubric `score`.
 - `writingbench` — 1,000 items, Claude Sonnet 4.5 judge, primary `overall_score`.
 - `creative_writing_v3` — 96 pieces, Claude Sonnet 4.6 judge, primary
   `eqbench_creative_score`.
@@ -289,6 +293,8 @@ remain separate from candidate generation settings.
 | --- | ---: | ---: | ---: |
 | `llmeval_med` | 1.0 | 1.0 | 4096 |
 | `healthbench` | 0.5 | 1.0 | 2048 |
+| `rar-medical` | 1.0 | 1.0 | 4096 |
+| `rar-science` | 1.0 | 1.0 | 4096 |
 | `writingbench` | 1.0 | 0.95 | 2048 |
 | `creative_writing_v3` | 0.0 | 1.0 | 4096 |
 | `researchqa` | 0.0 | 1.0 | 4096 |

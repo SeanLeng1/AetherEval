@@ -142,6 +142,30 @@ healthbench:
     judge_top_p: 1.0
     judge_max_new_tokens: 2048
 
+rar-medical:
+  n: 1
+  max_new_tokens: 8192
+  temperature: 0.0
+  top_p: 0.7
+  metrics:
+    judge_model: google/gemma-4-26B-A4B-it
+    judge_temperature: 1.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
+    judge_enable_thinking: false
+
+rar-science:
+  n: 1
+  max_new_tokens: 8192
+  temperature: 0.0
+  top_p: 0.7
+  metrics:
+    judge_model: google/gemma-4-26B-A4B-it
+    judge_temperature: 1.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
+    judge_enable_thinking: false
+
 writingbench:
   n: 1
   max_new_tokens: 8192
