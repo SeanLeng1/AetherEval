@@ -99,7 +99,7 @@ zebralogic:
 
 apibank:
   n: 1
-  num_repeats: 4
+  num_repeats: 1
   max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
@@ -108,13 +108,13 @@ bfcl:
   # ToolRL reports BFCL V3 as the mean of four independent evaluation runs.
   handler: toolrl
   n: 1
-  num_repeats: 4
+  num_repeats: 1
   categories:
     - live
     - non_live
     - multi_turn
   max_new_tokens: 4096
-  temperature: 0.001
+  temperature: 0.0
   top_p: 1.0
   top_k: -1
 
