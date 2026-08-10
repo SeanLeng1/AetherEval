@@ -888,6 +888,19 @@ class ExternalCliTests(unittest.TestCase):
                         "Multi Turn Acc": "0.25%",
                     }
                 )
+            # BFCL also writes one CSV per section; their "Overall" columns are
+            # what the published comparison tables report.
+            for filename, column, value in (
+                ("data_non_live.csv", "Non_Live Overall Acc", "45.24%"),
+                ("data_live.csv", "Live Overall Acc", "69.23%"),
+                ("data_multi_turn.csv", "Multi Turn Overall Acc", "3.14%"),
+            ):
+                with (score_dir / filename).open(
+                    "w", encoding="utf-8", newline=""
+                ) as f:
+                    writer = csv.DictWriter(f, fieldnames=["Model", column])
+                    writer.writeheader()
+                    writer.writerow({"Model": "dry-model", column: value})
 
             metrics = parse_scores(score_dir)
 
@@ -905,6 +918,12 @@ class ExternalCliTests(unittest.TestCase):
             self.assertEqual(metrics["multi_turn_format"], 57.4)
             self.assertEqual(metrics["overall_format"], 76.65)
 
+            # Section "Overall" scores and their unweighted mean (paper Avg Acc).
+            self.assertEqual(metrics["non_live_overall_acc"], 45.24)
+            self.assertEqual(metrics["live_overall_acc"], 69.23)
+            self.assertEqual(metrics["multi_turn_overall_acc"], 3.14)
+            self.assertEqual(metrics["avg_acc"], 39.20)
+
             self.assertEqual(
                 set(metrics),
                 {
@@ -912,6 +931,10 @@ class ExternalCliTests(unittest.TestCase):
                     "non_live_acc",
                     "live_acc",
                     "multi_turn_acc",
+                    "non_live_overall_acc",
+                    "live_overall_acc",
+                    "multi_turn_overall_acc",
+                    "avg_acc",
                     "live_format",
                     "non_live_format",
                     "multi_turn_format",

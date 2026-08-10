@@ -549,29 +549,67 @@ def average_repeat_metrics(repeats: list[dict[str, float]]) -> dict[str, float]:
     return averaged
 
 
-def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
-    """Parse BFCL V3's official leaderboard CSV into the four report scores."""
-    csv_path = score_dir / "data_overall.csv"
+# BFCL writes one summary CSV plus one CSV per section. ``data_overall.csv``
+# carries the AST-only non-live score; the per-section files carry the section
+# "Overall" scores (non-live folds in irrelevance/executable), which is what the
+# GDPO paper's table reports. Parse both so either convention is available.
+_SECTION_CSVS = {
+    "data_non_live.csv": ("non_live_overall_acc", ("Non_Live Overall Acc",)),
+    "data_live.csv": ("live_overall_acc", ("Live Overall Acc",)),
+    "data_multi_turn.csv": ("multi_turn_overall_acc", ("Multi Turn Overall Acc",)),
+}
+
+
+def _csv_row(csv_path: Path) -> dict | None:
     if not csv_path.exists():
         return None
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
-    if not rows:
+    return rows[0] if rows else None  # single registered model
+
+
+def _column_pct(row: dict, *columns: str) -> float | None:
+    value = None
+    for column in columns:
+        value = row.get(column)
+        if value is not None:
+            break
+    if value is None:
         return None
-    row = rows[0]  # single registered model
+    try:
+        return float(str(value).replace("%", "").strip())
+    except ValueError:
+        return None  # "N/A" (category not run)
+
+
+def _read_section_csvs(score_dir: Path) -> dict[str, float]:
+    """Section "Overall" scores plus their unweighted mean (the paper's Avg Acc)."""
+    out: dict[str, float] = {}
+    for filename, (metric, columns) in _SECTION_CSVS.items():
+        row = _csv_row(score_dir / filename)
+        if row is None:
+            raise RuntimeError(
+                f"BFCL evaluation did not write {score_dir / filename}; the "
+                "section scores the published tables report are unavailable"
+            )
+        value = _column_pct(row, *columns)
+        if value is not None:
+            out[metric] = value
+    section_keys = [metric for metric, _ in _SECTION_CSVS.values()]
+    if all(key in out for key in section_keys):
+        out["avg_acc"] = round(sum(out[key] for key in section_keys) / 3, 2)
+    return out
+
+
+def _read_overall_csv(score_dir: Path) -> dict[str, float] | None:
+    """Parse BFCL V3's official leaderboard CSV into the four report scores."""
+    csv_path = score_dir / "data_overall.csv"
+    row = _csv_row(csv_path)
+    if row is None:
+        return None
 
     def pct(*columns: str) -> float | None:
-        value = None
-        for column in columns:
-            value = row.get(column)
-            if value is not None:
-                break
-        if value is None:
-            return None
-        try:
-            return float(str(value).replace("%", "").strip())
-        except ValueError:
-            return None  # "N/A" (category not run)
+        return _column_pct(row, *columns)
 
     report_mapping = {
         "overall_acc": ("Overall Acc",),
@@ -596,6 +634,7 @@ def parse_scores(score_dir: Path) -> dict[str, float]:
             "BFCL evaluation did not produce a parseable official report at "
             f"{score_dir / 'data_overall.csv'}."
         )
+    metrics.update(_read_section_csvs(score_dir))
     _add_overall_metrics(metrics)
     return metrics
 
