@@ -47,6 +47,9 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("humaneval_plus", tasks)
         self.assertIn("zebralogic", tasks)
         self.assertIn("livecodebench", tasks)
+        self.assertIn("qampari_oracle5", tasks)
+        self.assertIn("nq_open", tasks)
+        self.assertIn("triviaqa_unfiltered", tasks)
 
     def test_contract_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +123,9 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertNotIn("metrics", defaults["healthbench"])
         self.assertNotIn("judge_model", defaults["healthbench"])
         self.assertIn("max_new_tokens", defaults["livecodebench"])
+        self.assertEqual(defaults["qampari_oracle5"]["n"], 1)
+        self.assertEqual(defaults["nq_open"]["n"], 1)
+        self.assertEqual(defaults["triviaqa_unfiltered"]["n"], 1)
 
     def test_instruction_following_primary_metrics(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

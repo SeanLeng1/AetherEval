@@ -265,6 +265,28 @@ under `safe_alignment.metrics` in `configs/task_defaults.yaml`.
 Optional RM metric flags include `--rm-max-length`, `--rm-dtype`,
 `--rm-trust-remote-code`, and repeated `--rm-sglang-arg KEY=VALUE` overrides.
 
+## Open-QA Benchmarks
+
+The following tasks use deterministic short-answer generation (`n=1`, temperature
+zero) and local alias-normalized scoring:
+
+- `qampari_oracle5` — 962 usable official QAMPARI test questions, each with five
+  answer-supported proof passages; primary `qampari_f1_top5`. This is a reader-only
+  Oracle-5 setting and must not be reported as full retrieval-based QAMPARI.
+- `nq_open` — the 3,610-example public NQ-Open development split; primary normalized
+  exact match. The original test labels are not public.
+- `triviaqa_unfiltered` — the 11,313-example public `unfiltered.nocontext`
+  validation split; primary normalized exact match.
+
+```bash
+aethereval \
+  --model /path/to/policy \
+  --tasks qampari_oracle5,nq_open,triviaqa_unfiltered \
+  --output-dir outputs
+```
+
+Each task directory includes a preparation script and its exact split/metric notes.
+
 ## Native LLM-Judge Benchmarks
 
 These benchmarks use the regular offline backend for candidate generation and an

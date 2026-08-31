@@ -203,6 +203,24 @@ researchqa:
     # Upstream omits the limit; at most eight one-word labels are requested.
     judge_max_new_tokens: 4096
 
+qampari_oracle5:
+  n: 1
+  max_new_tokens: 128
+  temperature: 0.0
+  top_p: 1.0
+
+nq_open:
+  n: 1
+  max_new_tokens: 64
+  temperature: 0.0
+  top_p: 1.0
+
+triviaqa_unfiltered:
+  n: 1
+  max_new_tokens: 64
+  temperature: 0.0
+  top_p: 1.0
+
 arena_hard_v2:
   n: 1
   max_new_tokens: 8192
