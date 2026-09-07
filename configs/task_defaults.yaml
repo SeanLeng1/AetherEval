@@ -56,10 +56,13 @@ safe-alignment:
     cm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-CM
 
 safe-alignment-dynamic:
-  n: 1
+  n: 4
   max_new_tokens: 1024
-  temperature: 0.0
+  temperature: 0.7
   top_p: 1.0
+  metrics:
+    rm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-RM
+    cm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-CM
 
 gpqa-diamond:
   n: 32

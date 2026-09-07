@@ -82,13 +82,14 @@ aethereval \
   --output-dir outputs
 ```
 
-Defaults in `configs/task_defaults.yaml`: greedy `n=1`, at most 1024 new tokens. To measure sampling variability,
-use e.g. `--n 4 --temperature 1.0`, identically for every model. All four responses
-then share the same `(problem, weight)`. Use the saved SFT tokenizer/template;
+Defaults in `configs/task_defaults.yaml` match static safe alignment: `n=4`,
+temperature `0.7`, top-p `1.0`, at most 1024 new tokens. All four responses share
+the same `(problem, weight)` and are averaged before averaging across problems.
+Use identical sampling settings for every model. Use the saved SFT tokenizer/template;
 when comparing a base model, explicitly use the same template. Keep generation
 limits, sampling, model/RM precision and scorer checkpoints fixed.
 
-RM and CM default to the repositories in the frozen training calibration. Local
+RM and CM paths default to `configs/task_defaults.yaml`, not the protocol. Local
 paths to the **same converted weights** can be supplied via `--rm-model-path` and
 `--cm-model-path`. The +1 CM convention is retained, not interpreted as a certified
 safety label. Default right truncation is the training RM limit (2048 tokens).

@@ -5,6 +5,8 @@ from importlib import import_module
 
 import numpy as np
 
+from aethereval.core.task_defaults import resolve_task_default_metrics
+
 fixed = import_module("benchmarks.safe-alignment.metrics")
 build_prompt = import_module("benchmarks.safe-alignment-dynamic.task").build_prompt
 protocol_hash = import_module("benchmarks.safe-alignment-dynamic.task").protocol_hash
@@ -29,9 +31,7 @@ def score_generations_batch(samples, generation_outputs, metric_options=None):
     calibration = artifact["calibration"]
     if calibration["cm_sign"] != 1:
         raise ValueError("CM sign differs from the +1 scoring contract")
-    options = dict(metric_options or {})
-    options.setdefault("rm_model_path", calibration["models"]["useful"]["repo"])
-    options.setdefault("cm_model_path", calibration["models"]["harmless"]["repo"])
+    options = resolve_task_default_metrics("safe-alignment-dynamic", metric_options)
     options.setdefault("rm_max_length", calibration["max_length"])
     results = fixed.score_generations_batch(samples, generation_outputs, options)
     for sample, output, records in zip(

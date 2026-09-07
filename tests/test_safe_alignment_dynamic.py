@@ -116,8 +116,12 @@ class DynamicAlignmentTests(unittest.TestCase):
         bundle = load_task("safe_alignment_dynamic")
         self.assertEqual(bundle.metrics_module.PRIMARY_METRIC, "overall/utility")
         self.assertEqual(bundle.task_module.DEFAULT_GEN["max_new_tokens"], 1024)
-        self.assertEqual(bundle.task_module.DEFAULT_GEN["temperature"], 0.0)
-        self.assertEqual(bundle.task_module.DEFAULT_GEN["n"], 1)
+        self.assertEqual(bundle.task_module.DEFAULT_GEN["temperature"], 0.7)
+        self.assertEqual(bundle.task_module.DEFAULT_GEN["n"], 4)
+        self.assertEqual(
+            bundle.task_module.DEFAULT_GEN,
+            load_task("safe-alignment").task_module.DEFAULT_GEN,
+        )
 
     def test_full_runner_generation_scoring_and_resume(self):
         from aethereval.core.runner import _run_single_task
@@ -155,7 +159,7 @@ class DynamicAlignmentTests(unittest.TestCase):
             backend=backend,
             task_output_dir=self.root / "run",
             gen_overrides={},
-            metric_options={},
+            metric_options={"rm_model_path": "rm", "cm_model_path": "cm"},
             overwrite=False,
             run_config_common={},
             tokenizer_getter=lambda: None,
@@ -169,6 +173,8 @@ class DynamicAlignmentTests(unittest.TestCase):
         kwargs.update(eval_only=False)
         second = _run_single_task(**kwargs)
         self.assertEqual(backend.calls, 1)
+        self.assertEqual(first["n"], 4)
+        self.assertEqual(first["total_records"], len(self.samples) * 4)
         self.assertTrue(first["evaluation_complete"])
         self.assertEqual(first["primary_score"], 1.5)
         self.assertEqual(second["primary_score"], first["primary_score"])
@@ -295,11 +301,31 @@ class DynamicAlignmentTests(unittest.TestCase):
         sample = self.samples[1]
         output = GenerationOutput(sample.id, task.build_prompt(sample), ["one", "two"])
         results = metrics.score_generations_batch(
-            [sample], [output], {"_backend": Backend()}
+            [sample],
+            [output],
+            {"_backend": Backend(), "rm_model_path": "rm", "cm_model_path": "cm"},
         )
         self.assertEqual([r["score"] for r in results[0]], [1.5, 2.5])
         self.assertEqual(results[0][0]["meta"]["helpful"], 12.0)
         self.assertEqual(results[0][0]["meta"]["helpful_z"], 1.0)
+
+    def test_rm_paths_use_task_defaults_not_protocol(self):
+        from aethereval.core.task_defaults import resolve_task_default_metrics
+
+        sample = self.samples[0]
+        output = GenerationOutput(sample.id, task.build_prompt(sample), ["answer"])
+        defaults = resolve_task_default_metrics("safe-alignment-dynamic")
+        with mock.patch.object(
+            metrics.fixed,
+            "score_generations_batch",
+            return_value=[[{"meta": {"helpful": 12.0, "harmless": 5.0}}]],
+        ) as scorer:
+            metrics.score_generations_batch([sample], [output])
+        options = scorer.call_args.args[2]
+        self.assertEqual(options["rm_model_path"], defaults["rm_model_path"])
+        self.assertEqual(options["cm_model_path"], defaults["cm_model_path"])
+        self.assertNotEqual(options["rm_model_path"], "rm")
+        self.assertNotEqual(options["cm_model_path"], "cm")
 
     def test_matching_gain_and_cross_matrix(self):
         rows = result_rows(self.samples, [[0, 2], [1, 1], [2, 0], [1, 1]])
@@ -330,6 +356,21 @@ class DynamicAlignmentTests(unittest.TestCase):
             ],
             0,
         )
+
+    def test_four_different_generations_are_averaged_before_aggregation(self):
+        rows = result_rows(self.samples, [[0, 2], [1, 1], [2, 0], [1, 1]])
+        expected = metrics.aggregate(rows, {"_protocol": protocol()})
+        for row in rows:
+            original = row["records"][0]
+            row["records"] = []
+            for index, delta in enumerate([-3, -1, 1, 3]):
+                record = copy.deepcopy(original)
+                record["gen_idx"] = index
+                for key in ("helpful_z", "harmless_z", "helpful", "harmless"):
+                    record["meta"][key] += delta
+                row["records"].append(record)
+        actual = metrics.aggregate(rows, {"_protocol": protocol()})
+        self.assertEqual(actual, expected)
 
     def test_repeats_and_source_size_do_not_change_weights(self):
         rows = result_rows(self.samples, [[1, 1]] * 4)
