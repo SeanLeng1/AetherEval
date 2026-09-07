@@ -535,7 +535,8 @@ class SGLangService:
                 submit_next()
             while futures:
                 completed, _ = wait(futures, timeout=10, return_when=FIRST_COMPLETED)
-                progress.refresh()
+                if not completed:
+                    progress.refresh()
                 for future in completed:
                     results[futures.pop(future)] = future.result()
                     progress.update()
