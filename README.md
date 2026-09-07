@@ -120,7 +120,7 @@ aethereval \
   --backend sglang \
   --model /path/to/candidate \
   --model-name candidate \
-  --tasks llmeval_med,healthbench,writingbench,creative_writing_v3,researchqa,arena_hard_v2 \
+  --tasks llmeval-med,healthbench,writingbench,creative_writing_v3,researchqa,arena_hard_v2 \
   --output-dir /output \
   --run-id production-1 \
   --dp-size 8 \
@@ -141,7 +141,7 @@ export AETHEREVAL_JUDGE_BASE_URL=https://api.openai.com/v1
 aethereval \
   --model /path/to/candidate \
   --model-name candidate \
-  --tasks llmeval_med,healthbench,researchqa,arena_hard_v2 \
+  --tasks llmeval-med,healthbench,researchqa,arena_hard_v2 \
   --output-dir /output \
   --run-id production-1 \
   --eval-only
@@ -155,7 +155,7 @@ for the selected tasks. Both modes can also be set as `run.generate_only` or
 `run.eval_only` in YAML. BFCL maps these flags to its existing generation and
 evaluation phases as well.
 
-`safe_alignment` also supports this split. In eval-only mode it starts
+`safe-alignment` also supports this split. In eval-only mode it starts
 Ray-managed SGLang sequence-classification servers over the requested
 `dp_size * tp_size` topology and loads only the RM/CM models. RM and CM run
 sequentially so each receives the complete GPU budget; the candidate model is
@@ -195,7 +195,7 @@ CLI has higher priority than YAML.
 ```bash
 aethereval \
   --model Qwen/Qwen3-0.6B-Base \
-  --tasks gpqa_diamond \
+  --tasks gpqa-diamond \
   --inspect
 ```
 
@@ -245,6 +245,10 @@ Shared benchmark implementation code lives in `benchmark_utils/`, outside
 `benchmarks/`, so helper modules are not visually or programmatically mixed with
 task folders.
 
+Benchmark names in CLI, YAML and output JSON use hyphens (for example `gpqa-diamond`).
+Benchmark directories also use hyphens; legacy underscore CLI names resolve to
+canonical names. Existing output directories are not renamed.
+
 ## Reward-Model Metrics
 
 RM-based native tasks can receive reward model paths through shared metric flags:
@@ -252,36 +256,39 @@ RM-based native tasks can receive reward model paths through shared metric flags
 ```bash
 aethereval \
   --model /path/to/policy \
-  --tasks safe_alignment \
+  --tasks safe-alignment \
   --output-dir outputs
 ```
 
-`safe_alignment` defaults to the SGLang-compatible converted checkpoints
+`safe-alignment` defaults to the SGLang-compatible converted checkpoints
 `RLLab/Qwen2.5-7B-SafeRLHF-RM` and `RLLab/Qwen2.5-7B-SafeRLHF-CM`; pass
 `--rm-model-path` and `--cm-model-path`
 only when overriding with local checkpoints. These task-specific defaults live
-under `safe_alignment.metrics` in `configs/task_defaults.yaml`.
+under `safe-alignment.metrics` in `configs/task_defaults.yaml`.
 
 Optional RM metric flags include `--rm-max-length`, `--rm-dtype`,
 `--rm-trust-remote-code`, and repeated `--rm-sglang-arg KEY=VALUE` overrides.
+
+For score-conditioned SFT/RL checkpoints, the separate
+[`safe-alignment-dynamic`](benchmarks/safe-alignment-dynamic/README.md) task
+sweeps a frozen weight set on the same held-out problems. It reports utility and
+paired matching gains, and exports JSON for external reward-curve/cross-utility plotting. Prepare
+its HF data once before running; the original `safe-alignment` task is unchanged.
 
 ## Open-QA Benchmarks
 
 The following tasks use deterministic short-answer generation (`n=1`, temperature
 zero) and local alias-normalized scoring:
 
-- `qampari_oracle5` — 962 usable official QAMPARI test questions, each with five
-  answer-supported proof passages; primary `qampari_f1_top5`. This is a reader-only
-  Oracle-5 setting and must not be reported as full retrieval-based QAMPARI.
-- `nq_open` — the 3,610-example public NQ-Open development split; primary normalized
+- `nq-open` — the 3,610-example public NQ-Open development split; primary normalized
   exact match. The original test labels are not public.
-- `triviaqa_unfiltered` — the 11,313-example public `unfiltered.nocontext`
+- `triviaqa` — the 11,313-example public `unfiltered.nocontext`
   validation split; primary normalized exact match.
 
 ```bash
 aethereval \
   --model /path/to/policy \
-  --tasks qampari_oracle5,nq_open,triviaqa_unfiltered \
+  --tasks nq-open,triviaqa \
   --output-dir outputs
 ```
 
@@ -292,17 +299,17 @@ Each task directory includes a preparation script and its exact split/metric not
 These benchmarks use the regular offline backend for candidate generation and an
 OpenAI-compatible chat-completions endpoint only for judging:
 
-- `llmeval_med` — 667 items, multi-turn generation, GPT-4o judge, primary `OP`.
+- `llmeval-med` — 667 items, multi-turn generation, GPT-4o judge, primary `OP`.
 - `healthbench` — 5,000 items, GPT-4.1 judge, primary rubric `score`.
 - `rar-medical` — official ScaleAI RaR-Medicine test split, Gemma-4 judge,
   primary weighted rubric `score`.
 - `rar-science` — official ScaleAI RaR-Science test split, Gemma-4 judge,
   primary weighted rubric `score`.
 - `writingbench` — 1,000 items, Claude Sonnet 4.5 judge, primary `overall_score`.
-- `creative_writing_v3` — 96 pieces, Claude Sonnet 4.6 judge, primary
+- `creative-writing-v3` — 96 pieces, Claude Sonnet 4.6 judge, primary
   `eqbench_creative_score`.
 - `researchqa` — 3,750 items, GPT-4.1-mini judge, primary rubric `coverage`.
-- `arena_hard_v2` — 500 hard prompts, GPT-4.1 judge, primary
+- `arena-hard-v2` — 500 hard prompts, GPT-4.1 judge, primary
   `style_controlled_win_rate`.
 
 The aligned per-task judge model and sampling defaults live under each task's
@@ -313,14 +320,14 @@ remain separate from candidate generation settings.
 
 | Task | Judge temperature | Judge top-p | Judge max new tokens |
 | --- | ---: | ---: | ---: |
-| `llmeval_med` | 1.0 | 1.0 | 4096 |
+| `llmeval-med` | 1.0 | 1.0 | 4096 |
 | `healthbench` | 0.5 | 1.0 | 2048 |
 | `rar-medical` | 1.0 | 1.0 | 4096 |
 | `rar-science` | 1.0 | 1.0 | 4096 |
 | `writingbench` | 1.0 | 0.95 | 2048 |
-| `creative_writing_v3` | 0.0 | 1.0 | 4096 |
+| `creative-writing-v3` | 0.0 | 1.0 | 4096 |
 | `researchqa` | 0.0 | 1.0 | 4096 |
-| `arena_hard_v2` | 0.0 | 1.0 | 16000 |
+| `arena-hard-v2` | 0.0 | 1.0 | 16000 |
 
 Upstream LLMEval-Med omits temperature/top-p, and several other upstreams omit
 top-p. AetherEval pins those conventional unfiltered values to `1.0` so API and

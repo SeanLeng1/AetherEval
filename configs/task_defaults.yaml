@@ -1,4 +1,4 @@
-agieval_en:
+agieval-en:
   n: 1
   max_new_tokens: 4096
   temperature: 0.0
@@ -40,13 +40,13 @@ minerva:
   temperature: 1.0
   top_p: 0.7
 
-olympiad_bench:
+olympiad-bench:
   n: 16
   max_new_tokens: 32768
   temperature: 1.0
   top_p: 0.7
 
-safe_alignment:
+safe-alignment:
   n: 4
   max_new_tokens: 1024
   temperature: 0.7
@@ -55,13 +55,19 @@ safe_alignment:
     rm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-RM
     cm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-CM
 
-gpqa_diamond:
+safe-alignment-dynamic:
+  n: 1
+  max_new_tokens: 1024
+  temperature: 0.0
+  top_p: 1.0
+
+gpqa-diamond:
   n: 32
   max_new_tokens: 32768
   temperature: 1.0
   top_p: 0.7
 
-humaneval_plus:
+humaneval-plus:
   n: 10
   max_new_tokens: 4096
   temperature: 0.6
@@ -85,7 +91,7 @@ livecodebench:
   temperature: 0.6
   top_p: 0.95
 
-mmlu_pro:
+mmlu-pro:
   n: 1
   max_new_tokens: 4096
   temperature: 0.0
@@ -118,7 +124,7 @@ bfcl:
   top_p: 1.0
   top_k: -1
 
-llmeval_med:
+llmeval-med:
   n: 1
   max_new_tokens: 2048
   temperature: 1.0
@@ -178,7 +184,7 @@ writingbench:
     judge_top_p: 0.95
     judge_max_new_tokens: 2048
 
-creative_writing_v3:
+creative-writing-v3:
   n: 1
   max_new_tokens: 12000
   temperature: 0.7
@@ -203,25 +209,19 @@ researchqa:
     # Upstream omits the limit; at most eight one-word labels are requested.
     judge_max_new_tokens: 4096
 
-qampari_oracle5:
-  n: 1
-  max_new_tokens: 128
-  temperature: 0.0
-  top_p: 1.0
-
-nq_open:
+nq-open:
   n: 1
   max_new_tokens: 64
   temperature: 0.0
   top_p: 1.0
 
-triviaqa_unfiltered:
+triviaqa:
   n: 1
   max_new_tokens: 64
   temperature: 0.0
   top_p: 1.0
 
-arena_hard_v2:
+arena-hard-v2:
   n: 1
   max_new_tokens: 8192
   temperature: 0.0

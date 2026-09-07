@@ -5,9 +5,7 @@ from benchmark_utils.open_qa import (
     aggregate_open_qa,
     normalize_answer,
     score_open_qa,
-    score_qampari,
 )
-from benchmarks.qampari_oracle5.prepare_data import _proof_passages
 
 
 class OpenQAMetricTests(unittest.TestCase):
@@ -22,36 +20,6 @@ class OpenQAMetricTests(unittest.TestCase):
         result = score_open_qa(sample, "Some reasoning.\nFinal answer: Paris")
         self.assertEqual(result["score"], 0.0)
         self.assertEqual(score_open_qa(sample, "Paris")["score"], 1.0)
-
-    def test_qampari_proofs_skip_comma_only_answers(self) -> None:
-        def answer(text: str) -> dict:
-            return {
-                "answer_text": text,
-                "aliases": [],
-                "proof": [{"proof_text": f"Proof for {text}"}],
-            }
-
-        row = {
-            "answer_list": [
-                answer("History of the World, Part I"),
-                *(answer(f"Safe {index}") for index in range(5)),
-            ]
-        }
-        passages = _proof_passages(row)
-        self.assertEqual(len(passages), 5)
-        self.assertNotIn("Proof for History of the World, Part I", passages)
-
-    def test_qampari_top_five_metrics(self) -> None:
-        sample = Sample(
-            id="q",
-            gold=[["Alpha"], ["Beta"], ["Gamma"], ["Delta"], ["Epsilon"], ["Zeta"]],
-        )
-        result = score_qampari(sample, "Alpha, beta, wrong, Gamma, Delta")
-        parsed = result["parsed"]
-        self.assertEqual(parsed["precision"], 0.8)
-        self.assertEqual(parsed["recall"], 4 / 6)
-        self.assertEqual(parsed["recall_at_5"], 0.8)
-        self.assertAlmostEqual(parsed["f1_at_5"], 0.8)
 
     def test_open_qa_aggregate_averages_per_sample(self) -> None:
         records = [

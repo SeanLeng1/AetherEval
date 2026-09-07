@@ -4,11 +4,10 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
-from aethereval.core.types import GenerationRecord, Sample
+from aethereval.core.types import Sample
 from aethereval.metrics.common import mean, mean_stderr, to_records
 
 _ARTICLES = re.compile(r"\b(a|an|the)\b", flags=re.IGNORECASE)
-_CITATION = re.compile(r"\[\s*\d+(?:\s*,\s*\d+)*\s*\]")
 
 
 def normalize_answer(text: str) -> str:
@@ -112,111 +111,4 @@ def aggregate_open_qa(
         "token_f1": mean(token_f1_values),
         "token_f1_stderr": mean_stderr(token_f1_values),
         "parsed_rate": mean(parsed_values),
-    }
-
-
-def _qampari_groups(gold: Any) -> list[list[str]]:
-    if not isinstance(gold, Sequence) or isinstance(gold, (str, bytes)):
-        raise TypeError("QAMPARI gold must be a sequence of answer-alias groups")
-    groups: list[list[str]] = []
-    for raw_group in gold:
-        values = [raw_group] if isinstance(raw_group, str) else raw_group
-        if not isinstance(values, Sequence):
-            raise TypeError("Each QAMPARI answer group must be a string or sequence")
-        group = list(
-            dict.fromkeys(
-                normalized
-                for alias in values
-                if (normalized := normalize_answer(str(alias)))
-            )
-        )
-        if group:
-            groups.append(group)
-    if not groups:
-        raise ValueError("QAMPARI sample has no answer groups")
-    return groups
-
-
-def _harmonic_mean(left: float, right: float) -> float:
-    return 2.0 * left * right / (left + right) if left + right else 0.0
-
-
-def score_qampari(sample: Sample, generation: str) -> dict[str, Any]:
-    first_line = str(generation).strip().split("\n", maxsplit=1)[0]
-    first_line = _CITATION.sub("", first_line)
-    predictions = [
-        answer
-        for item in first_line.rstrip().rstrip(".").rstrip(",").split(",")
-        if (answer := normalize_answer(item))
-    ]
-    groups = _qampari_groups(sample.gold)
-    aliases = {alias for group in groups for alias in group}
-    correct_predictions = sum(prediction in aliases for prediction in predictions)
-    matched_answers = sum(
-        any(alias in predictions for alias in group) for group in groups
-    )
-    precision = correct_predictions / len(predictions) if predictions else 0.0
-    recall = matched_answers / len(groups)
-    recall_at_5 = min(5, matched_answers) / min(5, len(groups))
-    f1 = _harmonic_mean(precision, recall)
-    f1_at_5 = _harmonic_mean(precision, recall_at_5)
-    joint_satisfied = float(precision == 1.0 and recall_at_5 == 1.0)
-    return {
-        "score": f1_at_5,
-        "is_pass": bool(joint_satisfied),
-        "parsed": {
-            "predictions": predictions,
-            "precision": precision,
-            "recall": recall,
-            "recall_at_5": recall_at_5,
-            "f1": f1,
-            "f1_at_5": f1_at_5,
-            "matched_answers": float(matched_answers),
-            "num_predictions": float(len(predictions)),
-            "joint_satisfied": joint_satisfied,
-        },
-        "meta": {"num_predictions": len(predictions)},
-    }
-
-
-def _parsed_metric(record: GenerationRecord, key: str) -> float:
-    return (
-        float(record.parsed.get(key, 0.0)) if isinstance(record.parsed, dict) else 0.0
-    )
-
-
-def aggregate_qampari(
-    sample_results: list[dict[str, Any]],
-    metric_options: dict[str, Any] | None = None,
-) -> dict[str, float]:
-    del metric_options
-    keys = (
-        "precision",
-        "recall",
-        "recall_at_5",
-        "f1",
-        "f1_at_5",
-        "matched_answers",
-        "num_predictions",
-        "joint_satisfied",
-    )
-    values: dict[str, list[float]] = {key: [] for key in keys}
-    for item in sample_results:
-        records = to_records(item["records"])
-        if not records:
-            continue
-        for key in keys:
-            values[key].append(
-                mean([_parsed_metric(record, key) for record in records])
-            )
-    return {
-        "qampari_prec": mean(values["precision"]),
-        "qampari_rec": mean(values["recall"]),
-        "qampari_rec_top5": mean(values["recall_at_5"]),
-        "qampari_f1": mean(values["f1"]),
-        "qampari_f1_top5": mean(values["f1_at_5"]),
-        "qampari_f1_top5_stderr": mean_stderr(values["f1_at_5"]),
-        "matched_answers": mean(values["matched_answers"]),
-        "num_predictions": mean(values["num_predictions"]),
-        "joint_satisfied": mean(values["joint_satisfied"]),
     }

@@ -166,9 +166,7 @@ def _post_json(url: str, payload: dict[str, Any]) -> Any:
         method="POST",
     )
     try:
-        with _URL_OPENER.open(
-            request, timeout=_REQUEST_TIMEOUT_SECONDS
-        ) as response:
+        with _URL_OPENER.open(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
@@ -182,6 +180,7 @@ def _wait_until_ready(
     process: subprocess.Popen[Any] | None,
     endpoint: str = "/health",
     timeout: float = _STARTUP_TIMEOUT_SECONDS,
+    tokenizer_model: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
@@ -192,6 +191,12 @@ def _wait_until_ready(
             )
         try:
             _check_url(f"{base_url}{endpoint}", timeout=2.0)
+            # SMG marks workers healthy before asynchronous tokenizer registration finishes.
+            if tokenizer_model is not None:
+                with _URL_OPENER.open(f"{base_url}/v1/tokenizers", timeout=2.0) as response:
+                    tokenizers = json.loads(response.read())["tokenizers"]
+                if not any(item["name"] == tokenizer_model for item in tokenizers):
+                    raise RuntimeError(f"Tokenizer for {tokenizer_model!r} is not ready")
             return
         except Exception as exc:
             last_error = exc
@@ -333,12 +338,8 @@ class _SGLangServerActor:
             try:
                 _wait_for_port("127.0.0.1", port, process)
             except BaseException:
-                port_collision = (
-                    process.poll() is not None
-                    and (
-                        not _port_is_available(port)
-                        or not _port_is_available(nccl_port)
-                    )
+                port_collision = process.poll() is not None and (
+                    not _port_is_available(port) or not _port_is_available(nccl_port)
                 )
                 _stop_process(process)
                 self._process = None
@@ -382,8 +383,7 @@ class SGLangService:
             raise ValueError(f"dp_size must be >= 1, got {dp_size}")
         if int(tensor_parallel_size) < 1:
             raise ValueError(
-                "tensor_parallel_size must be >= 1, "
-                f"got {tensor_parallel_size}"
+                f"tensor_parallel_size must be >= 1, got {tensor_parallel_size}"
             )
 
         harmony_encoding_dir = _resolve_harmony_encoding_dir()
@@ -401,11 +401,13 @@ class SGLangService:
         self._ray = ray
         self.model = str(model)
         self.model_kwargs = dict(model_kwargs or {})
+        if not self.model_kwargs.get("tokenizer_path") and not self.model_kwargs.get(
+            "tokenizer"
+        ):
+            self.model_kwargs["tokenizer_path"] = self.model
         self.dp_size = int(dp_size)
         self.router_policy = router_policy
-        self.router_log_level = str(
-            self.model_kwargs.get("router_log_level", "warn")
-        )
+        self.router_log_level = str(self.model_kwargs.get("router_log_level", "warn"))
         self._harmony_encoding_dir = harmony_encoding_dir
         self._workers: list[Any] = []
         self._router: subprocess.Popen[Any] | None = None
@@ -474,14 +476,12 @@ class SGLangService:
                     base_url,
                     process,
                     endpoint="/readiness",
+                    tokenizer_model=self.model,
                 )
             except BaseException:
-                port_collision = (
-                    process.poll() is not None
-                    and (
-                        not _port_is_available(port)
-                        or not _port_is_available(prometheus_port)
-                    )
+                port_collision = process.poll() is not None and (
+                    not _port_is_available(port)
+                    or not _port_is_available(prometheus_port)
                 )
                 _stop_process(process)
                 self._router = None
@@ -509,10 +509,7 @@ class SGLangService:
             raise RuntimeError("SGLang service is closed")
         if not payloads:
             return []
-        request_payloads = [
-            {"model": self.model, **payload}
-            for payload in payloads
-        ]
+        request_payloads = [{"model": self.model, **payload} for payload in payloads]
 
         progress = None
         if show_progress:

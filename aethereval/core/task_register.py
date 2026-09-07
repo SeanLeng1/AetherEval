@@ -24,7 +24,9 @@ def discover_tasks(benchmarks_dir: Path | None = None) -> dict[str, TaskSpec]:
         metrics_module_path = task_dir / "metrics.py"
         if not (task_module_path.exists() and metrics_module_path.exists()):
             continue
-        name = task_dir.name
+        name = task_dir.name.replace("_", "-")
+        if name in tasks:
+            raise ValueError(f"Duplicate canonical benchmark name: {name}")
         tasks[name] = TaskSpec(
             name=name,
             task_dir=task_dir,
@@ -44,7 +46,11 @@ def parse_task_names(tasks: str, available: Iterable[str]) -> list[str]:
     if tasks.strip() == "all":
         return available_names
 
-    selected = [item.strip() for item in tasks.split(",") if item.strip()]
+    selected = list(
+        dict.fromkeys(
+            item.strip().replace("_", "-") for item in tasks.split(",") if item.strip()
+        )
+    )
     if not selected:
         raise ValueError("No tasks selected.")
 
@@ -132,6 +138,7 @@ def _validate_metrics_contract(module: ModuleType) -> None:
 
 
 def load_task(task_name: str, benchmarks_dir: Path | None = None) -> TaskBundle:
+    task_name = task_name.replace("_", "-")
     tasks = discover_tasks(benchmarks_dir)
     if task_name not in tasks:
         available = ", ".join(sorted(tasks.keys()))
@@ -147,6 +154,7 @@ def load_task(task_name: str, benchmarks_dir: Path | None = None) -> TaskBundle:
         spec.metrics_module_path,
     )
     _validate_task_contract(task_module)
+    task_module.TASK_NAME = task_name
     fallback_default_gen = getattr(task_module, "DEFAULT_GEN", {})
     task_module.DEFAULT_GEN = resolve_task_default_gen(task_name, fallback_default_gen)
     _validate_metrics_contract(metrics_module)

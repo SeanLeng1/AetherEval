@@ -420,12 +420,28 @@ class SGLangBackendTests(unittest.TestCase):
             "http://127.0.0.1:18080",
             process,
             endpoint="/readiness",
+            tokenizer_model="test/model",
         )
 
+    def test_readiness_waits_for_model_tokenizer_registration(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.side_effect = [
+            b'{"tokenizers":[{"name":"other/model"}]}',
+            b'{"tokenizers":[{"name":"test/model"}]}',
+        ]
+        with (
+            mock.patch.object(sglang_service, "_check_url") as health,
+            mock.patch.object(sglang_service._URL_OPENER, "open", return_value=response),
+            mock.patch.object(sglang_service.time, "sleep") as sleep,
+        ):
+            sglang_service._wait_until_ready(
+                "http://localhost:18080", None, tokenizer_model="test/model"
+            )
+        self.assertEqual(health.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
     def test_router_retries_startup_port_collision(self) -> None:
-        service = sglang_service.SGLangService.__new__(
-            sglang_service.SGLangService
-        )
+        service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
         service.router_policy = "cache_aware"
         service.router_log_level = "warn"
         service.model = "test/model"
@@ -487,6 +503,34 @@ class SGLangBackendTests(unittest.TestCase):
             model_kwargs={"dtype": "bfloat16"},
         )
         self.assertIs(backend._tokenizer, tokenizer)
+
+    def test_service_supplies_model_tokenizer_without_overriding_custom_one(self):
+        for options, expected in [
+            ({}, {"tokenizer_path": "test/model"}),
+            ({"tokenizer": "custom"}, {"tokenizer": "custom"}),
+            ({"tokenizer_path": "custom"}, {"tokenizer_path": "custom"}),
+        ]:
+            ray = mock.Mock()
+            ray.is_initialized.return_value = True
+            ray.get.return_value = ["grpc://127.0.0.1:9000"]
+            with (
+                mock.patch.dict(sys.modules, {"ray": ray}),
+                mock.patch.object(
+                    sglang_service.SGLangService,
+                    "_start_router",
+                    return_value="http://127.0.0.1:9001",
+                ),
+            ):
+                service = sglang_service.SGLangService(
+                    model="test/model",
+                    dp_size=1,
+                    tensor_parallel_size=1,
+                    model_kwargs=options,
+                )
+            self.assertEqual(service.model_kwargs, expected)
+            self.assertEqual(
+                ray.remote.return_value.return_value.remote.call_args.args[2], expected
+            )
 
     def test_service_cleanup_does_not_mask_dead_actor_error(self) -> None:
         worker = SimpleNamespace(close=SimpleNamespace(remote=lambda: "close-ref"))

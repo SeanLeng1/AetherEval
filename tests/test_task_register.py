@@ -12,6 +12,19 @@ from aethereval.core.task_register import (
 
 
 class TaskRegisterTests(unittest.TestCase):
+    def test_canonical_names_and_legacy_aliases(self):
+        from aethereval.core.task_register import parse_task_names
+
+        names = list_tasks()
+        self.assertTrue(all("_" not in name for name in names))
+        self.assertTrue(all(spec.task_dir.name == name for name, spec in discover_tasks().items()))
+        self.assertEqual(
+            parse_task_names("safe_alignment,safe-alignment", names), ["safe-alignment"]
+        )
+        bundle = load_task("safe_alignment")
+        self.assertEqual(bundle.spec.name, "safe-alignment")
+        self.assertEqual(bundle.task_module.TASK_NAME, "safe-alignment")
+
     def _read_primary_metric(self, metrics_path: Path) -> str:
         tree = ast.parse(metrics_path.read_text(encoding="utf-8"))
         for node in tree.body:
@@ -31,30 +44,30 @@ class TaskRegisterTests(unittest.TestCase):
     def test_ifeval_task_discoverable(self) -> None:
         tasks = list_tasks()
         self.assertIn("ifeval", tasks)
-        self.assertIn("gpqa_diamond", tasks)
+        self.assertIn("gpqa-diamond", tasks)
         self.assertIn("aime24", tasks)
         self.assertIn("aime25", tasks)
         self.assertIn("amc23", tasks)
         self.assertIn("math500", tasks)
         self.assertIn("minerva", tasks)
-        self.assertIn("olympiad_bench", tasks)
-        self.assertIn("safe_alignment", tasks)
+        self.assertIn("olympiad-bench", tasks)
+        self.assertIn("safe-alignment", tasks)
         self.assertIn("apibank", tasks)
-        self.assertIn("mmlu_pro", tasks)
-        self.assertIn("agieval_en", tasks)
+        self.assertIn("mmlu-pro", tasks)
+        self.assertIn("agieval-en", tasks)
         self.assertIn("bbh", tasks)
         self.assertIn("ifbench", tasks)
-        self.assertIn("humaneval_plus", tasks)
+        self.assertIn("humaneval-plus", tasks)
         self.assertIn("zebralogic", tasks)
         self.assertIn("livecodebench", tasks)
-        self.assertIn("qampari_oracle5", tasks)
-        self.assertIn("nq_open", tasks)
-        self.assertIn("triviaqa_unfiltered", tasks)
+        self.assertNotIn("qampari-oracle5", tasks)
+        self.assertIn("nq-open", tasks)
+        self.assertIn("triviaqa", tasks)
 
     def test_contract_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bad_task_dir = root / "bad_task"
+            bad_task_dir = root / "bad-task"
             bad_task_dir.mkdir(parents=True, exist_ok=True)
             (bad_task_dir / "task.py").write_text(
                 "TASK_NAME='bad_task'\n"
@@ -75,14 +88,14 @@ class TaskRegisterTests(unittest.TestCase):
             )
 
             tasks = discover_tasks(root)
-            self.assertIn("bad_task", tasks)
+            self.assertIn("bad-task", tasks)
             with self.assertRaises(ValueError):
-                load_task("bad_task", root)
+                load_task("bad-task", root)
 
     def test_contract_allows_missing_default_gen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            task_dir = root / "ok_task"
+            task_dir = root / "ok-task"
             task_dir.mkdir(parents=True, exist_ok=True)
             (task_dir / "task.py").write_text(
                 "TASK_NAME='ok_task'\n"
@@ -101,13 +114,13 @@ class TaskRegisterTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            bundle = load_task("ok_task", root)
+            bundle = load_task("ok-task", root)
             self.assertEqual(bundle.task_module.DEFAULT_GEN, {})
 
     def test_list_task_default_gens(self) -> None:
         defaults = list_task_default_gens()
         self.assertIn("ifeval", defaults)
-        self.assertIn("gpqa_diamond", defaults)
+        self.assertIn("gpqa-diamond", defaults)
         self.assertIn("bbh", defaults)
         self.assertEqual(defaults["ifeval"]["n"], 1)
         self.assertEqual(defaults["bbh"]["n"], 1)
@@ -115,17 +128,16 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["amc23"]["n"], 16)
         self.assertEqual(defaults["math500"]["n"], 16)
         self.assertEqual(defaults["minerva"]["n"], 16)
-        self.assertEqual(defaults["olympiad_bench"]["n"], 16)
-        self.assertEqual(defaults["safe_alignment"]["n"], 4)
-        self.assertEqual(defaults["safe_alignment"]["max_new_tokens"], 1024)
+        self.assertEqual(defaults["olympiad-bench"]["n"], 16)
+        self.assertEqual(defaults["safe-alignment"]["n"], 4)
+        self.assertEqual(defaults["safe-alignment"]["max_new_tokens"], 1024)
         self.assertEqual(defaults["apibank"]["n"], 1)
         self.assertEqual(defaults["apibank"]["max_new_tokens"], 4096)
         self.assertNotIn("metrics", defaults["healthbench"])
         self.assertNotIn("judge_model", defaults["healthbench"])
         self.assertIn("max_new_tokens", defaults["livecodebench"])
-        self.assertEqual(defaults["qampari_oracle5"]["n"], 1)
-        self.assertEqual(defaults["nq_open"]["n"], 1)
-        self.assertEqual(defaults["triviaqa_unfiltered"]["n"], 1)
+        self.assertEqual(defaults["nq-open"]["n"], 1)
+        self.assertEqual(defaults["triviaqa"]["n"], 1)
 
     def test_instruction_following_primary_metrics(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

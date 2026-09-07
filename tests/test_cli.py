@@ -167,11 +167,11 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(run_evaluation.call_count, 2)
         generate_call = run_evaluation.call_args_list[0].kwargs
         evaluate_call = run_evaluation.call_args_list[1].kwargs
-        self.assertEqual(generate_call["tasks"], "healthbench,llmeval_med")
+        self.assertEqual(generate_call["tasks"], "healthbench,llmeval-med")
         self.assertTrue(generate_call["generate_only"])
         self.assertFalse(generate_call["eval_only"])
         self.assertTrue(generate_call["overwrite"])
-        self.assertEqual(evaluate_call["tasks"], "healthbench,llmeval_med")
+        self.assertEqual(evaluate_call["tasks"], "healthbench,llmeval-med")
         self.assertFalse(evaluate_call["generate_only"])
         self.assertTrue(evaluate_call["eval_only"])
         self.assertFalse(evaluate_call["overwrite"])

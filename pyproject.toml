@@ -29,6 +29,7 @@ vllm = ["vllm"]
 sglang = ["sglang"]
 reward-model = ["sglang", "transformers"]
 all-backends = ["vllm", "sglang"]
+dynamic = ["datasets", "pyarrow", "huggingface_hub"]
 
 [project.scripts]
 aethereval = "aethereval.cli:main"

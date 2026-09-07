@@ -16,7 +16,11 @@ from .io import (
 )
 from .run_summary import build_run_summary, load_task_summaries, phase_name
 from .task_register import BENCHMARKS_DIR, discover_tasks, load_task, parse_task_names
-from .task_defaults import resolve_task_default_metrics, resolve_task_num_repeats
+from .task_defaults import (
+    resolve_task_default_gen,
+    resolve_task_default_metrics,
+    resolve_task_num_repeats,
+)
 from .types import (
     GenerationInput,
     GenerationOutput,
@@ -576,7 +580,10 @@ def _run_single_task(
     run_config_path = task_output_dir / "run_config.json"
 
     prior_run_config: dict[str, Any] = {}
-    if eval_only and run_config_path.exists():
+    if (
+        (eval_only or (hasattr(task_module, "load_protocol") and not overwrite))
+        and run_config_path.exists()
+    ):
         with run_config_path.open("r", encoding="utf-8") as f:
             loaded_run_config = json.load(f)
         if not isinstance(loaded_run_config, dict):
@@ -585,6 +592,15 @@ def _run_single_task(
                 f"{run_config_path}"
             )
         prior_run_config = loaded_run_config
+
+    load_protocol = getattr(task_module, "load_protocol", None)
+    protocol = load_protocol(task_dir) if load_protocol is not None else None
+    if protocol is not None:
+        if "protocol" in prior_run_config and prior_run_config["protocol"] != protocol:
+            raise ValueError(
+                "Saved evaluation protocol differs; use a new run directory"
+            )
+        metric_options["_protocol"] = protocol
 
     saved_gen_cfg = prior_run_config.get("generation_config")
     if eval_only and isinstance(saved_gen_cfg, dict):
@@ -601,8 +617,26 @@ def _run_single_task(
                 f"saved run config: {conflicts}"
             )
     else:
-        gen_cfg = _merge_generation_config(task_module.DEFAULT_GEN, gen_overrides)
+        gen_cfg = _merge_generation_config(
+            resolve_task_default_gen(
+                task_name, getattr(task_module, "DEFAULT_GEN", {})
+            ),
+            gen_overrides,
+        )
     chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
+
+    if protocol is not None:
+        # Persist before generation so interrupted runs retain their protocol.
+        write_json(
+            run_config_path,
+            {
+                **run_config_common,
+                **prior_run_config,
+                "task": task_name,
+                "generation_config": gen_cfg,
+                "protocol": protocol,
+            },
+        )
 
     n = int(gen_cfg["n"])
     _info(
@@ -988,6 +1022,8 @@ def _run_single_task(
     )
 
     write_json(summary_path, summary)
+    if protocol is not None:
+        task_run_config["protocol"] = protocol
     write_json(run_config_path, task_run_config)
     return summary
 
@@ -1039,7 +1075,9 @@ def _aggregate_repeat_token_usage(
         int(summary.get("token_usage", {}).get("total_response_tokens", 0))
         for summary in repeat_summaries
     )
-    total_records = sum(int(summary.get("total_records", 0)) for summary in repeat_summaries)
+    total_records = sum(
+        int(summary.get("total_records", 0)) for summary in repeat_summaries
+    )
     return {
         "avg_prompt_tokens": (
             total_prompt_tokens / total_records if total_records else None
@@ -1099,9 +1137,7 @@ def _run_repeated_task(
             gen_overrides,
             repeat_index,
         )
-        _info(
-            f"[{task_name}] repeat={repeat_number}/{num_repeats} seed={seed}"
-        )
+        _info(f"[{task_name}] repeat={repeat_number}/{num_repeats} seed={seed}")
         summary = _run_single_task(
             task_name=task_name,
             task_module=task_module,

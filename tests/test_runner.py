@@ -515,7 +515,7 @@ class RunnerTests(unittest.TestCase):
                     eval_only=True,
                 )
 
-            summary = result["results"]["batch_toy"]
+            summary = result["results"]["batch-toy"]
             self.assertEqual(summary["rescored_records"], 2)
             self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0)
 
@@ -578,7 +578,7 @@ class RunnerTests(unittest.TestCase):
 
             self.assertTrue(close_marker.exists())
             self.assertEqual(
-                result["results"]["batch_toy"]["primary_score"],
+                result["results"]["batch-toy"]["primary_score"],
                 1.0,
             )
 
@@ -691,10 +691,10 @@ class RunnerTests(unittest.TestCase):
                 metric_options={"batch_offset": 1.0},
             )
 
-            summary = result["results"]["batch_toy"]
+            summary = result["results"]["batch-toy"]
             self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0, places=6)
             predictions_path = (
-                out / "fake-model" / "batch_run" / "batch_toy" / "predictions.jsonl"
+                out / "fake-model" / "batch_run" / "batch-toy" / "predictions.jsonl"
             )
             with predictions_path.open("r", encoding="utf-8") as f:
                 rows = [json.loads(line) for line in f if line.strip()]

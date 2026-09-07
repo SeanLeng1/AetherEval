@@ -1,34 +1,17 @@
-FROM lmsysorg/sglang:v0.5.13.post1-cu129
+FROM lmsysorg/sglang:v0.5.19-cu130
 
-ARG CUDA_VERSION=12.9
+ARG CUDA_VERSION=13.0.88
+ARG NSIGHT_VERSION=2025.6.1
 
 RUN apt update
 
-# Install systemctl
-RUN apt-get update && \
-    apt-get install -y -o Dpkg::Options::="--force-confdef" systemd && \
-    apt-get clean
-
-# Install libxml2
-RUN apt-get update && \
-    apt-get install -y libxml2 aria2 git-lfs && \
-    apt-get clean
-
-# Uninstall nv-pytorch fork
-RUN pip uninstall -y torch torchvision torchaudio \
-    pytorch-quantization pytorch-triton torch-tensorrt \
-    transformer_engine flash_attn apex \
-    xgboost opencv grpcio
-
 RUN apt install -y nvtop rsync dnsutils
 
-# =========================
 # Install cuDNN (network repo)
-# =========================
-RUN ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi) && \
+# cuda-keyring installs the CUDA apt source; keep it in place for apt-get update.
+RUN if [ "$(uname -m)" = "aarch64" ]; then ARCH="sbsa"; else ARCH="x86_64"; fi && \
     CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH}/cuda-keyring_1.1-1_all.deb && \
-    sed -i '/developer\.download\.nvidia\.com\/compute\/cuda\/repos/d' /etc/apt/sources.list.d/* && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get -y --allow-downgrades --allow-change-held-packages install \
@@ -44,21 +27,20 @@ ARG PIP_NO_CACHE_DIR=1
 
 RUN pip install pybind11 nvidia-mathdx packaging
 
-RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
+RUN NVCC_APPEND_FLAGS="--threads 8" APEX_PARALLEL_BUILD=16 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
-RUN pip install --no-build-isolation transformer_engine[pytorch] --no-cache-dir
+RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=64 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.16.1
 
-RUN pip install --no-cache-dir pytest-asyncio codetiming tensordict mathruler qwen_vl_utils accelerate datasets peft hf-transfer \
-    ray[default] hydra-core pylatexenc wandb dill liger-kernel==0.7.0 blobfile xgrammar \
-    pytest py-spy pre-commit ruff more_itertools tensorboard gcsfs math-verify cachetools mooncake-transfer-engine cupy-cuda12x
+RUN pip install --no-cache-dir pytest-asyncio codetiming tensordict mathruler qwen_vl_utils datasets peft hf-transfer \
+    ray[default] hydra-core pylatexenc wandb dill blobfile xgrammar seaborn plotly \
+    pytest py-spy pre-commit ruff more_itertools tensorboard gcsfs math-verify cachetools mooncake-transfer-engine cupy-cuda13x TransferQueue==0.1.10 PyYAML \
+    langdetect nltk emoji syllapy immutabledict absl-py openai anthropic cohere mistralai pebble together
 
-RUN pip install -v --no-build-isolation flash_attn==2.7.4.post1
 
-# FA-3
-# RUN git clone https://github.com/Dao-AILab/flash-attention.git
-# RUN cd flash-attention/hopper && python setup.py install
+RUN MAX_JOBS=8 pip install -v --no-build-isolation flash_attn==2.8.3
 
-RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
+RUN if [ "$(uname -m)" = "aarch64" ]; then NSIGHT_ARCH="arm64"; else NSIGHT_ARCH="amd64"; fi && \
+    NSIGHT_VERSION="2025.6.1_2025.6.1.190-1_${NSIGHT_ARCH}" && \
     wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_6/nsight-systems-${NSIGHT_VERSION}.deb && \
     apt-get update && apt-get install -y libxcb-cursor0 && \
     apt-get install -y ./nsight-systems-${NSIGHT_VERSION}.deb && \
@@ -69,49 +51,189 @@ RUN NSIGHT_VERSION=2025.6.1_2025.6.1.190-1_$(if [ "$(uname -m)" = "aarch64" ]; t
     rm nsight-systems-${NSIGHT_VERSION}.deb
 
 # sglang image has already installed DeepEP
-RUN pip install --no-cache-dir --no-deps trl==0.27.0 nvtx matplotlib rich liger_kernel
+RUN pip install --no-cache-dir --no-deps nvtx matplotlib rich
 
-RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu129
+RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
-RUN pip install qwen-vl-utils==0.0.14
+RUN pip install qwen-vl-utils==0.0.14 litellm
 
-# RUN pip uninstall "flash-attn-4" && pip install "flash-attn-4[cu12]"
+# For AetherEval
+RUN pip install --no-cache-dir --no-deps "bfcl-eval==2025.6.8"
+    
+RUN pip install --no-cache-dir -U "setuptools>=77" wheel
 
-RUN pip install --no-cache-dir -U git+https://github.com/ISEEKYAN/mbridge.git
-
-# Pin to the commit verl's CI uses; PyPI releases (<=0.4.1) lack LinearForLastLayer / freeze_moe_router / make_value_model.
 RUN pip install --no-deps --no-build-isolation --no-cache-dir \
-    git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4
+    git+https://github.com/ISEEKYAN/mbridge.git@main
 
-# Pin to the commit verl's CI uses; core_v0.17.0 lacks helpers the new Megatron-Bridge needs (e.g. get_hybrid_total_layer_count).
+# megatron-bridge r0.5.0 tip + megatron-core core_v0.18.0: the pair verl's uv.cu130 CI image resolves.
 RUN pip install --no-deps --no-build-isolation --no-cache-dir \
-    git+https://github.com/NVIDIA/Megatron-LM.git@b2a8ec7
+    git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@f83545d981f32310d96c3614008a99389d7ccc71
 
-ARG AETHEREVAL_BRANCH=experimental
+RUN pip install --no-deps --no-build-isolation --no-cache-dir \
+    git+https://github.com/NVIDIA/Megatron-LM.git@ba7b5ebce12af60627a80985792a1449ce45f46c
 
-# Install AetherEval
-RUN git clone --branch ${AETHEREVAL_BRANCH} --single-branch https://github.com/SeanLeng1/AetherEval.git /opt/AetherEval && \
-    cd /opt/AetherEval && \
-    git lfs install && git lfs pull && \
-    pip install --no-cache-dir -e /opt/AetherEval
+RUN pip install --no-cache-dir "nvidia-modelopt[torch]>=0.37.0"
 
-# BFCL-v3 (GDPO Table 1) for benchmarks/bfcl. v3 data ships in bfcl-eval==2025.6.8 (later
-# releases moved to v4); --no-deps keeps the sglang/torch stack intact and
-# benchmarks/bfcl/_compat.py stubs bfcl's unused optional API SDKs. The light runtime deps
-# bfcl actually needs (CLI + scoring) are installed explicitly.
-RUN pip install --no-cache-dir --no-deps "bfcl-eval==2025.6.8" && \
-    pip install --no-cache-dir typer tabulate python-dotenv overrides
-
+# Install verl from source in editable mode; --no-deps mirrors verl CI's own `pip install --no-deps -e .`.
+ARG VERL_REF=23af6a7a2e8d6efeeb2adbe5d1689c7a24f503a3
+RUN git clone https://github.com/verl-project/verl.git /opt/verl && \
+    cd /opt/verl && \
+    git checkout "${VERL_REF}" && \
+    git rev-parse HEAD > /opt/aether-verl-commit && \
+    pip install --no-cache-dir --no-deps -e /opt/verl
 
 RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
-    CUDNN_PKG=libcudnn9-cuda-${CUDA_VERSION_MAJOR} && \
+    CUDNN_PKG="libcudnn9-cuda-${CUDA_VERSION_MAJOR}" && \
     CUDNN_VERSION=$(dpkg-query -W -f='${Version}' "${CUDNN_PKG}" 2>/dev/null | sed 's/-[0-9]*$//') && \
     if [ -z "${CUDNN_VERSION}" ]; then \
         CUDNN_HDR=$(find /usr/include -name cudnn_version.h | head -1) && \
         CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
     fi && \
-    pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
+    pip install --pre "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
 
-# Fix numpy version for cupy
-RUN pip install numpy==2.2.0
-RUN pip install uvicorn==0.40.0 starlette==0.50.0
+# Pin HiGHS for GUARD; NumPy is pinned at the end of the file, after the layers that would bump it.
+RUN pip install highspy==1.15.1
+RUN pip install uvicorn==0.40.0 starlette==0.50.0 nvidia-resiliency-ext
+
+# BFCL v4
+RUN pip install --no-cache-dir \
+      typer tabulate python-dotenv overrides pandas tenacity \
+      "tree_sitter==0.21.3" "tree-sitter-java==0.21.0" \
+      "tree-sitter-javascript==0.21.4" beautifulsoup4 html2text \
+      "rank_bm25==0.2.2" google-search-results "sentence-transformers>=2.7.0" \
+      "faiss-cpu==1.11.0" "networkx==3.3" "filelock==3.20.0"
+
+# Realign the whole CUTLASS DSL stack on sglang 0.5.19's `nvidia-cutlass-dsl[cu13]==4.6.2`; --no-deps means every component must be listed.
+RUN pip install --force-reinstall --no-deps \
+    nvidia-cutlass-dsl==4.6.2 \
+    nvidia-cutlass-dsl-libs-base==4.6.2 \
+    nvidia-cutlass-dsl-libs-core==4.6.2 \
+    nvidia-cutlass-dsl-libs-cu12==4.6.2 \
+    nvidia-cutlass-dsl-libs-cu13==4.6.2
+    
+RUN pip uninstall -y flash-attn-4
+
+# Last pip layer so nothing bumps it again: verl's locked NumPy, the only version satisfying pandas>=2.3.3 and numba<2.5 and cupy<2.6.
+RUN pip install --no-cache-dir --no-deps numpy==2.4.6
+
+# verl needs ncclCommSuspend/Resume (verl-project/verl#6266); torch's transitive wheel already satisfies this.
+RUN pip install --no-cache-dir --no-deps --upgrade "nvidia-nccl-cu13>=2.29.7,<3.0"
+
+# Final SFT pins: keep SGLang's Torch/CUDA stack and Transformers version intact.
+# Accelerate 1.14.0 splits tied embeddings across FSDP2 groups on Torch >=2.13.
+# Pin the upstream fix (huggingface/accelerate#4171), not a moving main branch.
+ARG ACCELERATE_REF=f80126071321d1bd89cfe5b0fd759ef9eae97966
+RUN pip install --no-cache-dir --no-deps \
+    "accelerate @ git+https://github.com/huggingface/accelerate.git@${ACCELERATE_REF}" \
+    trl==1.12.0 \
+    liger-kernel==0.8.2 \
+    transformers==5.12.1
+
+RUN pip install --no-cache-dir --no-deps torchdata
+
+# sglang return_hidden_states: bf16-base64 transport + an AetherRL-specific payload narrowing
+RUN python3 <<'SGLANG_HIDDEN_PATCH'
+import ast
+import os
+import sys
+
+ROOT = os.environ.get("SGLANG_PATCH_ROOT", "/sgl-workspace/sglang")
+BRP = f"{ROOT}/python/sglang/srt/managers/scheduler_components/batch_result_processor.py"
+
+src = open(BRP).read()
+if "__bf16_b64__" in src:
+    print("sglang hidden patch: already applied")
+    sys.exit(0)
+
+
+def replace_once(text, old, new, tag):
+    if text.count(old) != 1:
+        raise AssertionError(f"anchor not found or ambiguous: {tag}")
+    return text.replace(old, new, 1)
+
+
+src = replace_once(
+    src,
+    "import torch\n\nfrom sglang.srt.disaggregation.utils import DisaggregationMode",
+    "import base64\n\nimport torch\n\nfrom sglang.srt.disaggregation.utils import DisaggregationMode",
+    "base64 import",
+)
+
+marker = "logger = logging.getLogger(__name__)\n"
+if src.count(marker) != 1:
+    raise AssertionError("logger anchor not found")
+helper = '''
+
+def _pack_hidden_bf16(t):
+    """JSON-safe bf16 hidden transport: ~2.67 B/elem vs ~10+ for float lists, and no
+    per-float PyObject flood. Client: b64decode -> int16 -> view(bfloat16) -> reshape."""
+    t = t.detach().to(torch.bfloat16).cpu().contiguous()
+    return {
+        "__bf16_b64__": base64.b64encode(t.view(torch.int16).numpy().tobytes()).decode("ascii"),
+        "shape": list(t.shape),
+    }
+
+'''
+src = src.replace(marker, marker + helper, 1)
+
+# FULL-capture prefill: narrow to the LAST row.
+src = replace_once(
+    src,
+    """            req_hidden_states = logits_output.hidden_states[start:hidden_state_offset]
+            if req.return_hidden_states is True:
+                req.hidden_states.append(req_hidden_states.cpu().clone().tolist())
+            elif req.return_hidden_states == "last":
+                req.hidden_states.append(req_hidden_states[-1].cpu().tolist())""",
+    """            if extend_input_len <= 0:
+                raise RuntimeError(
+                    "return_hidden_states received an empty final prefill"
+                )
+            last_row = logits_output.hidden_states[
+                hidden_state_offset - 1 : hidden_state_offset
+            ]
+            if req.return_hidden_states == "last":
+                req.hidden_states.append(_pack_hidden_bf16(last_row[0]))
+            else:
+                req.hidden_states.append(_pack_hidden_bf16(last_row))""",
+    "prefill full-capture transport",
+)
+
+src = replace_once(
+    src,
+    """            if store and req.return_hidden_states:
+                req.hidden_states.append(
+                    logits_output.hidden_states[index].cpu().tolist()
+                )""",
+    """            if store and req.return_hidden_states:
+                req.hidden_states.append(
+                    _pack_hidden_bf16(logits_output.hidden_states[index])
+                )""",
+    "prefill last-capture transport",
+)
+
+src = replace_once(
+    src,
+    """            if valid_accept_len > 0:
+                req.hidden_states[:] = [
+                    hidden_states[start + valid_accept_len - 1].cpu().tolist()
+                ]
+        else:
+            req.hidden_states.extend(
+                hidden_states[start : start + accept_len].cpu().tolist()
+            )""",
+    """            if valid_accept_len > 0:
+                req.hidden_states[:] = [
+                    _pack_hidden_bf16(hidden_states[start + valid_accept_len - 1])
+                ]
+        else:
+            req.hidden_states.extend(
+                _pack_hidden_bf16(row)
+                for row in hidden_states[start : start + accept_len]
+            )""",
+    "decode transport",
+)
+
+ast.parse(src)
+open(BRP, "w").write(src)
+print("sglang hidden patch: applied OK")
+SGLANG_HIDDEN_PATCH

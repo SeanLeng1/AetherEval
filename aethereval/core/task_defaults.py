@@ -33,7 +33,10 @@ def _load_task_default_overrides() -> dict[str, dict[str, Any]]:
             raise ValueError(
                 f"task_defaults.yaml entry for '{task_name}' must be a mapping/object."
             )
-        parsed[task_name] = dict(defaults)
+        name = task_name.replace("_", "-")
+        if name in parsed:
+            raise ValueError(f"Duplicate canonical benchmark defaults: {name}")
+        parsed[name] = dict(defaults)
     return parsed
 
 
@@ -41,7 +44,7 @@ def resolve_task_default_gen(
     task_name: str, fallback_default_gen: dict[str, Any]
 ) -> dict[str, Any]:
     merged = dict(fallback_default_gen or {})
-    override = _load_task_default_overrides().get(task_name)
+    override = _load_task_default_overrides().get(task_name.replace("_", "-"))
     if override:
         merged.update(
             {
@@ -69,7 +72,9 @@ def resolve_task_num_repeats(
     raw_value = (
         runtime_override
         if runtime_override is not None
-        else _load_task_default_overrides().get(task_name, {}).get("num_repeats", 1)
+        else _load_task_default_overrides()
+        .get(task_name.replace("_", "-"), {})
+        .get("num_repeats", 1)
     )
     value = int(raw_value)
     if value < 1:
@@ -83,7 +88,7 @@ def resolve_task_default_metrics(
     task_name: str,
     runtime_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    task_defaults = _load_task_default_overrides().get(task_name, {})
+    task_defaults = _load_task_default_overrides().get(task_name.replace("_", "-"), {})
     configured = task_defaults.get("metrics", {})
     if not isinstance(configured, dict):
         raise ValueError(

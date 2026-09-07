@@ -1,10 +1,11 @@
 import unittest
+from importlib import import_module
 from unittest import mock
 
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from aethereval.core.types import GenerationOutput, Sample
-from benchmarks.safe_alignment import metrics
-from benchmarks.safe_alignment.task import build_prompt
+metrics = import_module("benchmarks.safe-alignment.metrics")
+build_prompt = import_module("benchmarks.safe-alignment.task").build_prompt
 
 
 class _FakeBackend:
