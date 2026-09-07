@@ -565,7 +565,7 @@ class SGLangBackendTests(unittest.TestCase):
     def test_service_adds_model_id_without_overriding_request(self) -> None:
         service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
         service._closed = False
-        service.base_url = "http://127.0.0.1:18080"
+        service._endpoints = ["http://127.0.0.1:18080"]
         service.model = "test/default-model"
         service.dp_size = 1
 
@@ -591,7 +591,7 @@ class SGLangBackendTests(unittest.TestCase):
     def test_service_keeps_only_a_bounded_window_of_futures(self) -> None:
         service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
         service._closed = False
-        service.base_url = "http://unused"
+        service._endpoints = ["http://unused"]
         service.model = "test/model"
         service.dp_size = 1
         real_wait = sglang_service.wait

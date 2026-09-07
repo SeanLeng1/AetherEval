@@ -299,7 +299,9 @@ class _SGLangServerActor:
         # contract. SGLang 0.5.15 uses array("q") for generated token IDs, so
         # request IDs must use the same container type.
         env["SGLANG_GRPC_TOKEN_ID_ARRAY"] = "1"
-        if model_kwargs.get("is_embedding"):
+        # Embedding replicas serve HTTP: SMG's gRPC embedding pipeline takes text, scoring sends ids.
+        embedding = bool(model_kwargs.get("is_embedding"))
+        if embedding:
             from transformers import AutoConfig
 
             from aethereval.backends.sglang.models import reward_model_environment
@@ -330,7 +332,7 @@ class _SGLangServerActor:
                     str(port),
                     "--nccl-port",
                     str(nccl_port),
-                    "--grpc-mode",
+                    *(() if embedding else ("--grpc-mode",)),
                     "--log-level",
                     "error",
                     *_server_cli_args(model_kwargs),
@@ -358,7 +360,7 @@ class _SGLangServerActor:
                     )
                     continue
                 raise
-            self._url = f"grpc://{node_ip}:{port}"
+            self._url = f"{'http' if embedding else 'grpc'}://{node_ip}:{port}"
             break
 
     def url(self) -> str:
@@ -374,7 +376,9 @@ class SGLangService:
 
     Each Ray actor owns one tensor-parallel server. Ray places the actors across
     the attached cluster, while SMG routes every request independently across
-    those replicas. No per-node SGLang setup is required.
+    those replicas. No per-node SGLang setup is required. Embedding (reward-model)
+    replicas are plain HTTP servers scored round-robin without SMG: its gRPC
+    embedding pipeline only tokenizes text, and reward scoring posts token ids.
     """
 
     def __init__(
@@ -433,8 +437,12 @@ class SGLangService:
                 )
                 for _ in range(self.dp_size)
             ]
-            worker_urls = ray.get([worker.url.remote() for worker in self._workers])
-            self.base_url = self._start_router([str(url) for url in worker_urls])
+            worker_urls = [str(url) for url in ray.get([worker.url.remote() for worker in self._workers])]
+            if self.model_kwargs.get("is_embedding"):
+                self._endpoints = worker_urls
+            else:
+                self._endpoints = [self._start_router(worker_urls)]
+            self.base_url = self._endpoints[0]
         except BaseException:
             self.close()
             raise
@@ -532,7 +540,7 @@ class SGLangService:
                 index, payload = item
                 future = executor.submit(
                     _post_json,
-                    f"{self.base_url}{path}",
+                    f"{self._endpoints[index % len(self._endpoints)]}{path}",
                     {"model": self.model, **payload},
                 )
                 futures[future] = index

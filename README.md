@@ -69,6 +69,9 @@ For SGLang DP, Ray places one gRPC server actor per replica, including across
 joined worker nodes, and AetherEval starts one SMG router on the driver. SMG
 routes requests to the workers over gRPC with its default cache-aware policy.
 No SGLang server or router needs to be started manually on any node.
+Reward-model (embedding) replicas are the exception: they serve HTTP and are
+scored round-robin without SMG, whose gRPC embedding pipeline accepts text only
+while reward scoring sends token ids.
 Worker gRPC and NCCL-initialization ports are selected independently on the
 node where each actor runs. Startup collisions on either port are retried
 automatically, and shutdown terminates the complete SGLang process group so
