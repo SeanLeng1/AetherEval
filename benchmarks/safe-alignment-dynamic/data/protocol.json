@@ -1,0 +1,111 @@
+{
+  "score_conditioning": {
+    "task": "safe-alignment",
+    "dataset": "RLLab/safe-alignment-dynamic",
+    "revision": "e30d0e905eedeeca8d7eddad182b75434b87ff25",
+    "components": [
+      {
+        "key": "reward_useful",
+        "score_key": "useful",
+        "label": "helpfulness"
+      },
+      {
+        "key": "reward_harmless",
+        "score_key": "harmless",
+        "label": "harmlessness"
+      }
+    ],
+    "score_stats": {
+      "alignment": {
+        "skipped": {
+          "test_overlap_pairs": 1209,
+          "invalid_dialogue_pairs": 471,
+          "empty_responses": 181,
+          "mismatched_prompt_pairs": 2,
+          "duplicate_responses": 743
+        },
+        "counts": {
+          "alpaca_test": 512,
+          "hh_rlhf_test": 8520,
+          "pku_saferlhf_test": 8211,
+          "train": 317312
+        },
+        "train_prompts": 158420,
+        "train_source": "Anthropic/hh-rlhf",
+        "train_revision": "09be8c5bbc57cb3887f3a9732ad6aa7ec602a1fa"
+      },
+      "train_length_filter": {
+        "before": 317312,
+        "removed": 2056,
+        "kept": 315256,
+        "removed_prompts": 1031
+      },
+      "max_length": 1024,
+      "dtype": "bfloat16",
+      "reward_format": "gpt2",
+      "harmless_sign": 1,
+      "models": {
+        "useful": {
+          "repo": "Ray2333/gpt2-large-helpful-reward_model",
+          "mean": 1.4832633749528958,
+          "std": 1.8015006895822767
+        },
+        "harmless": {
+          "repo": "Ray2333/gpt2-large-harmless-reward_model",
+          "mean": -0.9977953627873466,
+          "std": 1.5873823204966653
+        }
+      },
+      "sft_eligible_rows": 315256,
+      "train_coverage": {
+        "rl_prompts": 157389,
+        "sft_prompts": 157389,
+        "sft_prompts_with_multiple_responses": 156479
+      }
+    },
+    "target_mapping": {
+      "method": "ric_p2_quantile",
+      "components": [
+        "reward_useful",
+        "reward_harmless"
+      ],
+      "quantiles": [
+        0.05,
+        0.95
+      ],
+      "low": [
+        -1.7167011885352106,
+        -1.7830169837894443
+      ],
+      "high": [
+        1.553142133792848,
+        1.4997066756057196
+      ]
+    }
+  },
+  "weights": [
+    [
+      0.0,
+      1.0
+    ],
+    [
+      0.25,
+      0.75
+    ],
+    [
+      0.5,
+      0.5
+    ],
+    [
+      0.75,
+      0.25
+    ],
+    [
+      1.0,
+      0.0
+    ]
+  ],
+  "weight_mode": "grid",
+  "seed": 42,
+  "limit_per_source": 0
+}
