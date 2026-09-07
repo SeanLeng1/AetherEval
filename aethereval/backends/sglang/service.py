@@ -8,11 +8,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
-from tqdm.auto import tqdm
+from aethereval.progress import Progress
 
 
 _STARTUP_TIMEOUT_SECONDS = 1800
@@ -509,40 +509,40 @@ class SGLangService:
             raise RuntimeError("SGLang service is closed")
         if not payloads:
             return []
-        request_payloads = [{"model": self.model, **payload} for payload in payloads]
-
-        progress = None
-        if show_progress:
-            progress = tqdm(
-                total=len(request_payloads),
-                desc=progress_desc,
-                unit=progress_unit,
-                dynamic_ncols=True,
-                mininterval=1.0,
-            )
-
-        results: list[Any] = [None] * len(request_payloads)
+        results: list[Any] = [None] * len(payloads)
         max_workers = min(
-            len(request_payloads),
+            len(payloads),
             max(64, self.dp_size * 64),
         )
+        progress = Progress(len(payloads), progress_desc, progress_unit, show_progress)
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {}
+        pending = iter(enumerate(payloads))
+
+        def submit_next():
+            item = next(pending, None)
+            if item is not None:
+                index, payload = item
+                future = executor.submit(
+                    _post_json,
+                    f"{self.base_url}{path}",
+                    {"model": self.model, **payload},
+                )
+                futures[future] = index
+
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        _post_json,
-                        f"{self.base_url}{path}",
-                        payload,
-                    ): index
-                    for index, payload in enumerate(request_payloads)
-                }
-                for future in as_completed(futures):
-                    results[futures[future]] = future.result()
-                    if progress is not None:
-                        progress.update(1)
+            for _ in range(max_workers):
+                submit_next()
+            while futures:
+                completed, _ = wait(futures, timeout=10, return_when=FIRST_COMPLETED)
+                progress.refresh()
+                for future in completed:
+                    results[futures.pop(future)] = future.result()
+                    progress.update()
+                    submit_next()
         finally:
-            if progress is not None:
-                progress.close()
+            executor.shutdown(wait=True, cancel_futures=True)
+            progress.close()
         return results
 
     def close(self) -> None:

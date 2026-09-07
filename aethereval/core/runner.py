@@ -3,7 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
-from tqdm.auto import tqdm
+from aethereval.progress import Progress
 
 from .io import (
     append_jsonl,
@@ -56,13 +56,7 @@ def _metric_keys_preview(metrics: dict[str, Any], limit: int = 8) -> str:
 def _make_progress_bar(total: int, desc: str) -> Any:
     if total <= 0:
         return None
-    return tqdm(
-        total=total,
-        desc=desc,
-        unit="gen",
-        dynamic_ncols=True,
-        mininterval=1.0,
-    )
+    return Progress(total=total, desc=desc)
 
 
 def _resolve_primary_metric(

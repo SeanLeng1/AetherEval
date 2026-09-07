@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Any
 
 from aethereval.core.types import GenerationInput, GenerationOutput
+from aethereval.progress import Progress
 
 from ..prompt import (
     _prompt_to_text,
@@ -187,6 +188,20 @@ def _outputs_from_dicts(output_dicts: list[dict[str, Any]]) -> list[GenerationOu
     ]
 
 
+def _extract_prompt_token_count(output: Any) -> int | None:
+    if isinstance(output, list) and len(output) == 1:
+        return _extract_prompt_token_count(output[0])
+    if isinstance(output, dict):
+        for values in (output.get("meta_info"), output.get("usage"), output):
+            if isinstance(values, dict):
+                count = _dict_first_int(
+                    values, ("prompt_tokens", "prompt_token_count", "input_token_count")
+                )
+                if count is not None:
+                    return count
+    return None
+
+
 def _run_service_generation(
     service: SGLangService,
     tokenizer: Any,
@@ -201,30 +216,39 @@ def _run_service_generation(
     request_items: list[dict[str, Any]] = []
     request_payloads: list[dict[str, Any]] = []
     prompt_token_counts: dict[int, int] = {}
-    for item in payloads:
-        rendered = _prompt_to_text(item["prompt"], tokenizer, chat_template_kwargs)
-        item_idx = int(item["idx"])
-        prompt_token_counts[item_idx] = count_text_tokens(rendered, tokenizer)
-        for _ in range(int(item["num_generations"])):
-            request_items.append(item)
-            request_payloads.append(
-                {
-                    "text": rendered,
-                    "sampling_params": sampling_params,
-                }
-            )
+    show_progress = bool(gen_cfg.get("_show_progress", True))
+    with Progress(
+        len(payloads), "sglang preparing prompts", "prompt", show_progress
+    ) as progress:
+        for item in payloads:
+            rendered = _prompt_to_text(item["prompt"], tokenizer, chat_template_kwargs)
+            for _ in range(int(item["num_generations"])):
+                request_items.append(item)
+                request_payloads.append(
+                    {"text": rendered, "sampling_params": sampling_params}
+                )
+            progress.update()
 
     raw_outputs = service.request_many(
         "/generate",
         request_payloads,
-        show_progress=bool(gen_cfg.get("_show_progress", True)),
+        show_progress=show_progress,
         progress_desc="sglang generating",
         progress_unit="gen",
     )
     grouped_texts: dict[int, list[str]] = defaultdict(list)
     grouped_token_counts: dict[int, list[int | None]] = defaultdict(list)
-    for item, output in zip(request_items, raw_outputs, strict=True):
+    for item, request, output in zip(
+        request_items, request_payloads, raw_outputs, strict=True
+    ):
         item_idx = int(item["idx"])
+        if item_idx not in prompt_token_counts:
+            count = _extract_prompt_token_count(output)
+            prompt_token_counts[item_idx] = (
+                count
+                if count is not None
+                else count_text_tokens(request["text"], tokenizer)
+            )
         grouped_texts[item_idx].append(_extract_text(output))
         grouped_token_counts[item_idx].append(_extract_output_token_count(output))
 
@@ -235,8 +259,7 @@ def _run_service_generation(
         texts = grouped_texts[item_idx]
         if len(texts) != expected:
             raise RuntimeError(
-                f"SGLang returned {len(texts)} candidates for sample "
-                f"{item['sample_id']}; expected {expected}."
+                f"SGLang returned {len(texts)} candidates for sample {item['sample_id']}; expected {expected}."
             )
         results.append(
             {

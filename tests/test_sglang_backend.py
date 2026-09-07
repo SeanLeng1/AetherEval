@@ -573,6 +573,86 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(results[0]["model"], "test/default-model")
         self.assertEqual(results[1]["model"], "test/explicit-model")
 
+    def test_service_keeps_only_a_bounded_window_of_futures(self) -> None:
+        service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
+        service._closed = False
+        service.base_url = "http://unused"
+        service.model = "test/model"
+        service.dp_size = 1
+        real_wait = sglang_service.wait
+        windows = []
+
+        def wait_window(futures, **kwargs):
+            windows.append(len(futures))
+            return real_wait(futures, **kwargs)
+
+        with (
+            mock.patch.object(
+                sglang_service, "_post_json", side_effect=lambda url, body: body["text"]
+            ),
+            mock.patch.object(sglang_service, "wait", side_effect=wait_window),
+        ):
+            results = service.request_many(
+                "/generate",
+                [{"text": str(i)} for i in range(200)],
+                show_progress=False,
+                progress_desc="test",
+                progress_unit="gen",
+            )
+        self.assertEqual(results, [str(i) for i in range(200)])
+        self.assertLessEqual(max(windows), 64)
+
+    def test_server_prompt_counts_avoid_local_tokenization(self) -> None:
+        service = _FakeService()
+        service.request_many = mock.Mock(
+            return_value=[
+                {
+                    "text": "a",
+                    "meta_info": {"prompt_tokens": 17, "completion_tokens": 1},
+                },
+                [
+                    {
+                        "text": "b",
+                        "meta_info": {"prompt_tokens": 17, "completion_tokens": 1},
+                    }
+                ],
+            ]
+        )
+        tokenizer = _ThinkingTokenizer()
+        tokenizer.encode = mock.Mock(
+            side_effect=AssertionError("redundant tokenization")
+        )
+        outputs = sglang_backend._run_service_generation(
+            service,
+            tokenizer,
+            [
+                {"idx": 0, "sample_id": "a", "prompt": "hello", "num_generations": 2},
+            ],
+            {"_show_progress": False},
+        )
+        self.assertEqual(outputs[0]["meta"]["prompt_token_count"], 17)
+        tokenizer.encode.assert_not_called()
+        self.assertEqual(
+            sglang_backend._extract_prompt_token_count(
+                [{"usage": {"prompt_tokens": 8}}]
+            ),
+            8,
+        )
+
+    def test_missing_server_prompt_count_falls_back_once_per_condition(self) -> None:
+        tokenizer = _ThinkingTokenizer()
+        tokenizer.encode = mock.Mock(return_value=[1, 2, 3])
+        outputs = sglang_backend._run_service_generation(
+            _FakeService(),
+            tokenizer,
+            [
+                {"idx": 0, "sample_id": "a", "prompt": "hello", "num_generations": 4},
+            ],
+            {"_show_progress": False},
+        )
+        self.assertEqual(outputs[0]["meta"]["prompt_token_count"], 3)
+        tokenizer.encode.assert_called_once()
+
     def test_server_cli_args_preserve_model_options(self) -> None:
         args = sglang_service._server_cli_args(
             {
