@@ -32,7 +32,8 @@ def score_generations_batch(samples, generation_outputs, metric_options=None):
     if calibration["cm_sign"] != 1:
         raise ValueError("CM sign differs from the +1 scoring contract")
     options = resolve_task_default_metrics("safe-alignment-dynamic", metric_options)
-    options.setdefault("rm_max_length", calibration["max_length"])
+    if options.get("rm_reward_format", "chat") != calibration.get("reward_format", "chat"):
+        raise ValueError("Reward input format differs from training calibration; align scorer config and data")
     results = fixed.score_generations_batch(samples, generation_outputs, options)
     for sample, output, records in zip(
         samples, generation_outputs, results, strict=True
@@ -54,7 +55,8 @@ def score_generations_batch(samples, generation_outputs, metric_options=None):
             meta.update(sample.meta, helpful_z=z[0], harmless_z=z[1], utility=utility)
             meta["scoring"] = {
                 key: options[key]
-                for key in ("rm_model_path", "cm_model_path", "rm_max_length")
+                for key in ("rm_model_path", "cm_model_path", "rm_reward_format")
+                if key in options
             }
     return results
 

@@ -28,7 +28,7 @@ By default, scoring loads `RLLab/Qwen2.5-7B-SafeRLHF-RM` for helpfulness and
 `--cm-model-path` to override them with local checkpoints. The defaults are
 configured under `safe-alignment.metrics` in `configs/task_defaults.yaml`.
 
-`--rm-max-length` keeps the reference 2048-token right truncation by default.
+The SafeRLHF input function fixes right truncation at the reference 2048-token budget.
 Use repeated `--rm-sglang-arg KEY=VALUE` only when a checkpoint needs an
 additional SGLang server option.
 

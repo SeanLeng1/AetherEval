@@ -24,8 +24,9 @@ def protocol():
         "score_conditioning": {
             "components": COMPONENTS,
             "calibration": {
+                "reward_format": "gpt2",
                 "cm_sign": 1,
-                "max_length": 2048,
+                "max_length": 1023,
                 "models": {
                     "useful": {"mean": 10, "std": 2, "repo": "rm"},
                     "harmless": {"mean": -3, "std": 4, "repo": "cm"},
@@ -82,7 +83,6 @@ def result_rows(samples, vectors):
                 "scoring": {
                     "rm_model_path": "rm",
                     "cm_model_path": "cm",
-                    "rm_max_length": 2048,
                 },
             },
         }
@@ -199,11 +199,11 @@ class DynamicAlignmentTests(unittest.TestCase):
                 sample.meta["protocol_hash"], task.protocol_hash(protocol())
             )
 
-    def test_missing_calibration_length_fails_before_scoring(self):
+    def test_scoring_rejects_mismatched_input_protocol(self):
         sample = self.samples[0]
-        del sample.data["artifact"]["calibration"]["max_length"]
+        sample.data["artifact"]["calibration"]["reward_format"] = "chat"
         output = GenerationOutput(sample.id, task.build_prompt(sample), ["answer"])
-        with self.assertRaisesRegex(KeyError, "max_length"):
+        with self.assertRaisesRegex(ValueError, "input format differs"):
             metrics.score_generations_batch([sample], [output])
 
     def test_wrong_prediction_protocol_is_rejected(self):
@@ -216,6 +216,7 @@ class DynamicAlignmentTests(unittest.TestCase):
         load_artifact = prepare.load_artifact
 
         calibration = protocol()["score_conditioning"]["calibration"]
+        calibration.pop("reward_format")  # Preparation accepts scores without a scorer-format dependency.
         metadata = self.root / "scoring_metadata.json"
         metadata.write_text(json.dumps(calibration))
         train = [
@@ -293,7 +294,7 @@ class DynamicAlignmentTests(unittest.TestCase):
         class Backend:
             def score_reward_models(inner, paths, conversations, options):
                 self.assertEqual(paths, ["rm", "cm"])
-                self.assertEqual(options["max_length"], 2048)
+                self.assertEqual(options["reward_format"], "gpt2")
                 self.assertNotIn("Target scores", json.dumps(conversations))
                 self.assertEqual(len(conversations[0]), 4)
                 return {"rm": [12.0, 14.0], "cm": [5.0, 9.0]}

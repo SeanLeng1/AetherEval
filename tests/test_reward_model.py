@@ -26,6 +26,33 @@ class _FakeService:
 
 
 class RewardModelTests(unittest.TestCase):
+    def test_saferlhf_input_uses_fixed_2048_token_budget(self) -> None:
+        tokenizer = mock.Mock(chat_template=None)
+        tokenizer.encode.side_effect = lambda text, **kwargs: list(text)
+        tokenizer.decode.side_effect = lambda ids, **kwargs: "".join(ids)
+        conversation = [{"role": "user", "content": "x" * 3000}]
+        text = reward_model.saferlhf_reward_input(conversation, tokenizer)
+        self.assertEqual(len(text), 2048)
+        self.assertTrue(text.startswith("USER: "))
+
+    def test_gpt2_keeps_pair_token_ids_instead_of_chat_template(self) -> None:
+        tokenizer = mock.Mock()
+        tokenizer.return_value = {"input_ids": [11, 22, 33]}
+        conversation = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": " answer "},
+        ]
+        with mock.patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer):
+            inputs = reward_model._render_conversations(
+                "local-gpt2", [conversation],
+                trust_remote_code=False, reward_format="gpt2",
+            )
+        self.assertEqual(inputs, [[11, 22, 33]])
+        tokenizer.assert_called_once_with(
+            "\n\nHuman: question \n\nAssistant:", "answer", truncation=True, max_length=1023
+        )
+        tokenizer.apply_chat_template.assert_not_called()
+
     def test_sglang_backend_scores_models_sequentially_with_raw_logits(self) -> None:
         _FakeService.instances = []
         conversations = [
@@ -48,7 +75,6 @@ class RewardModelTests(unittest.TestCase):
                 ["rm", "cm"],
                 conversations,
                 {
-                    "max_length": 1024,
                     "dtype": "bfloat16",
                     "trust_remote_code": True,
                     "sglang_args": {"mem_fraction_static": 0.8},
@@ -78,6 +104,18 @@ class RewardModelTests(unittest.TestCase):
             self.assertEqual(service.calls[0][0], "/v1/embeddings")
             self.assertEqual(service.calls[0][1][0]["input"], "rendered a")
         self.assertEqual(render.call_count, 2)
+
+    def test_gpt2_scoring_does_not_override_model_context(self) -> None:
+        _FakeService.instances = []
+        with (
+            mock.patch.object(reward_model, "SGLangService", _FakeService),
+            mock.patch.object(reward_model, "_render_conversations", return_value=[[1, 2, 3]]),
+        ):
+            backend = reward_model.SGLangRewardModelBackend(dp_size=8, tensor_parallel_size=1)
+            backend.score_reward_models(["gpt2"], [[{"role": "user", "content": "q"}]], {"reward_format": "gpt2"})
+        service = _FakeService.instances[0]
+        self.assertNotIn("context_length", service.kwargs["model_kwargs"])
+        self.assertEqual(service.calls[0][1][0]["input"], [1, 2, 3])
 
     def test_scalar_embedding_requires_one_raw_score(self) -> None:
         self.assertEqual(

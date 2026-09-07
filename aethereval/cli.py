@@ -357,10 +357,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cost/safety-model path forwarded to RM-based benchmark metrics.",
     )
     metrics_group.add_argument(
-        "--rm-max-length",
+        "--rm-dp-size",
         type=int,
         default=None,
-        help="Maximum token length for RM-based benchmark metrics.",
+        help="RM data-parallel size; defaults to generation DP/TP when neither RM size is set.",
+    )
+    metrics_group.add_argument(
+        "--rm-tp-size",
+        type=int,
+        default=None,
+        help="RM tensor-parallel size; an omitted counterpart defaults to 1 when either RM size is set.",
     )
     metrics_group.add_argument(
         "--rm-dtype",

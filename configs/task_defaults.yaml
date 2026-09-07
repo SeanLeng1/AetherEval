@@ -61,8 +61,9 @@ safe-alignment-dynamic:
   temperature: 0.7
   top_p: 1.0
   metrics:
-    rm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-RM
-    cm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-CM
+    rm_model_path: Ray2333/gpt2-large-helpful-reward_model
+    cm_model_path: Ray2333/gpt2-large-harmless-reward_model
+    rm_reward_format: gpt2
 
 gpqa-diamond:
   n: 32

@@ -232,7 +232,8 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     metric_keys = (
         "rm_model_path",
         "cm_model_path",
-        "rm_max_length",
+        "rm_dp_size",
+        "rm_tp_size",
         "rm_dtype",
         "rm_trust_remote_code",
         "judge_model",

@@ -169,12 +169,27 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(env["SGLANG_GRPC_TOKEN_ID_ARRAY"], "1")
         self.assertEqual(env["TORCH_CPP_LOG_LEVEL"], "ERROR")
         self.assertEqual(env["TQDM_DISABLE"], "1")
+        self.assertNotIn("SGLANG_EXTERNAL_MODEL_PACKAGE", env)
         self.assertEqual(actor.url(), "grpc://10.0.0.1:55000")
         wait_for_port.assert_called_once_with(
             "127.0.0.1",
             55000,
             fake_process,
         )
+
+    def test_reward_adapter_is_selected_by_architecture_not_context_length(self) -> None:
+        for architecture in ("GPT2ForSequenceClassification", "GPT2LMHeadModel", "Qwen2ForSequenceClassification"):
+            with (
+                self.subTest(architecture=architecture),
+                mock.patch.dict(sys.modules, {"ray": SimpleNamespace(util=SimpleNamespace(get_node_ip_address=lambda: "127.0.0.1"))}),
+                mock.patch.object(sglang_service.subprocess, "Popen") as popen,
+                mock.patch.object(sglang_service, "_wait_for_port"),
+                mock.patch.object(sglang_service, "_free_port", side_effect=[50000, 51000]),
+                mock.patch("transformers.AutoConfig.from_pretrained", return_value=SimpleNamespace(architectures=[architecture])),
+            ):
+                sglang_service._SGLangServerActor("local-model", 1, {"is_embedding": True, "context_length": 1025})
+                env = popen.call_args.kwargs["env"]
+                self.assertEqual("SGLANG_EXTERNAL_MODEL_PACKAGE" in env, architecture == "GPT2ForSequenceClassification")
 
     def test_server_actor_retries_startup_port_collision(self) -> None:
         first_process = mock.Mock()

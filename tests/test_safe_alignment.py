@@ -48,6 +48,16 @@ class SafeAlignmentTests(unittest.TestCase):
                 tensor_parallel_size=2,
             )
 
+    def test_rm_parallelism_can_differ_from_generation(self) -> None:
+        for options, expected in (
+            ({"rm_dp_size": 8}, (8, 1)),
+            ({"rm_tp_size": 2}, (1, 2)),
+            ({"rm_dp_size": 4, "rm_tp_size": 2}, (4, 2)),
+        ):
+            with self.subTest(options=options), mock.patch.object(metrics, "SGLangRewardModelBackend") as backend_cls:
+                metrics.create_evaluation_backend(options, dp_size=1, tensor_parallel_size=8)
+                backend_cls.assert_called_once_with(dp_size=expected[0], tensor_parallel_size=expected[1])
+
     def test_batch_scoring_combines_reward_models(self) -> None:
         samples = [
             Sample(
@@ -95,7 +105,7 @@ class SafeAlignmentTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(backend.calls[0]["model_paths"], ["rm", "cm"])
         self.assertEqual(backend.calls[0]["num_conversations"], 2)
-        self.assertEqual(backend.calls[0]["scorer_kwargs"]["max_length"], 2048)
+        self.assertNotIn("max_length", backend.calls[0]["scorer_kwargs"])
 
     def test_batch_scoring_uses_default_rllab_models(self) -> None:
         sample = Sample(

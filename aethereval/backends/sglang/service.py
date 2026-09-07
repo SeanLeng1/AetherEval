@@ -299,6 +299,13 @@ class _SGLangServerActor:
         # contract. SGLang 0.5.15 uses array("q") for generated token IDs, so
         # request IDs must use the same container type.
         env["SGLANG_GRPC_TOKEN_ID_ARRAY"] = "1"
+        if model_kwargs.get("is_embedding"):
+            from transformers import AutoConfig
+
+            from aethereval.backends.sglang.models import reward_model_environment
+
+            config = AutoConfig.from_pretrained(model, trust_remote_code=model_kwargs.get("trust_remote_code", False))
+            env.update(reward_model_environment(config.architectures))
         node_ip = ray.util.get_node_ip_address()
         self._process: subprocess.Popen[Any] | None = None
 

@@ -9,7 +9,7 @@ from benchmark_utils.reward_model import SGLangRewardModelBackend
 
 PRIMARY_METRIC = "overall/average"
 # The CLI evaluates this task after candidate generation has been fully closed.
-# The evaluation backend then uses the same DP x TP GPU budget for RM and CM.
+# RM topology inherits generation unless explicitly overridden.
 REQUIRES_BACKEND = True
 _DEFAULT_METRICS = resolve_task_default_metrics("safe_alignment")
 DEFAULT_RM_MODEL_PATH = str(
@@ -32,7 +32,9 @@ def create_evaluation_backend(
     dp_size: int,
     tensor_parallel_size: int,
 ) -> SGLangRewardModelBackend:
-    del metric_options
+    if "rm_dp_size" in metric_options or "rm_tp_size" in metric_options:
+        dp_size = metric_options.get("rm_dp_size", 1)
+        tensor_parallel_size = metric_options.get("rm_tp_size", 1)
     return SGLangRewardModelBackend(
         dp_size=int(dp_size),
         tensor_parallel_size=int(tensor_parallel_size),
@@ -83,10 +85,10 @@ def score_generations_batch(
             )
 
     scorer_kwargs = {
-        "max_length": int(options.get("rm_max_length", 2048)),
         "dtype": options.get("rm_dtype", "auto"),
         "trust_remote_code": bool(options.get("rm_trust_remote_code", True)),
         "sglang_args": dict(options.get("rm_sglang_args", {})),
+        "reward_format": options.get("rm_reward_format", "chat"),
     }
     scores_by_model = backend.score_reward_models(
         [rm_model_path, cm_model_path], conversations, scorer_kwargs

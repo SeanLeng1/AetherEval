@@ -138,6 +138,14 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dp_size and tp_size"):
             resolve_run_arguments(args, {})
 
+    def test_rm_topology_overrides_yaml_independently_of_generation(self) -> None:
+        from aethereval.cli import build_parser
+
+        args = build_parser().parse_args(["--model", "candidate", "--dp-size", "1", "--tp-size", "8", "--rm-dp-size", "8", "--rm-tp-size", "1"])
+        resolved = resolve_run_arguments(args, {"metrics": {"rm_dp_size": 2, "rm_tp_size": 4}})
+        self.assertEqual((resolved["dp_size"], resolved["tp_size"]), (1, 8))
+        self.assertEqual((resolved["metric_options"]["rm_dp_size"], resolved["metric_options"]["rm_tp_size"]), (8, 1))
+
     def test_cli_overrides_yaml(self) -> None:
         cfg = {
             "run": {
@@ -178,7 +186,6 @@ class ConfigTests(unittest.TestCase):
             dtype=None,
             rm_model_path="/cli/rm",
             cm_model_path=None,
-            rm_max_length=None,
             rm_dtype=None,
             rm_trust_remote_code=None,
             vllm_arg=["trust_remote_code=true", "max_num_seqs=64"],

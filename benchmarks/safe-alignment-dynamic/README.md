@@ -30,10 +30,13 @@ harmlessness, plus an unconditioned control. With a 256-per-source cap that is 7
 problems and 4608 requests, not six disjoint sets of problems.
 No tokenizer filtering or truncation is added at preparation time.
 
-The HF dataset already contains construction-time length filtering. At revision
-`e9ec158a4ac0f19d4818b08196a0c743ca4e261f`, Alpaca retains 512/512 rows,
-HH-RLHF retains 8490/8520 and PKU retains 8211/8211. Thus it inherits GD2PO's test
-splits but is not identical to the unfiltered `safe-alignment` test set.
+Newly constructed HF revisions retain the full GD2PO test prompts without
+tokenizer-specific length filtering, matching static safe alignment's source
+splits. Older filtered revisions must be reconstructed to restore missing rows.
+Preparation only reads scores/calibration; it neither loads an RM nor requires a
+particular reward input format. At scoring time, the configured models and input
+format must match that calibration. Rebuild SFT/RL/evaluation artifacts together
+when changing scorers; Qwen and GPT-2 score labels are not interchangeable.
 
 To evaluate a sampled weight distribution instead of a grid:
 
@@ -89,13 +92,26 @@ Use identical sampling settings for every model. Use the saved SFT tokenizer/tem
 when comparing a base model, explicitly use the same template. Keep generation
 limits, sampling, model/RM precision and scorer checkpoints fixed.
 
-RM and CM paths default to `configs/task_defaults.yaml`, not the protocol. Local
-paths to the **same converted weights** can be supplied via `--rm-model-path` and
-`--cm-model-path`. The +1 CM convention is retained, not interpreted as a certified
-safety label. Default right truncation is the training RM limit (2048 tokens).
+RM paths default to `configs/task_defaults.yaml`: Ray2333's
+`gpt2-large-helpful-reward_model` and `gpt2-large-harmless-reward_model`. Local
+paths to the same original weights can be supplied via `--rm-model-path` and
+`--cm-model-path`; the latter remains the CLI name for the harmlessness model.
+Both raw scores are higher-is-better, not certified safety labels. The scorer
+pair-tokenizes the HH-formatted conversation and answer with longest-first
+truncation to 1023 tokens, matching construction and RL. The model context remains
+1024; one position is reserved for SGLang admission, not generated or scored.
+This boundary is one token shorter than RiC's 1024-token input cap. SGLang's external
+GPT-2 classification adapter preserves the original backbone and score head.
 Changing reward models requires a new calibration; path overrides alone do not
 make a different RM comparable. Scores are stored both raw and as
 $z_m=(r_m-\mu_m)/\sigma_m$ using TRAIN statistics, never evaluation statistics.
+
+RM parallelism inherits generation DP/TP by default. Use `--rm-dp-size 8
+--rm-tp-size 1` for eight independent scoring replicas, even when generation uses
+TP=8. Specifying only one RM size makes the other 1. Helpful and harmless models
+run sequentially, each using the selected topology and parallel request routing.
+Input limits belong to the reward-input protocol: GPT-2 uses 1023 tokens and
+legacy SafeRLHF chat scoring uses 2048. There is no separate length CLI override.
 
 ## What to inspect
 

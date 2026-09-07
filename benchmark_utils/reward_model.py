@@ -2,6 +2,17 @@ from typing import Any
 
 from aethereval.backends.sglang.service import SGLangService
 
+# Keep GPT-2's context at 1024; SGLang admission reserves one position.
+GPT2_INPUT_LIMIT = 1023
+SAFERLHF_INPUT_LIMIT = 2048
+
+
+def gpt2_reward_input(conversation, tokenizer):
+    roles = {"user": "Human", "assistant": "Assistant", "system": "System"}
+    query = "".join(f"\n\n{roles[m['role']]}: {m['content']}" for m in conversation[:-1]).rstrip() + " \n\nAssistant:"
+    encoded = tokenizer(query, conversation[-1]["content"].strip(), truncation=True, max_length=GPT2_INPUT_LIMIT)
+    return encoded["input_ids"]
+
 
 def _format_conversation(tokenizer: Any, messages: list[dict[str, str]]) -> str:
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
@@ -19,13 +30,24 @@ def _format_conversation(tokenizer: Any, messages: list[dict[str, str]]) -> str:
     return text
 
 
+def saferlhf_reward_input(conversation, tokenizer):
+    text = _format_conversation(tokenizer, conversation)
+    ids = tokenizer.encode(text, add_special_tokens=True)
+    if len(ids) > SAFERLHF_INPUT_LIMIT:
+        ids = ids[:SAFERLHF_INPUT_LIMIT]
+        text = tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        if tokenizer.encode(text, add_special_tokens=True) != ids:
+            raise RuntimeError("SafeRLHF input cannot be losslessly truncated through the text API")
+    return text
+
+
 def _render_conversations(
     model_path: str,
     conversations: list[list[dict[str, str]]],
     *,
-    max_length: int,
     trust_remote_code: bool,
-) -> list[str]:
+    reward_format: str = "chat",
+) -> list[str | list[int]]:
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:
@@ -38,30 +60,14 @@ def _render_conversations(
         trust_remote_code=trust_remote_code,
     )
     tokenizer.truncation_side = "right"
-    rendered: list[str] = []
+    rendered: list[str | list[int]] = []
     for conversation in conversations:
-        text = _format_conversation(tokenizer, conversation)
-        ids = [
-            int(token)
-            for token in tokenizer.encode(text, add_special_tokens=True)
-        ]
-        if len(ids) > max_length:
-            target_ids = ids[:max_length]
-            text = tokenizer.decode(
-                target_ids,
-                skip_special_tokens=False,
-                clean_up_tokenization_spaces=False,
-            )
-            roundtrip_ids = [
-                int(token)
-                for token in tokenizer.encode(text, add_special_tokens=True)
-            ]
-            if roundtrip_ids != target_ids:
-                raise RuntimeError(
-                    "RM prompt cannot be losslessly truncated through the "
-                    f"gRPC text API for model {model_path!r}"
-                )
-        rendered.append(text)
+        if reward_format == "gpt2":
+            rendered.append(gpt2_reward_input(conversation, tokenizer))
+            continue
+        if reward_format != "chat":
+            raise ValueError(f"Unknown reward input format: {reward_format}")
+        rendered.append(saferlhf_reward_input(conversation, tokenizer))
     return rendered
 
 
@@ -124,9 +130,6 @@ class SGLangRewardModelBackend:
             return {path: [] for path in unique_paths}
 
         options = dict(scorer_kwargs or {})
-        max_length = int(options.get("max_length", 2048))
-        if max_length < 1:
-            raise ValueError(f"RM max_length must be >= 1, got {max_length}")
         trust_remote_code = bool(options.get("trust_remote_code", True))
         dtype = options.get("dtype", "auto")
         extra_sglang_args = options.get("sglang_args", {})
@@ -138,8 +141,8 @@ class SGLangRewardModelBackend:
             rendered_inputs = _render_conversations(
                 model_path,
                 conversations,
-                max_length=max_length,
                 trust_remote_code=trust_remote_code,
+                reward_format=options.get("reward_format", "chat"),
             )
             model_kwargs = dict(extra_sglang_args)
             # Sequence-classification scoring is prefill-only. Capturing the
