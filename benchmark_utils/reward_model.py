@@ -2,8 +2,8 @@ from typing import Any
 
 from aethereval.backends.sglang.service import SGLangService
 
-# Keep GPT-2's context at 1024; SGLang admission reserves one position.
-GPT2_INPUT_LIMIT = 1023
+# GPT-2 classification admits the full native context without generation.
+GPT2_INPUT_LIMIT = 1024
 SAFERLHF_INPUT_LIMIT = 2048
 
 

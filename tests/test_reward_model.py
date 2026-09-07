@@ -49,7 +49,7 @@ class RewardModelTests(unittest.TestCase):
             )
         self.assertEqual(inputs, [[11, 22, 33]])
         tokenizer.assert_called_once_with(
-            "\n\nHuman: question \n\nAssistant:", "answer", truncation=True, max_length=1023
+            "\n\nHuman: question \n\nAssistant:", "answer", truncation=True, max_length=1024
         )
         tokenizer.apply_chat_template.assert_not_called()
 

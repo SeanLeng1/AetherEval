@@ -1,8 +1,8 @@
 import inspect
+import os
 import struct
 from numbers import Real
 from typing import Any
-
 
 _OPTIONAL_REQUEST_FIELDS = ("input_embeds", "token_type_ids")
 
@@ -140,6 +140,11 @@ def disable_smg_http_sidecar(server: Any) -> None:
 
 
 def main() -> None:
+    if os.environ.get("SGLANG_EXTERNAL_MODEL_PACKAGE") == "aethereval.backends.sglang.models":
+        from aethereval.backends.sglang.models.gpt2_context import install_context_patch
+
+        install_context_patch()
+
     import smg_grpc_servicer.sglang.request_manager as request_manager
     import smg_grpc_servicer.sglang.server as server
     import smg_grpc_servicer.sglang.servicer as servicer

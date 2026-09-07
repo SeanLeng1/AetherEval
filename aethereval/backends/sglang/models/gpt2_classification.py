@@ -6,6 +6,10 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.gpt2 import GPT2LMHeadModel, GPT2Model
 from torch import nn
 
+from .gpt2_context import install_context_patch
+
+install_context_patch()
+
 
 class GPT2ForSequenceClassification(nn.Module):
     def __init__(self, config, quant_config=None, prefix=""):

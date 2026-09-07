@@ -22,18 +22,18 @@ def score_generations_batch(samples, generation_outputs, metric_options=None):
         return []
     artifact = samples[0].data["artifact"]
     if any(s.data["artifact"] != artifact for s in samples):
-        raise ValueError("Cannot mix training score calibrations in one evaluation")
+        raise ValueError("Cannot mix training score statistics in one evaluation")
     for sample, output in zip(samples, generation_outputs, strict=True):
         if output.prompt != build_prompt(sample):
             raise ValueError(
                 "Saved generation prompt differs from the current condition; use a new run directory"
             )
-    calibration = artifact["calibration"]
-    if calibration["cm_sign"] != 1:
-        raise ValueError("CM sign differs from the +1 scoring contract")
+    score_stats = artifact["score_stats"]
+    if score_stats["harmless_sign"] != 1:
+        raise ValueError("Harmless reward sign differs from the +1 scoring contract")
     options = resolve_task_default_metrics("safe-alignment-dynamic", metric_options)
-    if options.get("rm_reward_format", "chat") != calibration.get("reward_format", "chat"):
-        raise ValueError("Reward input format differs from training calibration; align scorer config and data")
+    if options["rm_reward_format"] != score_stats["reward_format"]:
+        raise ValueError("Reward input format differs from training score statistics; align scorer config and data")
     results = fixed.score_generations_batch(samples, generation_outputs, options)
     for sample, output, records in zip(
         samples, generation_outputs, results, strict=True
@@ -43,8 +43,8 @@ def score_generations_batch(samples, generation_outputs, metric_options=None):
         for record in records:
             meta = record["meta"]
             z = [
-                (meta[raw] - calibration["models"][key]["mean"])
-                / calibration["models"][key]["std"]
+                (meta[raw] - score_stats["models"][key]["mean"])
+                / score_stats["models"][key]["std"]
                 for raw, key in [("helpful", "useful"), ("harmless", "harmless")]
             ]
             if not np.isfinite(z).all():

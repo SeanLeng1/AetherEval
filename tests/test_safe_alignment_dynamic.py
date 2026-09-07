@@ -23,10 +23,10 @@ def protocol():
         "weights": [[0, 1], [0.5, 0.5], [1, 0]],
         "score_conditioning": {
             "components": COMPONENTS,
-            "calibration": {
+            "score_stats": {
                 "reward_format": "gpt2",
-                "cm_sign": 1,
-                "max_length": 1023,
+                "harmless_sign": 1,
+                "max_length": 1024,
                 "models": {
                     "useful": {"mean": 10, "std": 2, "repo": "rm"},
                     "harmless": {"mean": -3, "std": 4, "repo": "cm"},
@@ -201,9 +201,25 @@ class DynamicAlignmentTests(unittest.TestCase):
 
     def test_scoring_rejects_mismatched_input_protocol(self):
         sample = self.samples[0]
-        sample.data["artifact"]["calibration"]["reward_format"] = "chat"
+        sample.data["artifact"]["score_stats"]["reward_format"] = "chat"
         output = GenerationOutput(sample.id, task.build_prompt(sample), ["answer"])
         with self.assertRaisesRegex(ValueError, "input format differs"):
+            metrics.score_generations_batch([sample], [output])
+
+    def test_scoring_requires_explicit_calibration_fields(self):
+        for key in ("reward_format", "harmless_sign"):
+            with self.subTest(key=key):
+                sample = copy.deepcopy(self.samples[0])
+                del sample.data["artifact"]["score_stats"][key]
+                output = GenerationOutput(sample.id, task.build_prompt(sample), ["answer"])
+                with self.assertRaisesRegex(KeyError, key):
+                    metrics.score_generations_batch([sample], [output])
+
+    def test_scoring_rejects_inverted_harmless_sign(self):
+        sample = self.samples[0]
+        sample.data["artifact"]["score_stats"]["harmless_sign"] = -1
+        output = GenerationOutput(sample.id, task.build_prompt(sample), ["answer"])
+        with self.assertRaisesRegex(ValueError, "Harmless reward sign"):
             metrics.score_generations_batch([sample], [output])
 
     def test_wrong_prediction_protocol_is_rejected(self):
@@ -215,10 +231,10 @@ class DynamicAlignmentTests(unittest.TestCase):
     def test_artifact_matches_train_statistics_not_test_scores(self):
         load_artifact = prepare.load_artifact
 
-        calibration = protocol()["score_conditioning"]["calibration"]
-        calibration.pop("reward_format")  # Preparation accepts scores without a scorer-format dependency.
+        score_stats = protocol()["score_conditioning"]["score_stats"]
+        score_stats.pop("reward_format")  # Preparation accepts scores without a scorer-format dependency.
         metadata = self.root / "scoring_metadata.json"
-        metadata.write_text(json.dumps(calibration))
+        metadata.write_text(json.dumps(score_stats))
         train = [
             {
                 "reward_useful": 10 + 2 * i,

@@ -36,7 +36,7 @@ def load_artifact(rl_data=None, revision=None):
     path = hf_hub_download(
         DATASET, "scoring_metadata.json", repo_type="dataset", revision=revision
     )
-    calibration = json.loads(Path(path).read_text())
+    score_stats = json.loads(Path(path).read_text())
     train = load_dataset(DATASET, "hh-rlhf", split="train", revision=revision)
     raw = np.asarray(
         [
@@ -45,10 +45,10 @@ def load_artifact(rl_data=None, revision=None):
             if row["sft_eligible"]
         ]
     )
-    means = [calibration["models"][c["score_key"]]["mean"] for c in COMPONENTS]
-    stds = [calibration["models"][c["score_key"]]["std"] for c in COMPONENTS]
+    means = [score_stats["models"][c["score_key"]]["mean"] for c in COMPONENTS]
+    stds = [score_stats["models"][c["score_key"]]["std"] for c in COMPONENTS]
     if not len(raw) or not np.isfinite(raw).all() or np.any(np.asarray(stds) <= 0):
-        raise ValueError("Invalid eligible training scores/calibration")
+        raise ValueError("Invalid eligible training scores or statistics")
     low, high = np.quantile((raw - means) / stds, [0.05, 0.95], axis=0)
     if np.any(high <= low):
         raise ValueError("Constant score range cannot support target mapping")
@@ -57,7 +57,7 @@ def load_artifact(rl_data=None, revision=None):
         "dataset": DATASET,
         "revision": revision,
         "components": COMPONENTS,
-        "calibration": calibration,
+        "score_stats": score_stats,
         "target_mapping": {
             "method": "ric_p2_quantile",
             "components": [c["key"] for c in COMPONENTS],
@@ -93,7 +93,7 @@ def main():
     parser.add_argument(
         "--rl-data",
         type=Path,
-        help="Reuse exact calibration/mapping from RL train.parquet",
+        help="Reuse exact score statistics and target mapping from RL train.parquet",
     )
     parser.add_argument(
         "--revision",
@@ -116,10 +116,8 @@ def main():
     artifact = load_artifact(args.rl_data, args.revision)
     if artifact["task"] != "safe-alignment" or artifact["components"] != COMPONENTS:
         raise ValueError("Expected the safe-alignment training score contract")
-    if artifact["calibration"]["cm_sign"] != 1:
-        raise ValueError(
-            "Converted CM scoring currently follows the +1 training convention"
-        )
+    if artifact["score_stats"]["harmless_sign"] != 1:
+        raise ValueError("Harmless reward scoring requires the +1 training convention")
     weights = (
         np.column_stack(
             (np.linspace(0, 1, args.num_weights), np.linspace(1, 0, args.num_weights))
