@@ -47,6 +47,7 @@ def _render_conversations(
     *,
     trust_remote_code: bool,
     reward_format: str = "chat",
+    max_length: int | None = None,
 ) -> list[str | list[int]]:
     try:
         from transformers import AutoTokenizer
@@ -67,7 +68,16 @@ def _render_conversations(
             continue
         if reward_format != "chat":
             raise ValueError(f"Unknown reward input format: {reward_format}")
-        rendered.append(saferlhf_reward_input(conversation, tokenizer))
+        if max_length is None:
+            rendered.append(saferlhf_reward_input(conversation, tokenizer))
+        else:
+            text = tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=False,
+            )
+            encoded = tokenizer(
+                text, add_special_tokens=False, truncation=True, max_length=max_length,
+            )
+            rendered.append(encoded["input_ids"])
     return rendered
 
 
@@ -143,6 +153,7 @@ class SGLangRewardModelBackend:
                 conversations,
                 trust_remote_code=trust_remote_code,
                 reward_format=options.get("reward_format", "chat"),
+                max_length=options.get("max_length"),
             )
             model_kwargs = dict(extra_sglang_args)
             # Sequence-classification scoring is prefill-only. Capturing the

@@ -12,8 +12,8 @@ from aethereval.core.io import write_json, write_jsonl
 
 DATASET = "RLLab/safe-alignment-dynamic"
 COMPONENTS = [
-    {"key": "reward_useful", "score_key": "useful", "label": "helpfulness"},
-    {"key": "reward_harmless", "score_key": "harmless", "label": "harmlessness"},
+    {"key": "helpful", "field": "reward_helpful", "label": "helpfulness"},
+    {"key": "harmless", "field": "reward_harmless", "label": "harmlessness"},
 ]
 SUBSETS = ["alpaca", "hh-rlhf", "pku-saferlhf"]
 
@@ -40,13 +40,13 @@ def load_artifact(rl_data=None, revision=None):
     train = load_dataset(DATASET, "hh-rlhf", split="train", revision=revision)
     raw = np.asarray(
         [
-            [row[c["key"]] for c in COMPONENTS]
+            [row[c["field"]] for c in COMPONENTS]
             for row in tqdm(train, desc="Read eligible TRAIN scores")
             if row["sft_eligible"]
         ]
     )
-    means = [score_stats["models"][c["score_key"]]["mean"] for c in COMPONENTS]
-    stds = [score_stats["models"][c["score_key"]]["std"] for c in COMPONENTS]
+    means = [score_stats["models"][c["key"]]["mean"] for c in COMPONENTS]
+    stds = [score_stats["models"][c["key"]]["std"] for c in COMPONENTS]
     if not len(raw) or not np.isfinite(raw).all() or np.any(np.asarray(stds) <= 0):
         raise ValueError("Invalid eligible training scores or statistics")
     low, high = np.quantile((raw - means) / stds, [0.05, 0.95], axis=0)

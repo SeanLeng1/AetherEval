@@ -96,16 +96,15 @@ Use identical sampling settings for every model. Use the saved SFT tokenizer/tem
 when comparing a base model, explicitly use the same template. Keep generation
 limits, sampling, model/RM precision and scorer checkpoints fixed.
 
-RM paths default to `configs/task_defaults.yaml`: Ray2333's
-`gpt2-large-helpful-reward_model` and `gpt2-large-harmless-reward_model`. Local
+RM paths default to `configs/task_defaults.yaml`: RLLab's
+`qwen3-4b-safe-alignment-helpful` and `qwen3-4b-safe-alignment-harmless`. Local
 paths to the same original weights can be supplied via `--rm-model-path` and
 `--cm-model-path`; the latter remains the CLI name for the harmlessness model.
-Both raw scores are higher-is-better, not certified safety labels. The scorer
-pair-tokenizes the HH-formatted conversation and answer with longest-first
-truncation to 1024 tokens, matching construction, RL and RiC's input cap.
-SGLang's GPT-2 classification adapter admits exactly the native context length;
-the position table, backbone and score head are unchanged. Generation and other
-architectures retain their upstream length checks.
+Both raw scores are higher-is-better, not certified safety labels. The scorer uses
+the saved chat template, right-truncates to 16384 tokens, and submits token IDs,
+matching offline scoring and RL. Default scoring precision is float16; the server
+context is 32768 to leave room above the input cap. These settings are independent
+of the policy's 1024-token generation limit.
 Changing reward models requires new training score statistics; path overrides alone do not
 make a different RM comparable. Scores are stored both raw and as
 $z_m=(r_m-\mu_m)/\sigma_m$ using TRAIN statistics, never evaluation statistics.
@@ -115,7 +114,8 @@ RM parallelism inherits generation DP/TP by default. Use `--rm-dp-size 8
 TP=8. Specifying only one RM size makes the other 1. Helpful and harmless models
 run sequentially, each using the selected topology and parallel request routing.
 Input limits belong to the reward-input protocol: GPT-2 uses 1024 tokens and
-legacy SafeRLHF chat scoring uses 2048. There is no separate length CLI override.
+legacy SafeRLHF chat scoring uses 2048. Dynamic Qwen scoring uses the explicit
+`metrics.rm_max_length: 16384` task default, aligned with the frozen training statistics.
 
 ## What to inspect
 

@@ -24,11 +24,11 @@ def protocol():
         "score_conditioning": {
             "components": COMPONENTS,
             "score_stats": {
-                "reward_format": "gpt2",
+                "reward_format": "chat",
                 "harmless_sign": 1,
-                "max_length": 1024,
+                "max_length": 16384,
                 "models": {
-                    "useful": {"mean": 10, "std": 2, "repo": "rm"},
+                    "helpful": {"mean": 10, "std": 2, "repo": "rm"},
                     "harmless": {"mean": -3, "std": 4, "repo": "cm"},
                 },
             },
@@ -118,10 +118,13 @@ class DynamicAlignmentTests(unittest.TestCase):
         self.assertEqual(bundle.task_module.DEFAULT_GEN["max_new_tokens"], 1024)
         self.assertEqual(bundle.task_module.DEFAULT_GEN["temperature"], 0.7)
         self.assertEqual(bundle.task_module.DEFAULT_GEN["n"], 4)
-        self.assertEqual(
-            bundle.task_module.DEFAULT_GEN,
-            load_task("safe-alignment").task_module.DEFAULT_GEN,
-        )
+        from aethereval.core.task_defaults import resolve_task_default_metrics
+
+        options = resolve_task_default_metrics("safe-alignment-dynamic")
+        self.assertEqual(options["rm_model_path"], "RLLab/qwen3-4b-safe-alignment-helpful")
+        self.assertEqual(options["cm_model_path"], "RLLab/qwen3-4b-safe-alignment-harmless")
+        self.assertEqual(options["rm_reward_format"], "chat")
+        self.assertEqual(options["rm_max_length"], 16384)
 
     def test_full_runner_generation_scoring_and_resume(self):
         from aethereval.core.runner import _run_single_task
@@ -201,7 +204,7 @@ class DynamicAlignmentTests(unittest.TestCase):
 
     def test_scoring_rejects_mismatched_input_protocol(self):
         sample = self.samples[0]
-        sample.data["artifact"]["score_stats"]["reward_format"] = "chat"
+        sample.data["artifact"]["score_stats"]["reward_format"] = "gpt2"
         output = GenerationOutput(sample.id, task.build_prompt(sample), ["answer"])
         with self.assertRaisesRegex(ValueError, "input format differs"):
             metrics.score_generations_batch([sample], [output])
@@ -237,12 +240,12 @@ class DynamicAlignmentTests(unittest.TestCase):
         metadata.write_text(json.dumps(score_stats))
         train = [
             {
-                "reward_useful": 10 + 2 * i,
+                "reward_helpful": 10 + 2 * i,
                 "reward_harmless": -3 + 4 * i,
                 "sft_eligible": True,
             }
             for i in range(10)
-        ] + [{"reward_useful": 10000, "reward_harmless": 10000, "sft_eligible": False}]
+        ] + [{"reward_helpful": 10000, "reward_harmless": 10000, "sft_eligible": False}]
         with (
             mock.patch("datasets.load_dataset", return_value=train) as loader,
             mock.patch("huggingface_hub.hf_hub_download", return_value=str(metadata)),
@@ -287,7 +290,7 @@ class DynamicAlignmentTests(unittest.TestCase):
     def test_template_matches_aetherrl_when_available(self):
         import importlib.util
 
-        path = Path("/home/jixuanl/AetherRL/aetherrl/utils/score_conditioning.py")
+        path = Path("/home/jixuanl/AetherRL/aetherrl/data/conditioning.py")
         if not path.exists():
             self.skipTest("Optional cross-repository contract check")
         spec = importlib.util.spec_from_file_location("rl_score_conditioning", path)
@@ -310,7 +313,8 @@ class DynamicAlignmentTests(unittest.TestCase):
         class Backend:
             def score_reward_models(inner, paths, conversations, options):
                 self.assertEqual(paths, ["rm", "cm"])
-                self.assertEqual(options["reward_format"], "gpt2")
+                self.assertEqual(options["reward_format"], "chat")
+                self.assertEqual(options["max_length"], 16384)
                 self.assertNotIn("Target scores", json.dumps(conversations))
                 self.assertEqual(len(conversations[0]), 4)
                 return {"rm": [12.0, 14.0], "cm": [5.0, 9.0]}

@@ -45,7 +45,7 @@ def score_generations_batch(samples, generation_outputs, metric_options=None):
             z = [
                 (meta[raw] - score_stats["models"][key]["mean"])
                 / score_stats["models"][key]["std"]
-                for raw, key in [("helpful", "useful"), ("harmless", "harmless")]
+                for raw, key in [("helpful", "helpful"), ("harmless", "harmless")]
             ]
             if not np.isfinite(z).all():
                 raise ValueError(f"Nonfinite normalized RM score for {sample.id}")

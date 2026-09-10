@@ -90,6 +90,8 @@ def score_generations_batch(
         "sglang_args": dict(options.get("rm_sglang_args", {})),
         "reward_format": options.get("rm_reward_format", "chat"),
     }
+    if "rm_max_length" in options:
+        scorer_kwargs["max_length"] = options["rm_max_length"]
     scores_by_model = backend.score_reward_models(
         [rm_model_path, cm_model_path], conversations, scorer_kwargs
     )

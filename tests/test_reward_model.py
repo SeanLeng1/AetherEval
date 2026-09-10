@@ -26,6 +26,35 @@ class _FakeService:
 
 
 class RewardModelTests(unittest.TestCase):
+    def test_qwen_chat_scoring_keeps_token_ids_and_explicit_input_limit(self):
+        tokenizer = mock.Mock()
+        tokenizer.apply_chat_template.return_value = "rendered conversation"
+        tokenizer.return_value = {"input_ids": [11, 22, 33]}
+        conversation = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        _FakeService.instances = []
+        with (
+            mock.patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
+            mock.patch.object(reward_model, "SGLangService", _FakeService),
+        ):
+            backend = reward_model.SGLangRewardModelBackend(dp_size=1, tensor_parallel_size=1)
+            backend.score_reward_models(["qwen"], [conversation], {
+                "reward_format": "chat", "max_length": 16384,
+                "sglang_args": {"context_length": 32768},
+            })
+        tokenizer.apply_chat_template.assert_called_once_with(
+            conversation, tokenize=False, add_generation_prompt=False,
+        )
+        tokenizer.assert_called_once_with(
+            "rendered conversation", add_special_tokens=False, truncation=True, max_length=16384,
+        )
+        self.assertEqual(tokenizer.truncation_side, "right")
+        service = _FakeService.instances[0]
+        self.assertEqual(service.calls[0][1][0]["input"], [11, 22, 33])
+        self.assertEqual(service.kwargs["model_kwargs"]["context_length"], 32768)
+
     def test_saferlhf_input_uses_fixed_2048_token_budget(self) -> None:
         tokenizer = mock.Mock(chat_template=None)
         tokenizer.encode.side_effect = lambda text, **kwargs: list(text)

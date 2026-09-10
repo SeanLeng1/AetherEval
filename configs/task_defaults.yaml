@@ -54,16 +54,24 @@ safe-alignment:
   metrics:
     rm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-RM
     cm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-CM
+    rm_max_length: 16384
+    rm_dtype: float16
+    rm_sglang_args:
+      context_length: 32768
 
 safe-alignment-dynamic:
   n: 4
-  max_new_tokens: 512
+  max_new_tokens: 1024
   temperature: 0.7
   top_p: 1.0
   metrics:
-    rm_model_path: Ray2333/gpt2-large-helpful-reward_model
-    cm_model_path: Ray2333/gpt2-large-harmless-reward_model
-    rm_reward_format: gpt2
+    rm_model_path: RLLab/qwen3-4b-safe-alignment-helpful
+    cm_model_path: RLLab/qwen3-4b-safe-alignment-harmless
+    rm_reward_format: chat
+    rm_max_length: 16384
+    rm_dtype: float16
+    rm_sglang_args:
+      context_length: 32768
 
 gpqa-diamond:
   n: 32
