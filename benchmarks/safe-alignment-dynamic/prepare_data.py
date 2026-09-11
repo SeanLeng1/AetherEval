@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-from tqdm.auto import tqdm
 
 from aethereval.core.io import write_json, write_jsonl
 
@@ -16,6 +15,16 @@ COMPONENTS = [
     {"key": "harmless", "field": "reward_harmless", "label": "harmlessness"},
 ]
 SUBSETS = ["alpaca", "hh-rlhf", "pku-saferlhf"]
+# Match Dynamic RL's unfiltered validation source and stable row identities.
+TEST_ROOT = (
+    "https://raw.githubusercontent.com/Qwen-Applications/GD2PO/"
+    "f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/safe-alignment/dataset"
+)
+TEST_FILES = {
+    "alpaca": "alpaca_prompt_only/test.parquet",
+    "hh-rlhf": "anthropic_hh_rlhf/test.parquet",
+    "pku-saferlhf": "pku-saferlhf/test.parquet",
+}
 
 
 def load_artifact(rl_data=None, revision=None):
@@ -29,27 +38,25 @@ def load_artifact(rl_data=None, revision=None):
         ).to_pylist()[0]
         return json.loads(row["extra_info"]["score_conditioning"])
 
-    from datasets import load_dataset
     from huggingface_hub import HfApi, hf_hub_download
 
     revision = revision or HfApi().dataset_info(DATASET).sha
     path = hf_hub_download(
-        DATASET, "scoring_metadata.json", repo_type="dataset", revision=revision
+        DATASET, "sft-prompts/scoring/train.json", repo_type="dataset", revision=revision
     )
     score_stats = json.loads(Path(path).read_text())
-    train = load_dataset(DATASET, "hh-rlhf", split="train", revision=revision)
-    raw = np.asarray(
-        [
-            [row[c["field"]] for c in COMPONENTS]
-            for row in tqdm(train, desc="Read eligible TRAIN scores")
-            if row["sft_eligible"]
-        ]
-    )
-    means = [score_stats["models"][c["key"]]["mean"] for c in COMPONENTS]
-    stds = [score_stats["models"][c["key"]]["std"] for c in COMPONENTS]
-    if not len(raw) or not np.isfinite(raw).all() or np.any(np.asarray(stds) <= 0):
-        raise ValueError("Invalid eligible training scores or statistics")
-    low, high = np.quantile((raw - means) / stds, [0.05, 0.95], axis=0)
+    if score_stats["config"] != "sft-prompts" or score_stats["split"] != "train":
+        raise ValueError("Expected scoring statistics from sft-prompts/train")
+    models = [score_stats["models"][c["key"]] for c in COMPONENTS]
+    means = np.asarray([model["mean"] for model in models], dtype=float)
+    stds = np.asarray([model["std"] for model in models], dtype=float)
+    quantiles = np.asarray([[model[q] for model in models] for q in ("q05", "q95")], dtype=float)
+    if not np.isfinite(means).all() or not np.isfinite(stds).all() or np.any(stds <= 0):
+        raise ValueError("Invalid training score statistics")
+    # Positive affine normalization commutes with the stored response-level quantiles.
+    low, high = (quantiles - means) / stds
+    if not np.isfinite([low, high]).all():
+        raise ValueError("Invalid training score quantiles")
     if np.any(high <= low):
         raise ValueError("Constant score range cannot support target mapping")
     return {
@@ -66,6 +73,23 @@ def load_artifact(rl_data=None, revision=None):
             "high": high.tolist(),
         },
     }
+
+
+def load_test(subset):
+    from datasets import load_dataset
+
+    rows = load_dataset(
+        "parquet", data_files={"test": f"{TEST_ROOT}/{TEST_FILES[subset]}"}, split="test"
+    )
+    return [
+        {
+            "prompt_id": f"{subset}/test/{index}",
+            "subset": subset,
+            "split": "test",
+            "messages": row["prompt"],
+        }
+        for index, row in enumerate(rows)
+    ]
 
 
 def select_problems(rows, *, limit, seed):
@@ -126,14 +150,9 @@ def main():
         else np.random.default_rng(args.seed).dirichlet([1, 1], args.num_weights)
     )
     weights = weights[np.argsort(weights[:, 0])].tolist()
-    from datasets import load_dataset
-
     problems = []
     for subset in SUBSETS:
-        test = load_dataset(
-            artifact["dataset"], subset, split="test", revision=artifact["revision"]
-        )
-        selected = select_problems(test, limit=args.limit_per_source, seed=args.seed)
+        selected = select_problems(load_test(subset), limit=args.limit_per_source, seed=args.seed)
         if not selected:
             raise ValueError(f"Empty evaluation source: {subset}")
         problems.extend(selected)

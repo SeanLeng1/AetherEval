@@ -235,26 +235,49 @@ class DynamicAlignmentTests(unittest.TestCase):
         load_artifact = prepare.load_artifact
 
         score_stats = protocol()["score_conditioning"]["score_stats"]
-        score_stats.pop("reward_format")  # Preparation accepts scores without a scorer-format dependency.
-        metadata = self.root / "scoring_metadata.json"
+        score_stats.update(config="sft-prompts", split="train")
+        for model in score_stats["models"].values():
+            model.update(q05=model["mean"] + 0.45 * model["std"], q95=model["mean"] + 8.55 * model["std"])
+        metadata = self.root / "train.json"
         metadata.write_text(json.dumps(score_stats))
-        train = [
-            {
-                "reward_helpful": 10 + 2 * i,
-                "reward_harmless": -3 + 4 * i,
-                "sft_eligible": True,
-            }
-            for i in range(10)
-        ] + [{"reward_helpful": 10000, "reward_harmless": 10000, "sft_eligible": False}]
         with (
-            mock.patch("datasets.load_dataset", return_value=train) as loader,
-            mock.patch("huggingface_hub.hf_hub_download", return_value=str(metadata)),
+            mock.patch("datasets.load_dataset", side_effect=AssertionError("Must not load training rows")),
+            mock.patch("huggingface_hub.hf_hub_download", return_value=str(metadata)) as download,
         ):
             artifact = load_artifact(revision="frozen-test-revision")
-        self.assertEqual(loader.call_args.kwargs["split"], "train")
-        self.assertEqual(loader.call_args.kwargs["revision"], "frozen-test-revision")
+        download.assert_called_once_with(
+            prepare.DATASET, "sft-prompts/scoring/train.json", repo_type="dataset", revision="frozen-test-revision"
+        )
+        self.assertEqual(artifact["score_stats"], score_stats)
+        self.assertEqual(artifact["revision"], "frozen-test-revision")
         np.testing.assert_allclose(artifact["target_mapping"]["low"], [0.45, 0.45])
         np.testing.assert_allclose(artifact["target_mapping"]["high"], [8.55, 8.55])
+        for field, value in (("std", 0), ("std", float("nan")), ("q05", float("inf")), ("q95", -100)):
+            with self.subTest(field=field, value=value):
+                invalid = copy.deepcopy(score_stats)
+                invalid["models"]["helpful"][field] = value
+                metadata.write_text(json.dumps(invalid))
+                with mock.patch("huggingface_hub.hf_hub_download", return_value=str(metadata)):
+                    with self.assertRaises(ValueError):
+                        load_artifact(revision="frozen-test-revision")
+
+    def test_fixed_test_sources_preserve_all_conversations(self):
+        conversation = [
+            {"role": "user", "content": "Earlier"},
+            {"role": "assistant", "content": "Reply"},
+            {"role": "user", "content": "Long question " * 10000},
+        ]
+        for subset in prepare.SUBSETS:
+            with self.subTest(subset=subset):
+                with mock.patch("datasets.load_dataset", return_value=[{"prompt": conversation}] * 2) as loader:
+                    rows = prepare.load_test(subset)
+                loader.assert_called_once_with(
+                    "parquet", data_files={"test": f"{prepare.TEST_ROOT}/{prepare.TEST_FILES[subset]}"}, split="test"
+                )
+                selected = select_problems(rows, limit=0, seed=42)
+                self.assertEqual(len(selected), 2)
+                self.assertEqual({r["prompt_id"] for r in selected}, {f"{subset}/test/0", f"{subset}/test/1"})
+                self.assertTrue(all(r["messages"] == conversation for r in selected))
 
     def test_artifact_can_be_read_from_rl_parquet(self):
         import pyarrow as pa

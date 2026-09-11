@@ -16,10 +16,11 @@ python benchmarks/safe-alignment-dynamic/prepare_data.py \
 ```
 
 `--rl-data` reads the first `train.parquet` row's score-conditioning contract. It
-reuses the exact SFT/RL score statistics, mapping and HF revision, then downloads only
-the test subsets. Alternatively omit it and supply `--revision <SFT-HF-revision>`:
-the processor reads HF training reference scores to reproduce the training
-mapping. It performs no generation or RM inference. Omitting both resolves the
+reuses the exact SFT/RL score statistics, mapping and HF revision. Alternatively
+omit it and supply `--revision <SFT-HF-revision>`: the processor reads
+`sft-prompts/scoring/train.json`, using its mean/std and q05/q95 to reproduce the
+training mapping without downloading training rows. It performs no generation or
+RM inference. Omitting both resolves the
 current dataset revision; use that only if it is also the SFT training revision.
 
 Default: all held-out prompt IDs from Alpaca, HH-RLHF and PKU. An optional
@@ -30,9 +31,9 @@ harmlessness, plus an unconditioned control. With a 256-per-source cap that is 7
 problems and 4608 requests, not six disjoint sets of problems.
 No tokenizer filtering or truncation is added at preparation time.
 
-Newly constructed HF revisions retain the full GD2PO test prompts without
-tokenizer-specific length filtering, matching static safe alignment's source
-splits. Older filtered revisions must be reconstructed to restore missing rows.
+Test prompts come directly from GD2PO's original test parquets at commit
+`f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02`, matching Dynamic RL's fixed validation
+source without tokenizer filtering. They do not require HF test subsets.
 Preparation only reads scores/statistics; it neither loads an RM nor requires a
 particular reward input format. At scoring time, the configured models and input
 format must match those statistics. Rebuild SFT/RL/evaluation artifacts together
