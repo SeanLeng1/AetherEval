@@ -54,7 +54,7 @@ def score_generations_batch(
     generation_outputs: list[GenerationOutput],
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    options = metric_options or {}
+    options = resolve_task_default_metrics("safe-alignment", metric_options)
     rm_model_path = str(options.get("rm_model_path", DEFAULT_RM_MODEL_PATH))
     cm_model_path = str(options.get("cm_model_path", DEFAULT_CM_MODEL_PATH))
     backend = options.get("_backend")
