@@ -76,6 +76,7 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("bbh", tasks)
         self.assertIn("ifbench", tasks)
         self.assertIn("humaneval-plus", tasks)
+        self.assertIn("mbpp-plus", tasks)
         self.assertIn("zebralogic", tasks)
         self.assertIn("livecodebench", tasks)
         self.assertNotIn("qampari-oracle5", tasks)

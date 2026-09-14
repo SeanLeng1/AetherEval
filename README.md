@@ -292,6 +292,12 @@ sweeps a frozen weight set on the same held-out problems. It reports utility and
 paired matching gains, and exports JSON for external reward-curve/cross-utility plotting. Prepare
 its HF data once before running; the original `safe-alignment` task is unchanged.
 
+## MBPP+
+
+`mbpp-plus` evaluates the complete 378-task MBPP+ v0.2.0 release with EvalPlus
+0.3.1. Generation uses the existing local backend; base and Plus tests are scored
+offline with the official checker. See [protocol and preparation](benchmarks/mbpp-plus/README.md).
+
 ## Open-QA Benchmarks
 
 `triviaqa` uses deterministic short-answer generation (`n=1`, temperature zero)

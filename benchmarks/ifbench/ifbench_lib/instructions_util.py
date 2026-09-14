@@ -1548,27 +1548,7 @@ WORD_LIST = [
 ]  # pylint: disable=line-too-long
 
 
-def download_nltk_resources():
-    """Download 'punkt' and 'stopwords' if not already installed"""
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        nltk.download("punkt", quiet=True)
-    try:
-        nltk.data.find("tokenizers/punkt_tab")
-    except LookupError:
-        nltk.download("punkt_tab", quiet=True)
-    try:
-        nltk.data.find("corpora/stopwords")
-    except LookupError:
-        nltk.download("stopwords", quiet=True)
-    try:
-        nltk.data.find("taggers/averaged_perceptron_tagger_eng")
-    except LookupError:
-        nltk.download("averaged_perceptron_tagger_eng", quiet=True)
-
-
-download_nltk_resources()
+# Resources are provisioned by prepare_nltk.py; scoring must not download them.
 
 
 def split_into_sentences(text):
@@ -1609,3 +1589,10 @@ def count_stopwords(text):
 def generate_keywords(num_keywords):
     """Randomly generates a few keywords."""
     return random.sample(WORD_LIST, k=num_keywords)
+
+
+def count_sentences(text):
+    """Count the number of sentences."""
+    tokenizer = _get_sentence_tokenizer()
+    tokenized_sentences = tokenizer.tokenize(text)
+    return len(tokenized_sentences)

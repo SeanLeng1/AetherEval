@@ -152,6 +152,13 @@ math500:
   temperature: 1.0
   top_p: 0.7
 
+mbpp-plus:
+  # EvalPlus chat greedy profile; reference decoder output budget.
+  n: 1
+  max_new_tokens: 768
+  temperature: 0.0
+  top_p: 0.95
+
 minerva:
   # Minerva paper single-sample decoding; local prompting/grading still differ.
   n: 1

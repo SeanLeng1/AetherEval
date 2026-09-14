@@ -15,7 +15,7 @@ dependencies = [
   "langdetect",
   "nltk",
   "emoji",
-  "syllapy",
+  "syllapy==0.8.0",
   "immutabledict",
   "absl-py",
   "math-verify",

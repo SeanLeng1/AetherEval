@@ -1090,6 +1090,44 @@ class MetricsTests(unittest.TestCase):
         )
         self.assertIn("class Solution:", prompt_with_starter[1]["content"])
 
+    def test_mbpp_plus_offline_scoring(self) -> None:
+        import json
+        from unittest.mock import patch
+
+        bundle = load_task("mbpp-plus")
+        with patch("urllib.request.urlopen", side_effect=AssertionError("offline")):
+            samples = bundle.task_module.load_samples(bundle.spec.task_dir)
+            self.assertEqual(len(samples), 378)
+            json.dumps([sample.data for sample in samples])
+            # Real release inputs: tuples, complex numbers, and a nonserializable
+            # reference output (regex match) handled by the official special oracle.
+            selected = [s for s in samples if s.id in ("Mbpp/2", "Mbpp/124", "Mbpp/252", "Mbpp/793")
+                        or s.data["entry_point"] == "check_str"]
+            self.assertEqual(len(selected), 5)
+            for sample in selected:
+                with self.subTest(task=sample.id):
+                    result = bundle.metrics_module.score_generation(
+                        sample, "```python\n" + sample.data["canonical_solution"] + "\n```"
+                    )
+                    self.assertTrue(result["is_pass"])
+            self.assertEqual(bundle.task_module.build_prompt(samples[0])[0]["content"],
+                             "You are a helpful assistant good at coding.")
+
+        sample = Sample(id="Mbpp/99999", data={
+            "prompt": "", "entry_point": "f", "canonical_solution": "def f(x): return x",
+            "base_input": [[1]], "plus_input": [[2]], "atol": 0,
+        })
+        scored = bundle.metrics_module.score_generation(sample, "def f(x): return 1")
+        self.assertTrue(scored["parsed"]["base_pass"])
+        self.assertFalse(scored["parsed"]["plus_pass"])
+        self.assertFalse(scored["is_pass"])
+        summary = self._aggregate(bundle.metrics_module, [{
+            "sample_id": sample.id,
+            "records": [{"sample_id": sample.id, "gen_idx": 0, **scored}],
+        }], {})
+        self.assertEqual(summary["accuracy_base"], 1.0)
+        self.assertEqual(summary["pass@1"], 0.0)
+
     def test_humaneval_plus_score_generation(self) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module

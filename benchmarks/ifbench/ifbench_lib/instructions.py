@@ -30,6 +30,21 @@ import syllapy
 
 from . import instructions_util
 
+
+def _word_tokens_without_punctuation(text):
+    """Tokenize text while excluding standalone punctuation tokens."""
+    return [
+        token
+        for token in instructions_util.nltk.word_tokenize(text)
+        if any(ch.isalnum() for ch in token)
+    ]
+
+
+def _split_words(text):
+    """Lowercase, drop punctuation, and split into whitespace-delimited words."""
+    return text.lower().translate(str.maketrans("", "", string.punctuation)).split()
+
+
 logger = logging.getLogger(__name__)
 
 _InstructionArgsDtype = Optional[Dict[str, Union[int, str, Sequence[str]]]]
@@ -442,8 +457,8 @@ class NGramOverlapChecker(Instruction):
     def check_following(self, value):
         """Checks if the response maintains a trigram overlap with the reference text within 2% of {percent}."""
         n = 3
-        ngrams = set(nltk.ngrams(value, n))
-        ref_ngrams = set(nltk.ngrams(self._reference_text, n))
+        ngrams = set(nltk.ngrams(nltk.word_tokenize(value), n))
+        ref_ngrams = set(nltk.ngrams(nltk.word_tokenize(self._reference_text), n))
         if not ngrams:
             return False
         overlap = len(ngrams.intersection(ref_ngrams)) / len(ngrams)
@@ -705,6 +720,7 @@ class NestedParenthesesChecker(Instruction):
         levels = []
         min_levels = 5
         max_depth = 0
+        depth_stack = []  # Track depth per matched group
 
         for char in value:
             if char in "([{":
@@ -976,6 +992,11 @@ class CharacterCountUniqueWordsChecker(Instruction):
         for sentence in sentences:
             if len(sentence.strip()) != char_count:
                 return False
+        # Check "all different words", using the same word tokenization as
+        # LimitedWordRepeatChecker (words:repeats).
+        words = _split_words(" ".join(sentences))
+        if len(words) != len(set(words)):
+            return False
         return True
 
 
@@ -1105,9 +1126,7 @@ class LimitedWordRepeatChecker(Instruction):
 
     def check_following(self, value):
         """Checks if the response repeats any word more than {small_n} times."""
-        words = (
-            value.lower().translate(str.maketrans("", "", string.punctuation)).split()
-        )
+        words = _split_words(value)
         word_count = Counter(words)
         for word, count in word_count.items():
             if count > self._max_repeats:
@@ -1200,37 +1219,77 @@ class PronounCountChecker(Instruction):
         """Checks if the response includes at least {N} pronouns."""
         pronouns = set(
             [
+                # Personal (subject / object)
                 "i",
                 "me",
-                "my",
-                "mine",
-                "myself",
                 "we",
                 "us",
-                "our",
-                "ours",
-                "ourselves",
                 "you",
-                "your",
-                "yours",
-                "yourself",
-                "yourselves",
                 "he",
                 "him",
-                "his",
-                "himself",
                 "she",
                 "her",
-                "hers",
-                "herself",
                 "it",
-                "its",
-                "itself",
                 "they",
                 "them",
+                # Possessive (determiner + independent)
+                "my",
+                "mine",
+                "our",
+                "ours",
+                "your",
+                "yours",
+                "his",
+                "her",
+                "hers",
+                "its",
                 "their",
                 "theirs",
+                # Reflexive
+                "myself",
+                "ourselves",
+                "yourself",
+                "yourselves",
+                "himself",
+                "herself",
+                "itself",
                 "themselves",
+                # Demonstrative
+                "this",
+                "that",
+                "these",
+                "those",
+                # Interrogative
+                "who",
+                "whom",
+                "whose",
+                "which",
+                "what",
+                # Relative / compound interrogative
+                "whoever",
+                "whomever",
+                "whatever",
+                "whichever",
+                # Indefinite
+                "anybody",
+                "anyone",
+                "anything",
+                "everybody",
+                "everyone",
+                "everything",
+                "nobody",
+                "nothing",
+                "somebody",
+                "someone",
+                "something",
+                "each",
+                "either",
+                "neither",
+                "both",
+                "all",
+                "some",
+                "any",
+                "none",
             ]
         )
         value = value.replace(
@@ -1406,9 +1465,7 @@ class NoConsecutiveFirstLetterChecker(Instruction):
 
     def check_following(self, value):
         """Checks if no two consecutive words in the response share the same first letter."""
-        words = (
-            value.lower().translate(str.maketrans("", "", string.punctuation)).split()
-        )
+        words = _split_words(value)
         while "" in words:
             words.remove("")
         for i in range(len(words) - 1):
@@ -1757,7 +1814,6 @@ class WordReverseOrderChecker(Instruction):
     """What animal is the national symbol of the US? Respond to this query, but make your sentence in reverse order of what it should be, per word."""
 
     def build_description(self, **kwargs):
-
         self._description_pattern = "What animal is the national symbol of the US? Respond to this query, but make your sentence in reverse order of what it should be, per word."
         return self._description_pattern
 
@@ -1821,10 +1877,11 @@ class SentenceAlphabetChecker(Instruction):
         if len(sentences) != 26:
             return False
         for i, sentence in enumerate(sentences):
-            words = sentence.lstrip().split()
-            if not words or not words[0]:
+            # Strip leading whitespace and punctuation so that "A lazy fox..."" counts as a sentence starting with 'A'
+            stripped = sentence.lstrip(string.punctuation + string.whitespace)
+            if not stripped:
                 return False
-            if words[0].lower()[0] != chr(97 + i):
+            if stripped[0].lower() != chr(97 + i):
                 return False
         return True
 
@@ -2124,7 +2181,10 @@ class KeywordsMultipleChecker(Instruction):
             ],
             [1, 2, 3, 5, 7],
         ):
-            if value.lower().count(keyword.lower()) != count:
+            pattern = r"\b{}\b".format(re.escape(keyword))
+            # See if the whole word appears the expected number of times, case insensitive.
+            # Use regex instead of str.count to avoid counting substrings (e.g., "cat" in "concatenate").
+            if len(re.findall(pattern, value, flags=re.IGNORECASE)) != count:
                 return False
         return True
 
@@ -2183,7 +2243,7 @@ class KeywordSpecificPositionChecker(Instruction):
         sentences = instructions_util.split_into_sentences(value)
         if len(sentences) < self._n:
             return False
-        words = instructions_util.nltk.word_tokenize(sentences[self._n - 1])
+        words = _word_tokens_without_punctuation(sentences[self._n - 1])
         if len(words) < self._m:
             return False
         if words[self._m - 1].lower() == self._keyword.lower():
@@ -2229,13 +2289,10 @@ class WordsPositionChecker(Instruction):
           True if the second word and the second to last word are the same;
           otherwise, False.
         """
-        words = instructions_util.nltk.word_tokenize(value)
+        words = _word_tokens_without_punctuation(value)
         if len(words) < 2:
             return False
-        if words[1].lower() == words[-2].lower() == self._keyword.lower():
-            return True
-        else:
-            return False
+        return words[1].lower() == words[-2].lower() == self._keyword.lower()
 
 
 class RepeatChangeChecker(Instruction):
@@ -2315,14 +2372,14 @@ class RepeatSimpleChecker(Instruction):
 
 
 class RepeatSpanChecker(Instruction):
-    "Copy the span of words that lies between (and including) index {n_start} and {n_end}, the indices are character indices!"
+    "Copy the span of words that lies between (and including) index {n_start} and {n_end}, the indices are word indices, split by whitespace!"
 
     def build_description(self, prompt_to_repeat=None, n_start=None, n_end=None):
         """Build the instruction description.
 
         Args:
-        n_start: An integer representing the start index of the span.
-        n_end: An integer representing the end index of the span.
+        n_start: An integer representing the inclusive start word index of the span.
+        n_end: An integer representing the inclusive end word index of the span.
 
         Returns:
         A string representing the instruction description.
@@ -2331,17 +2388,19 @@ class RepeatSpanChecker(Instruction):
             raise ValueError("prompt_to_repeat must be set.")
         else:
             self._prompt_to_repeat = prompt_to_repeat
-        if not n_start:
-            self._n_start = random.randint(0, len(self._prompt_to_repeat.split()) - 2)
+        # Indices are word indices (whitespace-split), matching the instruction text
+        # and the check below. Previously these defaulted to character offsets, which
+        # contradicted the "span of words" wording and produced mid-word targets.
+        num_words = len(self._prompt_to_repeat.split())
+        if n_start is None:
+            self._n_start = random.randint(0, num_words - 2)
         else:
             self._n_start = n_start
-        if not n_end:
-            self._n_end = random.randint(
-                self._n_start + 1, len(self._prompt_to_repeat.split()) - 1
-            )
+        if n_end is None:
+            self._n_end = random.randint(self._n_start + 1, num_words - 1)
         else:
             self._n_end = n_end
-        self._description_pattern = "Copy the span of words that lies between (and including) index {n_start} and {n_end}, the indices are character indices!"
+        self._description_pattern = "Copy the span of words that lies between (and including) index {n_start} and {n_end}, the indices are word indices, split by whitespace!"
         return self._description_pattern.format(
             n_start=self._n_start,
             n_end=self._n_end,
@@ -2361,13 +2420,10 @@ class RepeatSpanChecker(Instruction):
         return ["n_start", "n_end", "prompt_to_repeat"]
 
     def check_following(self, value):
-        """Checks if the response contains the expected number of phrases with the correct modifications."""
-        if (
-            value.strip().lower().split()
-            == self._prompt_to_repeat.strip()
-            .lower()
-            .split()[self._n_start : self._n_end]
-        ):
+        """Checks if the response is the whitespace-split word span [n_start, n_end] (inclusive)."""
+        words = self._prompt_to_repeat.split()
+        expected_span = " ".join(words[self._n_start : self._n_end + 1])
+        if value.strip().lower() == expected_span.strip().lower():
             return True
         return False
 
