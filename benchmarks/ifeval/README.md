@@ -1,5 +1,20 @@
 # IFEval Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official repository: [google-research/instruction_following_eval](https://github.com/google-research/google-research/tree/master/instruction_following_eval).
+The [official README](https://github.com/google-research/google-research/blob/master/instruction_following_eval/README.md)
+accepts a JSONL of already-generated prompt/response pairs; it does not prescribe
+one model-independent temperature/top-p/output limit.
+
+The defaults `n=1, temperature=0, top_p=1, max_new_tokens=4096`
+are an explicit local greedy profile. The raw prompts and instruction checkers
+come from the release, but the decoding tuple is not an official requirement.
+Report whether strict or loose, prompt-level or instruction-level accuracy is
+being compared. AetherEval's primary metric is prompt-level loose accuracy.
+
 ## Files
 
 ```text

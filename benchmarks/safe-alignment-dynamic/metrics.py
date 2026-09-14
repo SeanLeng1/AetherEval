@@ -14,7 +14,6 @@ protocol_hash = import_module("benchmarks.safe-alignment-dynamic.task").protocol
 PRIMARY_METRIC = "overall/utility"
 REQUIRES_BACKEND = True
 create_evaluation_backend = fixed.create_evaluation_backend
-score_generation = fixed.score_generation
 
 
 def score_generations_batch(samples, generation_outputs, metric_options=None):

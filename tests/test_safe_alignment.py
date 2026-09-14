@@ -105,7 +105,7 @@ class SafeAlignmentTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(backend.calls[0]["model_paths"], ["rm", "cm"])
         self.assertEqual(backend.calls[0]["num_conversations"], 2)
-        self.assertEqual(backend.calls[0]["scorer_kwargs"]["max_length"], 16384)
+        self.assertEqual(backend.calls[0]["scorer_kwargs"]["max_length"], 2048)
         self.assertEqual(backend.calls[0]["scorer_kwargs"]["dtype"], "float16")
         self.assertEqual(
             backend.calls[0]["scorer_kwargs"]["sglang_args"]["context_length"], 32768

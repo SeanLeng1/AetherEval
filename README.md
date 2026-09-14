@@ -35,6 +35,12 @@ aethereval --list-task-defaults
 
 Task generation defaults are centrally defined in `configs/task_defaults.yaml`.
 You can edit this file to adjust per-task `n/max_new_tokens/temperature/top_p`.
+Each benchmark README has an **Official source and protocol** section with the
+audited repository/release, reference settings and known differences. Some datasets
+do not define a universal decoder: their defaults are explicitly labeled local
+profiles, not invented official standards. Token limits count new output tokens,
+not prompt plus output; larger reasoning budgets must be declared as overrides.
+Matching sampling alone does not imply matching prompts, data slices or graders.
 CLI and run YAML override these defaults. One protocol guard applies: when
 `temperature=0` is set globally without an explicit `n`, tasks whose default
 `n>1` retain their task-default sampling temperature. Pass `--n 1` as well to
@@ -214,6 +220,7 @@ benchmarks/<task_name>/
   data/*.jsonl
   task.py
   metrics.py
+  prepare_data.py
 ```
 
 `task.py` must define:
@@ -231,18 +238,25 @@ Prompt handling:
 - If `build_prompt` returns `str`, it is auto-wrapped to `[{"role":"user","content": ...}]`.
 - Offline backends render prompts with tokenizer `apply_chat_template`; if unavailable, the framework falls back to plain `role: content` text and prints a warning.
 
-`metrics.py` must define:
+`metrics.py` must define `aggregate` and at least one scoring entry point:
 
 - `score_generation(sample, generation) -> dict` (`score` required)
+- or `score_generations_batch(samples, generation_outputs, metric_options) -> list[list[dict]]`
 - `aggregate(sample_results, metric_options) -> dict[str, float]`
 
 Recommended:
 
 - `PRIMARY_METRIC: str` (used by runner to surface report metric in `summary.json`)
-- `score_generations_batch(samples, generation_outputs, metric_options) -> list[list[dict]]`
-  for metrics that must score generations in batches. The returned outer list must
-  align with `generation_outputs`; each inner list must align with that output's
-  `generations`.
+Batch scoring takes precedence when both entry points exist. Batch-only RM and
+judge tasks do not need a placeholder `score_generation`. The returned outer list
+must align with `generation_outputs`; each inner list aligns with its `generations`.
+
+Reuse shared functions through explicit imports when no task-specific logic is
+needed; do not add forwarding wrappers or a new task base class. Prompt templates
+and grading rules remain benchmark-specific. `prepare_data.py` only builds the
+offline data; generation settings belong in `configs/task_defaults.yaml`, sorted
+in the same order as benchmark directories. BFCL remains an external adapter for
+its official multi-turn execution loop, not a single-response scorer.
 
 Shared benchmark implementation code lives in `benchmark_utils/`, outside
 `benchmarks/`, so helper modules are not visually or programmatically mixed with
@@ -315,7 +329,7 @@ OpenAI-compatible chat-completions endpoint only for judging:
 - `arena-hard-v2` — 500 hard prompts, GPT-4.1 judge, primary
   `style_controlled_win_rate`.
 
-The aligned per-task judge model and sampling defaults live under each task's
+The documented per-task judge model and sampling defaults live under each task's
 `metrics` section in `configs/task_defaults.yaml`. Judge resolution follows the
 same rule as candidate generation: CLI/config values override every selected
 task, while omitted values preserve each task's own defaults. Judge settings
@@ -334,10 +348,11 @@ remain separate from candidate generation settings.
 
 Upstream LLMEval-Med omits temperature/top-p, and several other upstreams omit
 top-p. AetherEval pins those conventional unfiltered values to `1.0` so API and
-local judges receive identical sampling settings. OpenAI does not document a
+local judges receive explicit sampling settings; this does not prove parity with
+an upstream model's inherited defaults. OpenAI does not document a
 fixed omitted-value token limit, so the otherwise-unspecified LLMEval-Med and
-ResearchQA judge limits are pinned to 4096. Both output protocols are far shorter
-than this cap.
+ResearchQA judge limits are pinned to 4096. These are local caps, not official
+token-limit requirements or guarantees against truncation.
 
 Online judges use LiteLLM, so OpenAI, Anthropic, Gemini, and other supported
 providers share the same benchmark message templates. For native provider routing,

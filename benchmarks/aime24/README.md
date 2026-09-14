@@ -1,5 +1,20 @@
 # AIME24 Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official problem authority: [MAA American Mathematics Competitions](https://maa.org/student-programs/amc/).
+The [HuggingFaceH4/aime_2024 release](https://huggingface.co/datasets/HuggingFaceH4/aime_2024)
+is the dataset mirror used here, not an official MAA LLM evaluator.
+
+No official MAA model-generation repository or temperature/top-p/token budget was
+identified. The defaults `n=16, temperature=1, top_p=0.7,
+max_new_tokens=32768` are an **AetherEval long-reasoning profile**, not an
+official AIME protocol. Average accuracy estimates single-sample success;
+`pass@k` is a different statistic, and neither is majority-vote accuracy.
+Keep the complete sampling tuple and question set fixed when comparing models.
+
 ## Files
 
 ```text

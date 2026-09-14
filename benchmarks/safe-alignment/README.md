@@ -1,5 +1,24 @@
 # Safe Alignment
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Reference repository: [Qwen-Applications/GD2PO](https://github.com/Qwen-Applications/GD2PO).
+Checked [safe-alignment/scripts/eval.sh](https://github.com/Qwen-Applications/GD2PO/blob/f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/safe-alignment/scripts/eval.sh),
+[rollout.yaml](https://github.com/Qwen-Applications/GD2PO/blob/f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/safe-alignment/verl/trainer/config/rollout/rollout.yaml)
+and the validation path in `ray_trainer.py`.
+
+The eval script sets a 1024-token response budget, but its top-level rollout
+`n=4, temperature=0.7` belongs to training. Validation uses `val_kwargs`:
+`n=1, temperature=0, top_p=1, do_sample=false`.
+AetherEval now follows that **validation** profile with
+`max_new_tokens=1024`; the RM input budget is 2048 prompt-plus-answer tokens.
+
+The locally converted RM/CM identities and scoring backend remain explicit
+adaptations. Dynamic conditioning is a separate task and is not affected by
+this correction.
+
 Native AetherEval wrapper for GD2PO safe-alignment validation.
 
 The offline data is prepared from the GD2PO safe-alignment dataset:

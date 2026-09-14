@@ -1,5 +1,19 @@
 # AMC23 Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official problem authority: [MAA American Mathematics Competitions](https://maa.org/student-programs/amc/).
+The local [RLLab/eval-set](https://huggingface.co/datasets/RLLab/eval-set) subset
+is a repackaged problem collection, not an official MAA evaluation repository.
+
+No official MAA LLM decoding protocol was identified. Defaults
+`n=16, temperature=1, top_p=0.7, max_new_tokens=32768` are our
+long-reasoning profile. Numeric-answer extraction with math-verify differs
+from administering the original multiple-choice contest. Report this local
+variant and distinguish mean sampled accuracy from `pass@k`.
+
 ## Data
 
 - Source dataset: `RLLab/eval-set` (config: `amc23`, split: `train`)

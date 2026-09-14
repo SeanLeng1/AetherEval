@@ -1,5 +1,19 @@
 # BBH Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official repository: [suzgunmirac/BIG-Bench-Hard](https://github.com/suzgunmirac/BIG-Bench-Hard).
+The [paper, evaluation protocol](https://arxiv.org/html/2210.09261v1#S3) specifies
+greedy decoding and three CoT exemplars; the
+[released prompts](https://github.com/suzgunmirac/BIG-Bench-Hard/tree/9ee07bd481feebf959a6b59d61ea57bdcf30964d/cot-prompts) are the reference.
+
+AetherEval defaults to `n=1, temperature=0, top_p=1, max_new_tokens=4096`.
+The token cap is a local budget, not a limit established by that protocol.
+**This task is zero-shot CoT, not the paper's three-shot CoT.** Matching
+temperature alone does not make its scores directly comparable with that table.
+
 ## Files
 
 ```text

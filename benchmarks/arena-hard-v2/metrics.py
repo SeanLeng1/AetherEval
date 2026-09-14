@@ -77,11 +77,6 @@ def validate_metric_options(metric_options: dict[str, Any] | None = None) -> Non
         )
 
 
-def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
-    del sample, generation
-    raise RuntimeError("Arena-Hard-v2 requires batched pairwise LLM-judge scoring")
-
-
 def score_generations_batch(
     samples: list[Sample],
     generation_outputs: list[GenerationOutput],

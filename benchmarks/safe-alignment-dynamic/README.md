@@ -1,5 +1,23 @@
 # Dynamic safe alignment
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Method reference: [YangRui2015/RiC](https://github.com/YangRui2015/RiC),
+especially [ric/evaluation.py](https://github.com/YangRui2015/RiC/blob/aee53a653a99509d5904eddc8965c19c1ae86801/ric/evaluation.py).
+Held-out prompt source: [GD2PO safe-alignment](https://github.com/Qwen-Applications/GD2PO/tree/f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/safe-alignment).
+
+**This is a custom AetherEval protocol, not an official RiC reproduction.**
+Defaults remain `n=4, temperature=0.7, top_p=1, max_new_tokens=1024`
+per condition. RiC's assistant evaluation uses a 128-token cap, top-p 0.9,
+sampling enabled and no explicit temperature in that call.
+Our reward models, training-statistic standardization, quantile target mapping,
+five-weight grid plus control, and cross-utility diagnostics also differ.
+Do not change these to RiC values without rebuilding and naming the intended
+experimental protocol. Generation repetitions `n` are distinct from the
+number of preference conditions.
+
 This opt-in task evaluates score-conditioned SFT and RL checkpoints. The existing
 `safe-alignment` benchmark and its raw-score metrics are unchanged. Generation,
 checkpoint chat-template handling, resume and sequential SGLang RM/CM scoring use

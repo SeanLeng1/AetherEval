@@ -1,5 +1,19 @@
 # API-Bank
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Original benchmark: [AlibabaResearch/DAMO-ConvAI/api-bank](https://github.com/AlibabaResearch/DAMO-ConvAI/tree/483554eae102996f5ec1f4feab4e78ef29c2a394/api-bank).
+Implemented adaptation: [GD2PO API_Bank](https://github.com/Qwen-Applications/GD2PO/tree/f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/tool-calling/API_Bank),
+specifically [generate_deterministic.py](https://github.com/Qwen-Applications/GD2PO/blob/f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/tool-calling/API_Bank/generate_deterministic.py).
+
+The reference generation settings are `n=1, temperature=0, top_p=1,
+max_new_tokens=4096`. AetherEval defaults to one full run (`num_repeats=1`);
+four repeats are an optional reporting choice, not its current default.
+This is GD2PO's processed 597-item, tag-based tool-call task, not an unchanged
+reproduction of original API-Bank's executable dialogue protocol.
+
 Native AetherEval task for the GD2PO API-Bank setup. It reports the per-level
 correctness, format, and diagnostic length-reward metrics for ToolRL/GDPO-style models that emit
 `<think>...</think>`, `<tool_call>...</tool_call>`, and/or `<response>...</response>`.
@@ -31,17 +45,17 @@ APIBank defaults live in `configs/task_defaults.yaml`:
 ```yaml
 apibank:
   n: 1
-  num_repeats: 4
+  num_repeats: 1
   max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
 ```
 
 `n` is the number of completions generated for each prompt and remains `1` for
-APIBank. `num_repeats` reruns the complete benchmark independently. The default four
-repeats are stored under `run_01` through `run_04`, and the task-level `summary.json`
-reports the arithmetic mean of every numeric metric. Use `--num-repeats 1` for a
-single diagnostic run.
+APIBank. `num_repeats` reruns the complete benchmark independently. The default is
+one run. With `--num-repeats 4`, repeats are stored under `run_01` through
+`run_04`, and the task-level `summary.json` reports the arithmetic mean of
+every numeric metric.
 
 That matches the reference greedy generation setup in the parts that belong to the
 generation request. Backend context length remains a normal AetherEval runtime setting
@@ -49,7 +63,7 @@ such as `--max-model-len` for vLLM or `--context-length` for SGLang.
 
 ## Output
 
-With the default four repeats, the task uses the repeated native output layout:
+With `--num-repeats 4`, the task uses the repeated native output layout:
 
 ```text
 outputs/<run_id>/apibank/
@@ -74,8 +88,8 @@ in `predictions.jsonl` includes `correct_score`,
   parsed with **ToolRL's own `generate.py` parser** (last `<tool_call>` block, per-line
   JSON, no closing-tag guard). This is the ToolRL-aligned number on the same
   generations; it recovers calls in an unclosed last block but still misses a correct
-  call placed in a non-last block (exactly as ToolRL scores it). The residual to
-  ToolRL's paper number is the sglang-vs-vLLM engine gap, not scoring. Report alias:
+  call placed in a non-last block (as ToolRL scores it). This parser comparison
+  alone does not establish the cause of differences from paper scores. Report alias:
   `LooseCorrectAcc.`, `Loose Level {1,2,3} Acc.`.
 - `format_lv{1,2,3}_acc`, `overall_format_acc` — tag-structure check.
 - `length_avg_lv{1,2,3}`, `overall_length_avg` — mean of

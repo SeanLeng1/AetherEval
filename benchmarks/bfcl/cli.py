@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from aethereval.config import parse_key_value_args
 from aethereval.core.task_defaults import (
     resolve_task_default_gen,
     resolve_task_num_repeats,
@@ -55,25 +54,6 @@ def add_bfcl_arguments(parser: argparse.ArgumentParser) -> None:
         ),
         default=None,
         help="SGLang Model Gateway routing policy (default: cache_aware).",
-    )
-    group.add_argument(
-        "--bfcl-context-length",
-        type=int,
-        default=None,
-        help=(
-            "BFCL-only context length; overrides the global backend setting after "
-            "native tasks finish."
-        ),
-    )
-    group.add_argument(
-        "--bfcl-sglang-arg",
-        action="append",
-        default=None,
-        metavar="KEY=VALUE",
-        help=(
-            "Extra BFCL-only SGLang server argument; repeat as needed. Overrides "
-            "the matching global --sglang-arg."
-        ),
     )
     group.add_argument(
         "--bfcl-verbose",
@@ -135,9 +115,6 @@ def build_bfcl_spec(
     dp_size = int(resolved["dp_size"])
     tp_size = int(resolved["tp_size"])
     backend_kwargs = dict(resolved["backend_kwargs"])
-    backend_kwargs.update(
-        parse_key_value_args(args.bfcl_sglang_arg, "--bfcl-sglang-arg")
-    )
 
     defaults = resolve_task_default_gen("bfcl", {})
     generation = resolved["gen_overrides"]
@@ -147,14 +124,9 @@ def build_bfcl_spec(
             "BFCL supports exactly one generation per test interaction (n=1); "
             "use --num-repeats for independent full benchmark runs."
         )
-    context_length = args.bfcl_context_length
-    if context_length is None:
-        context_length = backend_kwargs.get(
-            "context_length",
-            backend_kwargs.get("max_model_len"),
-        )
-    elif backend == "sglang":
-        backend_kwargs["context_length"] = context_length
+    context_length = backend_kwargs.get(
+        "context_length", backend_kwargs.get("max_model_len")
+    )
 
     memory_fraction = (
         backend_kwargs.get("mem_fraction_static")

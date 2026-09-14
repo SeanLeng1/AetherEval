@@ -1,65 +1,241 @@
+# Audited 2026-09-13; sources and protocol differences: benchmarks/*/README.md.
+# Official paper/leaderboard settings take precedence over generic runner defaults.
+# An explicit local profile is retained where no model-independent standard exists.
 agieval-en:
-  n: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-bbh:
+  # Official chat evaluation is greedy; 4096 is our local output ceiling.
   n: 1
   max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
 
 aime24:
+  # Local long-reasoning profile, not a decoding standard published by MAA.
   n: 16
   max_new_tokens: 32768
   temperature: 1.0
   top_p: 0.7
 
 aime25:
+  # Local long-reasoning profile, not a decoding standard published by MAA.
   n: 16
   max_new_tokens: 32768
   temperature: 1.0
   top_p: 0.7
 
 amc23:
+  # Local long-reasoning profile, not a decoding standard published by MAA.
   n: 16
   max_new_tokens: 32768
   temperature: 1.0
   top_p: 0.7
 
+apibank:
+  # GD2PO generate_deterministic.py profile, not original API-Bank dialogue evaluation.
+  n: 1
+  num_repeats: 1
+  max_new_tokens: 4096
+  temperature: 0.0
+  top_p: 1.0
+
+arena-hard-v2:
+  # Local candidate profile; official api_config.yaml sets sampling per model/endpoint.
+  n: 1
+  max_new_tokens: 8192
+  temperature: 0.0
+  top_p: 1.0
+  metrics:
+    judge_model: gpt-4.1
+    judge_temperature: 0.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 16000
+
+bbh:
+  # Official greedy decoding; local zero-shot prompt differs from the paper's 3-shot CoT.
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.0
+  top_p: 1.0
+
+bfcl:
+  # bfcl-eval==2025.6.8; ToolRL handler is a prompt adaptation, not official model routing.
+  handler: toolrl
+  n: 1
+  num_repeats: 1
+  categories:
+    - live
+    - non_live
+    - multi_turn
+  max_new_tokens: 4096
+  temperature: 0.001
+  top_p: 1.0
+  top_k: -1
+
+creative-writing-v3:
+  # Official rubric-only generation profile; upstream requires the user to select a judge.
+  n: 1
+  max_new_tokens: 12000
+  temperature: 0.7
+  top_p: 1.0
+  top_k: -1
+  min_p: 0.1
+  metrics:
+    judge_model: claude-sonnet-4-6
+    judge_temperature: 0.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
+
+gpqa-diamond:
+  # Local repeated long-reasoning profile; neither original GPQA nor simple-evals default.
+  n: 32
+  max_new_tokens: 32768
+  temperature: 1.0
+  top_p: 0.7
+
+healthbench:
+  # simple-evals non-reasoning ChatCompletionSampler profile; not all model profiles.
+  n: 1
+  max_new_tokens: 2048
+  temperature: 0.5
+  top_p: 1.0
+  metrics:
+    judge_model: gpt-4.1-2025-04-14
+    judge_temperature: 0.5
+    judge_top_p: 1.0
+    judge_max_new_tokens: 2048
+
+humaneval-plus:
+  # EvalPlus documented greedy profile; DecoderBase supplies the 768-token default.
+  n: 1
+  max_new_tokens: 768
+  temperature: 0.0
+  top_p: 1.0
+
+ifbench:
+  # Paper protocol in upstream README is greedy; config.py's 0.6 is not that protocol.
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.0
+  top_p: 1.0
+
+ifeval:
+  # Upstream supplies response checkers, not a common decoder; local greedy profile.
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.0
+  top_p: 1.0
+
+livecodebench:
+  # Official codegeneration runner/parser.py defaults.
+  n: 10
+  max_new_tokens: 2000
+  temperature: 0.2
+  top_p: 0.95
+  stop: ["###"]
+
+llmeval-med:
+  # Upstream enables sampling but inherits model defaults; 1/1 is our explicit profile.
+  n: 1
+  max_new_tokens: 2048
+  temperature: 1.0
+  top_p: 1.0
+  metrics:
+    judge_model: gpt-4o
+    # Upstream omits these fields; explicit defaults and a local cap do not ensure parity.
+    judge_temperature: 1.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
+
 math500:
+  # Local long-reasoning profile; dataset releases do not mandate this sampling tuple.
   n: 16
   max_new_tokens: 32768
   temperature: 1.0
   top_p: 0.7
 
 minerva:
-  n: 16
-  max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
+  # Minerva paper single-sample decoding; local prompting/grading still differ.
+  n: 1
+  max_new_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+
+mmlu-pro:
+  # Official local runner settings; AetherEval still uses a zero-shot prompt.
+  n: 1
+  max_new_tokens: 2048
+  temperature: 0.0
+  top_p: 1.0
+  stop: ["Question:"]
+
+nq-open:
+  # Local closed-book short-answer profile; original release has no chat decoding tuple.
+  n: 1
+  max_new_tokens: 64
+  temperature: 0.0
+  top_p: 1.0
 
 olympiad-bench:
-  n: 16
-  max_new_tokens: 32768
-  temperature: 1.0
+  # Official text-only GPT-4 reference profile, not a universal model-specific budget.
+  n: 1
+  max_new_tokens: 2048
+  temperature: 0.0
+  top_p: 1.0
+
+rar-medical:
+  # Local held-out RaR/CriPO-style rubric profile, not the RaR paper's HealthBench eval.
+  n: 1
+  max_new_tokens: 8192
+  temperature: 0.0
   top_p: 0.7
+  metrics:
+    judge_model: google/gemma-4-26B-A4B-it
+    judge_temperature: 1.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
+    judge_enable_thinking: false
+
+rar-science:
+  # Local held-out RaR/CriPO-style rubric profile, not the RaR paper's GPQA eval.
+  n: 1
+  max_new_tokens: 8192
+  temperature: 0.0
+  top_p: 0.7
+  metrics:
+    judge_model: google/gemma-4-26B-A4B-it
+    judge_temperature: 1.0
+    judge_top_p: 1.0
+    judge_max_new_tokens: 4096
+    judge_enable_thinking: false
+
+researchqa:
+  # Local candidate ceiling; official compute_coverage.py fixes judge temperature at zero.
+  n: 1
+  max_new_tokens: 2048
+  temperature: 0.0
+  top_p: 1.0
+  metrics:
+    judge_model: gpt-4.1-mini
+    judge_temperature: 0.0
+    judge_top_p: 1.0
+    # Upstream omits the limit; at most eight one-word labels are requested.
+    judge_max_new_tokens: 4096
 
 safe-alignment:
-  n: 4
-  max_new_tokens: 512
-  temperature: 0.7
+  # GD2PO eval.sh uses validation val_kwargs, not the training rollout sampling tuple.
+  n: 1
+  max_new_tokens: 1024
+  temperature: 0.0
   top_p: 1.0
   metrics:
     rm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-RM
     cm_model_path: RLLab/Qwen2.5-7B-SafeRLHF-CM
-    rm_max_length: 16384
+    rm_max_length: 2048
     rm_dtype: float16
     rm_sglang_args:
       context_length: 32768
 
 safe-alignment-dynamic:
+  # AetherEval's conditioned evaluation; deliberately not the original RiC protocol.
   n: 4
   max_new_tokens: 1024
   temperature: 0.7
@@ -73,120 +249,17 @@ safe-alignment-dynamic:
     rm_sglang_args:
       context_length: 32768
 
-gpqa-diamond:
-  n: 32
-  max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
-
-humaneval-plus:
-  n: 10
-  max_new_tokens: 4096
-  temperature: 0.6
-  top_p: 0.95
-
-ifbench:
+triviaqa:
+  # Local closed-book short-answer profile, not original reading-comprehension inference.
   n: 1
-  max_new_tokens: 4096
+  max_new_tokens: 64
   temperature: 0.0
   top_p: 1.0
-
-ifeval:
-  n: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-livecodebench:
-  n: 10
-  max_new_tokens: 4096
-  temperature: 0.6
-  top_p: 0.95
-
-mmlu-pro:
-  n: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-zebralogic:
-  n: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-apibank:
-  n: 1
-  num_repeats: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-bfcl:
-  # ToolRL reports BFCL V3 as the mean of four independent evaluation runs.
-  handler: toolrl
-  n: 1
-  num_repeats: 1
-  categories:
-    - live
-    - non_live
-    - multi_turn
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-  top_k: -1
-
-llmeval-med:
-  n: 1
-  max_new_tokens: 2048
-  temperature: 1.0
-  top_p: 1.0
-  metrics:
-    judge_model: gpt-4o
-    # Upstream omits sampling fields; pin the conventional unfiltered defaults
-    # explicitly so API and local judges behave identically.
-    judge_temperature: 1.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 4096
-
-healthbench:
-  n: 1
-  max_new_tokens: 2048
-  temperature: 0.5
-  top_p: 1.0
-  metrics:
-    judge_model: gpt-4.1-2025-04-14
-    judge_temperature: 0.5
-    judge_top_p: 1.0
-    judge_max_new_tokens: 2048
-
-rar-medical:
-  n: 1
-  max_new_tokens: 8192
-  temperature: 0.0
-  top_p: 0.7
-  metrics:
-    judge_model: google/gemma-4-26B-A4B-it
-    judge_temperature: 1.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 4096
-    judge_enable_thinking: false
-
-rar-science:
-  n: 1
-  max_new_tokens: 8192
-  temperature: 0.0
-  top_p: 0.7
-  metrics:
-    judge_model: google/gemma-4-26B-A4B-it
-    judge_temperature: 1.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 4096
-    judge_enable_thinking: false
 
 writingbench:
+  # Official leaderboard generation settings; reduce only for a model's actual limit.
   n: 1
-  max_new_tokens: 8192
+  max_new_tokens: 16000
   temperature: 0.7
   top_p: 0.8
   top_k: 20
@@ -196,50 +269,9 @@ writingbench:
     judge_top_p: 0.95
     judge_max_new_tokens: 2048
 
-creative-writing-v3:
+zebralogic:
+  # ZeroEval README profile; its current generic CLI uses a different token ceiling.
   n: 1
-  max_new_tokens: 12000
-  temperature: 0.7
-  top_p: 1.0
-  top_k: -1
-  min_p: 0.1
-  metrics:
-    judge_model: claude-sonnet-4-6
-    judge_temperature: 0.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 4096
-
-researchqa:
-  n: 1
-  max_new_tokens: 2048
+  max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
-  metrics:
-    judge_model: gpt-4.1-mini
-    judge_temperature: 0.0
-    judge_top_p: 1.0
-    # Upstream omits the limit; at most eight one-word labels are requested.
-    judge_max_new_tokens: 4096
-
-nq-open:
-  n: 1
-  max_new_tokens: 64
-  temperature: 0.0
-  top_p: 1.0
-
-triviaqa:
-  n: 1
-  max_new_tokens: 64
-  temperature: 0.0
-  top_p: 1.0
-
-arena-hard-v2:
-  n: 1
-  max_new_tokens: 8192
-  temperature: 0.0
-  top_p: 1.0
-  metrics:
-    judge_model: gpt-4.1
-    judge_temperature: 0.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 16000

@@ -41,14 +41,6 @@ def create_evaluation_backend(
     )
 
 
-def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
-    del sample, generation
-    raise RuntimeError(
-        "safe_alignment requires metrics.score_generations_batch because RM scoring "
-        "must be batched."
-    )
-
-
 def score_generations_batch(
     samples: list[Sample],
     generation_outputs: list[GenerationOutput],

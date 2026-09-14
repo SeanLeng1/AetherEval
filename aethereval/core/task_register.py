@@ -124,16 +124,14 @@ def _validate_task_contract(module: ModuleType) -> None:
 
 
 def _validate_metrics_contract(module: ModuleType) -> None:
-    required_funcs = ["score_generation", "aggregate"]
-    missing_funcs = [
-        name
-        for name in required_funcs
-        if not hasattr(module, name) or not callable(getattr(module, name))
-    ]
-    if missing_funcs:
+    # Batch-only scorers do not need a dummy single-generation implementation.
+    scoring = ("score_generation", "score_generations_batch")
+    if not callable(getattr(module, "aggregate", None)) or not any(
+        callable(getattr(module, name, None)) for name in scoring
+    ):
         raise ValueError(
             f"Metrics module '{module.__name__}' contract invalid "
-            f"(missing funcs: {', '.join(missing_funcs)})"
+            "(requires aggregate and score_generation or score_generations_batch)"
         )
 
 

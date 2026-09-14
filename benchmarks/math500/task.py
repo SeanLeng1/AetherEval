@@ -1,19 +1,9 @@
-from pathlib import Path
-
-from aethereval.core.types import Sample
 from benchmark_utils.eval_set_math import (
     DATA_FILE,
-    build_eval_set_math_prompt,
-    load_eval_set_math_samples,
+    build_eval_set_math_prompt as build_prompt,
+    load_eval_set_math_samples as load_samples,
 )
-
 
 TASK_NAME = "math500"
 
-
-def load_samples(task_dir: Path) -> list[Sample]:
-    return load_eval_set_math_samples(task_dir, DATA_FILE)
-
-
-def build_prompt(sample: Sample) -> str:
-    return build_eval_set_math_prompt(sample)
+__all__ = ["TASK_NAME", "DATA_FILE", "load_samples", "build_prompt"]

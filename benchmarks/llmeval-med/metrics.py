@@ -53,11 +53,6 @@ def validate_metric_options(metric_options: dict[str, Any] | None = None) -> Non
         raise ValueError("judge_repeats must be >= 1")
 
 
-def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
-    del sample, generation
-    raise RuntimeError("LLMEval-Med requires batched LLM-judge scoring")
-
-
 def score_generations_batch(
     samples: list[Sample],
     generation_outputs: list[GenerationOutput],

@@ -106,7 +106,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
         expected = {
             "llmeval_med": (667, 1, 2048, 1.0),
             "healthbench": (5000, 1, 2048, 0.5),
-            "writingbench": (1000, 1, 8192, 0.7),
+            "writingbench": (1000, 1, 16000, 0.7),
             "creative_writing_v3": (96, 1, 12000, 0.7),
             "researchqa": (3750, 1, 2048, 0.0),
             "arena_hard_v2": (500, 1, 8192, 0.0),

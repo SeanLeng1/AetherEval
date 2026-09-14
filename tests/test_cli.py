@@ -287,7 +287,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.temperature, 0.25)
         self.assertEqual(spec.top_p, 0.8)
         self.assertEqual(spec.top_k, 17)
-        self.assertEqual(spec.num_repeats, 4)
+        self.assertEqual(spec.num_repeats, 1)
 
     def test_bfcl_python_spec_defaults_match_task_config(self) -> None:
         configured = resolve_task_default_gen("bfcl", {})
@@ -572,7 +572,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(result.metrics, {"overall_acc": 42.0})
         compute_format.assert_not_called()
 
-    def test_bfcl_only_context_and_sglang_args_override_global_values(self) -> None:
+    def test_bfcl_reuses_global_backend_settings(self) -> None:
         args = build_parser().parse_args(
             [
                 "--tasks",
@@ -587,41 +587,21 @@ class ExternalCliTests(unittest.TestCase):
                 "chunked_prefill_size=4096",
                 "--sglang-arg",
                 "schedule_conservativeness=1.0",
-                "--bfcl-context-length",
-                "131072",
-                "--bfcl-sglang-arg",
-                "schedule_conservativeness=0.3",
-                "--bfcl-sglang-arg",
-                'json_model_override_args={"max_position_embeddings":131072,'
-                '"rope_parameters":{"rope_theta":1000000.0,"rope_type":"yarn",'
-                '"factor":4.0,"original_max_position_embeddings":32768}}',
             ]
         )
         resolved = resolve_run_arguments(args, {})
         spec = build_bfcl_spec(args, resolved, Path("outputs"))
 
         self.assertEqual(resolved["backend_kwargs"]["context_length"], 32768)
-        self.assertNotIn("json_model_override_args", resolved["backend_kwargs"])
-        self.assertEqual(spec.max_context_length, 131072)
-        self.assertEqual(spec.sglang_server_args["context_length"], 131072)
+        self.assertEqual(spec.max_context_length, 32768)
+        self.assertEqual(spec.sglang_server_args, resolved["backend_kwargs"])
         self.assertEqual(spec.sglang_server_args["chunked_prefill_size"], 4096)
-        self.assertEqual(spec.sglang_server_args["schedule_conservativeness"], 0.3)
-        self.assertEqual(
-            spec.sglang_server_args["json_model_override_args"],
-            {
-                "max_position_embeddings": 131072,
-                "rope_parameters": {
-                    "rope_theta": 1000000.0,
-                    "rope_type": "yarn",
-                    "factor": 4.0,
-                    "original_max_position_embeddings": 32768,
-                },
-            },
-        )
+        self.assertEqual(spec.sglang_server_args["schedule_conservativeness"], 1.0)
 
     def test_bfcl_legacy_flags_are_removed(self) -> None:
         parser = build_parser()
-        for flag in ("--num-gpus", "--skip-generation", "--skip-evaluation"):
+        for flag in ("--num-gpus", "--skip-generation", "--skip-evaluation",
+                     "--bfcl-context-length", "--bfcl-sglang-arg"):
             with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parser.parse_args([flag, "1"] if flag == "--num-gpus" else [flag])

@@ -1,5 +1,23 @@
 # LiveCodeBench Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official repository: [LiveCodeBench/LiveCodeBench](https://github.com/LiveCodeBench/LiveCodeBench).
+Checked [runner/parser.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/parser.py)
+and [vllm_runner.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/vllm_runner.py).
+
+Defaults follow the reference code-generation runner:
+`n=10, temperature=0.2, top_p=0.95, max_new_tokens=2000, stop=["###"]`.
+The README also explicitly specifies `n=10, temperature=0.2`.
+Reasoning-model evaluations may use longer budgets; those must be reported as
+overrides, not conflated with this reference profile.
+
+The local `lighteval/code_generation_lite` v6 snapshot is not automatically the
+official runner's `release_latest` set. Prompt formatting, date window and local
+execution limits must also match before comparing against a leaderboard score.
+
 ## Files
 
 ```text

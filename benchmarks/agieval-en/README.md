@@ -1,5 +1,21 @@
 # AGIEval English Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official repository: [ruixiangcui/AGIEval](https://github.com/ruixiangcui/AGIEval).
+Checked [openai_api.py](https://github.com/ruixiangcui/AGIEval/blob/84ab72d94318290aad2e4ec820d535a95a1f7552/openai_api.py) and
+[run_prediction.py](https://github.com/ruixiangcui/AGIEval/blob/84ab72d94318290aad2e4ec820d535a95a1f7552/run_prediction.py).
+
+The reference chat path uses temperature 0 without an explicit output limit;
+the completion path uses 2000 tokens. AetherEval uses `n=1, temperature=0,
+top_p=1, max_new_tokens=4096`: greedy decoding matches, but 4096 is a local
+ceiling, not a universal official limit. The local English MCQ collection and
+zero-shot reasoning prompt are an adaptation; do not label it the full official
+AGIEval protocol. Official model-specific stop strings are not portable across
+chat templates, so this task retains model EOS stopping.
+
 ## Files
 
 ```text

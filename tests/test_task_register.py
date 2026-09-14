@@ -8,10 +8,28 @@ from aethereval.core.task_register import (
     list_task_default_gens,
     list_tasks,
     load_task,
+    _validate_metrics_contract,
 )
 
 
 class TaskRegisterTests(unittest.TestCase):
+    def test_single_and_batch_scoring_contract(self):
+        from types import SimpleNamespace
+
+        for scoring in ("score_generation", "score_generations_batch"):
+            with self.subTest(scoring=scoring):
+                module = SimpleNamespace(__name__="test", aggregate=lambda *args: {},
+                                         **{scoring: lambda *args: []})
+                _validate_metrics_contract(module)
+        with self.assertRaises(ValueError):
+            _validate_metrics_contract(SimpleNamespace(__name__="test", aggregate=lambda: {}))
+
+    def test_defaults_follow_benchmark_directory_order(self):
+        from aethereval.core.task_defaults import _load_task_default_overrides
+
+        names = list(_load_task_default_overrides())
+        self.assertEqual(names, sorted(names))
+
     def test_canonical_names_and_legacy_aliases(self):
         from aethereval.core.task_register import parse_task_names
 
@@ -127,15 +145,29 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["aime24"]["n"], 16)
         self.assertEqual(defaults["amc23"]["n"], 16)
         self.assertEqual(defaults["math500"]["n"], 16)
-        self.assertEqual(defaults["minerva"]["n"], 16)
-        self.assertEqual(defaults["olympiad-bench"]["n"], 16)
-        self.assertEqual(defaults["safe-alignment"]["n"], 4)
+        self.assertEqual(defaults["minerva"]["n"], 1)
+        self.assertEqual(defaults["minerva"]["max_new_tokens"], 512)
+        self.assertEqual(defaults["minerva"]["temperature"], 0.0)
+        self.assertEqual(defaults["olympiad-bench"]["n"], 1)
+        self.assertEqual(defaults["olympiad-bench"]["max_new_tokens"], 2048)
+        self.assertEqual(defaults["olympiad-bench"]["temperature"], 0.0)
+        self.assertEqual(defaults["safe-alignment"]["n"], 1)
+        self.assertEqual(defaults["safe-alignment"]["temperature"], 0.0)
         self.assertEqual(defaults["safe-alignment"]["max_new_tokens"], 1024)
         self.assertEqual(defaults["apibank"]["n"], 1)
         self.assertEqual(defaults["apibank"]["max_new_tokens"], 4096)
         self.assertNotIn("metrics", defaults["healthbench"])
         self.assertNotIn("judge_model", defaults["healthbench"])
         self.assertIn("max_new_tokens", defaults["livecodebench"])
+        self.assertEqual(defaults["livecodebench"]["temperature"], 0.2)
+        self.assertEqual(defaults["livecodebench"]["top_p"], 0.95)
+        self.assertEqual(defaults["livecodebench"]["max_new_tokens"], 2000)
+        self.assertEqual(defaults["livecodebench"]["stop"], ["###"])
+        self.assertEqual(defaults["mmlu-pro"]["max_new_tokens"], 2048)
+        self.assertEqual(defaults["mmlu-pro"]["stop"], ["Question:"])
+        self.assertEqual(defaults["humaneval-plus"]["n"], 1)
+        self.assertEqual(defaults["humaneval-plus"]["temperature"], 0.0)
+        self.assertEqual(defaults["humaneval-plus"]["max_new_tokens"], 768)
         self.assertEqual(defaults["nq-open"]["n"], 1)
         self.assertEqual(defaults["triviaqa"]["n"], 1)
 

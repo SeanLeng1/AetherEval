@@ -1,5 +1,24 @@
 # BFCL V3 (external benchmark)
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official repository: [ShishirPatil/gorilla/berkeley-function-call-leaderboard](https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard).
+Audited the actual [bfcl-eval 2025.6.8 release](https://pypi.org/project/bfcl-eval/2025.6.8/),
+not the newer BFCL version on repository main: `_llm_response_generation.py`
+and `model_handler/local_inference/base_oss_handler.py`.
+
+V3 defaults to temperature `0.001`; the OSS handler caps each generation at
+4096 tokens or the available context budget. AetherEval uses
+`n=1, temperature=0.001, top_p=1, top_k=-1, max_new_tokens=4096`
+and `num_repeats=1`. Upstream omits top-p/top-k in its API call; we explicitly
+disable these filters. Four full repeats remain optional.
+
+The default `toolrl` handler changes prompting/output syntax. Only
+`--bfcl-handler official` with a supported model registration reuses the
+official model handler; the selected V3 scorer/version remains unchanged.
+
 Runs the official Berkeley Function Calling Leaderboard V3 generation loop and
 evaluator. A selectable handler profile separates the model's output protocol from
 its architecture and tokenizer chat template.
@@ -42,14 +61,13 @@ BFCL V3 benchmark. Generation settings live under `bfcl` in
 `configs/task_defaults.yaml`:
 
 - `n: 1`: one generation at each BFCL interaction.
-- `num_repeats: 4`: four complete benchmark runs, averaged at the end.
+- `num_repeats: 1`: one complete benchmark run; set 4 for a repeated-run average.
 - `handler: toolrl`: ToolRL prompt/output protocol.
 - `temperature: 0.001`, `top_p: 1.0`, `top_k: -1`.
 - `max_new_tokens: 4096`.
 
-`n` and `num_repeats` are intentionally distinct. Seeds are `0,1,2,3` by default;
-`--seed S` changes them to `S,S+1,S+2,S+3`. Use `--num-repeats 1` for a diagnostic
-run.
+`n` and `num_repeats` are intentionally distinct. With `--num-repeats 4`, seeds
+are `0,1,2,3`; `--seed S` changes them to `S,S+1,S+2,S+3`.
 
 ```bash
 aethereval \
@@ -109,11 +127,13 @@ was interrupted during its final JSONL write, AetherEval saves the incomplete by
 `*.corrupt-tail`, truncates only that final record, and resumes it. Earlier corruption
 is reported and never silently repaired.
 
-`--bfcl-context-length` and repeatable `--bfcl-sglang-arg KEY=VALUE` affect only BFCL.
-No RoPE scaling is enabled automatically: extending a checkpoint beyond its naturally
-supported context can change accuracy.
+BFCL uses the same global `--context-length` and `--sglang-arg KEY=VALUE`
+settings as other tasks; there is no BFCL-only server override layer.
+No RoPE scaling is enabled automatically.
 
 ## Output and metrics
+
+Example with `--num-repeats 4` (the default single run has only `run_01`):
 
 ```text
 outputs/<model_name>/<run_id>/bfcl/

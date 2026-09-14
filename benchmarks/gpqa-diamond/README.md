@@ -1,5 +1,21 @@
 # GPQA Diamond Benchmark
 
+## Official source and protocol
+
+Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
+
+Official repository: [idavidrein/gpqa](https://github.com/idavidrein/gpqa).
+Our data/prompt reference is [OpenAI simple-evals](https://github.com/openai/simple-evals/blob/652c89d0ca9df547706735883097e9537d40dc47/gpqa_eval.py).
+The [original baseline](https://github.com/idavidrein/gpqa/blob/56686c06f5e19865c153de0fdb11be3890014df7/baselines/run_baseline.py)
+has distinct answer-only, CoT and self-consistency paths.
+
+There is no single sampling tuple shared by those paths and all simple-evals
+model profiles. Current `n=32, temperature=1, top_p=0.7,
+max_new_tokens=32768` is our long-reasoning profile, not an official default.
+Simple-evals' CLI normally repeats GPQA ten times and reshuffles options;
+AetherEval samples multiple answers under each prepared, fixed option ordering.
+Consequently equal sample counts would not by themselves reproduce its protocol.
+
 ## Files
 
 ```text
