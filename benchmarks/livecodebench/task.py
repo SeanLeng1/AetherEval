@@ -190,7 +190,9 @@ def build_prompt(sample: Sample) -> list[dict[str, str]]:
 
     user_prompt = (
         f"### Question:\n{question}\n\n"
-        f"### Format: {format_instruction}\n\n"
+        "### Format:\n"
+        "Provide CONCISE reasoning on how to arrive at the answer.\n"
+        f"{format_instruction}\n\n"
         "### Answer: (use the provided format with backticks)\n\n"
     )
 

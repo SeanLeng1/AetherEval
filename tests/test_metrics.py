@@ -1054,7 +1054,7 @@ class MetricsTests(unittest.TestCase):
         )
         self.assertIn("### Question:", prompt_no_starter[1]["content"])
         self.assertIn("### Format:", prompt_no_starter[1]["content"])
-        self.assertNotIn(
+        self.assertIn(
             "Provide CONCISE reasoning on how to arrive at the answer.",
             prompt_no_starter[1]["content"],
         )
@@ -1084,7 +1084,7 @@ class MetricsTests(unittest.TestCase):
             "You will use the following starter code to write the solution to the problem",
             prompt_with_starter[1]["content"],
         )
-        self.assertNotIn(
+        self.assertIn(
             "Provide CONCISE reasoning on how to arrive at the answer.",
             prompt_with_starter[1]["content"],
         )

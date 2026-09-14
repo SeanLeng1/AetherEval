@@ -50,9 +50,9 @@ Why `v6`:
 - Uses a chat prompt with:
   - system: expert Python programmer instruction
   - user sections: `### Question`, `### Format`, `### Answer`
-  - matches the official generic chat template in
-    [prompts/code_generation.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/prompts/code_generation.py),
-    without an additional concise-reasoning instruction
+  - includes a concise-reasoning instruction, adapted from OLMES's thinker
+    prompting without requiring `<think>` tags; this differs from the official
+    LiveCodeBench generic prompt
   - with starter code: complete the provided stub
   - without starter code: read from `stdin`, write to `stdout`
 - The framework applies the model chat template.
