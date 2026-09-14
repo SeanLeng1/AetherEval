@@ -63,7 +63,8 @@ Older scores ran only `test + check(entry_point)` and copied that result into
 both base and Plus fields. They are not verified HumanEval+ scores. Re-score
 saved generations with `--eval-only` (same model-name, output-dir and run-id);
 no generation or training is needed. Existing result files are not automatically
-migrated. Install the updated dependencies first (`pip install -e .`).
+migrated. Follow the repository [installation instructions](../../README.md#install)
+first; in AetherRL Docker use `python -m pip install --no-deps -e .`.
 
 Generated programs are untrusted: run evaluation in an isolated environment
 without credentials or valuable files; EvalPlus's guard is not a security sandbox.

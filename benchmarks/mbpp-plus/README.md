@@ -1,7 +1,8 @@
 # MBPP+
 
 Pinned dataset: **MBPP+ v0.2.0, 378 tasks**, full release (not NoExtreme).
-Pinned evaluator: **EvalPlus 0.3.1** (already a project dependency).
+Pinned evaluator: **EvalPlus 0.3.1**, installed separately with `--no-deps`
+(already included in AetherRL Docker; see [installation](../../README.md#install)).
 
 ## Offline use
 

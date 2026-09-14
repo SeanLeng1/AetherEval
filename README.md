@@ -18,10 +18,29 @@ A lightweight, generative-only LLM evaluation framework.
 
 ## Install
 
+Inside the AetherRL Docker image, use its active Python environment and preserve
+the preinstalled inference/scoring dependencies:
+
 ```bash
-source /root/env/bin/activate
-pip install -e .
+python -m pip install --no-deps -e .
 ```
+
+Outside that image, install the core dependencies with `python -m pip install -e .`
+and provision the chosen inference backend separately. HumanEval+ and MBPP+ also
+require the scoring-only EvalPlus installation (already included in AetherRL Docker):
+
+```bash
+python -m pip install --no-deps evalplus==0.3.1
+python -c "from evalplus.eval import untrusted_check; from evalplus.gen.util import trusted_exec"
+```
+
+EvalPlus is intentionally not an automatic project dependency: its unused Gemini
+provider dependencies require protobuf `<6`, conflicting with SMG's generated
+protobuf code, and its tree-sitter requirements replace the Docker's BFCL pins.
+Installing EvalPlus with `--no-deps` once does not prevent a later dependency-resolving
+install from pulling those dependencies. If the environment was already changed,
+start a fresh container from the original image before using the command above;
+editing this project's dependencies does not restore downgraded packages.
 
 ## List tasks
 

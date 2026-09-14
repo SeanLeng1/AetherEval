@@ -22,8 +22,10 @@ dependencies = [
   "tiktoken",
   "litellm>=1.93.0,<2",
   "numpy",
-  "evalplus==0.3.1",
 ]
+
+# EvalPlus is installed separately with --no-deps for scoring only (see README).
+# Its generation-provider dependencies conflict with the SGLang Docker stack.
 
 [project.optional-dependencies]
 vllm = ["vllm"]
