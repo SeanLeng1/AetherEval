@@ -167,13 +167,6 @@ mmlu-pro:
   top_p: 1.0
   stop: ["Question:"]
 
-nq-open:
-  # Local closed-book short-answer profile; original release has no chat decoding tuple.
-  n: 1
-  max_new_tokens: 64
-  temperature: 0.0
-  top_p: 1.0
-
 olympiad-bench:
   # Official text-only GPT-4 reference profile, not a universal model-specific budget.
   n: 1

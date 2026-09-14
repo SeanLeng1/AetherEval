@@ -30,7 +30,6 @@ _FORMATTING_WITHOUT_STARTER_CODE = (
     "as follows. Ensure that when the python program runs, it reads the inputs, runs "
     "the algorithm and writes output to STDOUT."
 )
-_REASONING_PREFIX = "Provide CONCISE reasoning on how to arrive at the answer."
 
 
 def _ensure_str_list(value: Any, key: str, sample_id: str) -> list[str]:
@@ -191,9 +190,7 @@ def build_prompt(sample: Sample) -> list[dict[str, str]]:
 
     user_prompt = (
         f"### Question:\n{question}\n\n"
-        "### Format:\n"
-        f"{_REASONING_PREFIX}\n"
-        f"{format_instruction}\n\n"
+        f"### Format: {format_instruction}\n\n"
         "### Answer: (use the provided format with backticks)\n\n"
     )
 

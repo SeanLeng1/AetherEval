@@ -770,7 +770,7 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(scored["score"], 1.0)
         self.assertEqual(scored["parsed"]["prediction"], "(B)")
 
-        # Some BBH rows in MC-tagged subsets contain free-form text answers.
+        # Malformed MC gold labels must not become gold-conditioned search patterns.
         sample_free_form = Sample(
             id="bbh_2",
             gold="dearth, wind, & fire",
@@ -787,7 +787,13 @@ class MetricsTests(unittest.TestCase):
             sample_free_form,
             "dearth, wind, & fire",
         )
-        self.assertEqual(scored_free_form["score"], 1.0)
+        self.assertEqual(scored_free_form["score"], 0.0)
+        denied = metrics_module.score_generation(
+            sample_free_form,
+            "dearth, wind, & fire is not my answer. The answer is (A).",
+        )
+        self.assertEqual(denied["score"], 0.0)
+        self.assertEqual(denied["parsed"]["prediction"], "(A)")
 
         sample_results = [
             {
@@ -1048,7 +1054,7 @@ class MetricsTests(unittest.TestCase):
         )
         self.assertIn("### Question:", prompt_no_starter[1]["content"])
         self.assertIn("### Format:", prompt_no_starter[1]["content"])
-        self.assertIn(
+        self.assertNotIn(
             "Provide CONCISE reasoning on how to arrive at the answer.",
             prompt_no_starter[1]["content"],
         )
@@ -1078,7 +1084,7 @@ class MetricsTests(unittest.TestCase):
             "You will use the following starter code to write the solution to the problem",
             prompt_with_starter[1]["content"],
         )
-        self.assertIn(
+        self.assertNotIn(
             "Provide CONCISE reasoning on how to arrive at the answer.",
             prompt_with_starter[1]["content"],
         )
@@ -1130,6 +1136,28 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(scored["score"], 1.0)
         self.assertTrue(scored["parsed"]["base_pass"])
         self.assertTrue(scored["parsed"]["plus_pass"])
+
+        # Ordinary examples pass, but a negative-number Plus case catches the bug.
+        plus_failure = metrics_module.score_generation(
+            sample, "    return abs(a) + abs(b)\n"
+        )
+        self.assertTrue(plus_failure["parsed"]["base_pass"])
+        self.assertFalse(plus_failure["parsed"]["plus_pass"])
+        self.assertEqual(plus_failure["score"], 0.0)
+        self.assertEqual(plus_failure["meta"]["scoring_protocol"], "evalplus-0.3.1")
+
+        base_failure = metrics_module.score_generation(sample, "    return 0\n")
+        self.assertFalse(base_failure["parsed"]["base_pass"])
+        self.assertEqual(base_failure["parsed"]["plus_status"], "skipped")
+        self.assertEqual(base_failure["score"], 0.0)
+
+        # Changing reference contents under the same ID must invalidate the oracle.
+        changed = copy.deepcopy(sample)
+        changed.data["canonical_solution"] = "    return a - b\n"
+        self.assertEqual(
+            metrics_module.score_generation(changed, "    return a - b\n")["score"],
+            1.0,
+        )
 
         # Regression guard: if generation includes a full function with typing annotations,
         # evaluator must still execute with the original prompt imports.
@@ -1230,7 +1258,7 @@ class MetricsTests(unittest.TestCase):
                         "gen_idx": 0,
                         "score": 0.0,
                         "is_pass": False,
-                        "parsed": {"base_pass": False, "plus_pass": False},
+                        "parsed": {"base_pass": True, "plus_pass": False},
                     },
                     {
                         "sample_id": "h2",
@@ -1245,7 +1273,7 @@ class MetricsTests(unittest.TestCase):
         result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["accuracy"], 0.25, places=6)
         self.assertAlmostEqual(result["accuracy_plus"], 0.25, places=6)
-        self.assertAlmostEqual(result["accuracy_base"], 0.25, places=6)
+        self.assertAlmostEqual(result["accuracy_base"], 0.5, places=6)
         self.assertAlmostEqual(result["accuracy@2"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@2"], 0.5, places=6)

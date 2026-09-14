@@ -48,8 +48,9 @@ Each row includes: `id`, `subset`, `input`, `target`, `answer`, `description`.
 - Implemented in `metrics.py`
 - Uses generation-text extraction only (no likelihood scoring)
 - Uses per-subset answer regex rules
-- Includes fallback handling for a small number of BBH rows where MC subsets
-  provide free-form gold text instead of `(A)/(B)/...`.
+- Extraction never uses the gold answer as a search pattern. MC subsets extract
+  choice letters even for the three malformed rows with free-form gold labels.
+  These rows remain in the denominator; they are not silently repaired or removed.
 - Core metric is exact match with normalization:
   - `ignore_case=True`
   - `ignore_punctuation=True` for all subsets except `dyck_languages`

@@ -294,22 +294,18 @@ its HF data once before running; the original `safe-alignment` task is unchanged
 
 ## Open-QA Benchmarks
 
-The following tasks use deterministic short-answer generation (`n=1`, temperature
-zero) and local alias-normalized scoring:
-
-- `nq-open` — the 3,610-example public NQ-Open development split; primary normalized
-  exact match. The original test labels are not public.
-- `triviaqa` — the 11,313-example public `unfiltered.nocontext`
-  validation split; primary normalized exact match.
+`triviaqa` uses deterministic short-answer generation (`n=1`, temperature zero)
+and local alias-normalized scoring on the 11,313-example public
+`unfiltered.nocontext` validation split; the primary metric is normalized exact match.
 
 ```bash
 aethereval \
   --model /path/to/policy \
-  --tasks nq-open,triviaqa \
+  --tasks triviaqa \
   --output-dir outputs
 ```
 
-Each task directory includes a preparation script and its exact split/metric notes.
+The task directory includes a preparation script and its exact split/metric notes.
 
 ## Native LLM-Judge Benchmarks
 

@@ -79,16 +79,12 @@ def _extract_last(regex: str, text: str) -> str:
     return str(last)
 
 
-def _extract_answer(generation: str, subset: str, gold: str) -> tuple[str, str]:
+def _extract_answer(generation: str, subset: str) -> tuple[str, str]:
     answer_regex = BBH_ANSWER_REGEX.get(subset, "MC")
     is_mc = answer_regex == "MC"
     if is_mc:
-        # OLMES default for MC tasks is parenthesized letter, but some BBH
-        # rows contain free-form gold strings; fall back to exact gold text.
-        if re.fullmatch(r"\([A-Z]\)", gold):
-            answer_regex = "\\([A-Z]\\)"
-        else:
-            answer_regex = re.escape(gold)
+        # Extract independently of the gold label, including malformed dataset rows.
+        answer_regex = "\\([A-Z]\\)"
 
     regexes = list(_ANSWER_REGEX_TEMPLATES)
     if is_mc:
@@ -128,7 +124,7 @@ def _normalize_exact_match(text: str, *, ignore_punctuation: bool) -> str:
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     subset = str(sample.meta.get("subset", sample.data.get("subset", ""))).strip()
     gold = str(sample.gold).strip()
-    prediction, method = _extract_answer(generation, subset, gold)
+    prediction, method = _extract_answer(generation, subset)
 
     ignore_punctuation = subset != "dyck_languages"
     prediction_norm = _normalize_exact_match(

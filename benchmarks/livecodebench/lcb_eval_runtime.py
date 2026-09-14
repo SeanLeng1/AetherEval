@@ -82,7 +82,6 @@ def timeout_handler(signum: int, frame: Any) -> None:
 
 
 _GLOBAL_TIMEOUT_GRACE_SEC = 5
-_MAX_GLOBAL_TIMEOUT_SEC = 600
 _TERMINATE_GRACE_SEC = 1.0
 _KILL_GRACE_SEC = 1.0
 _RESULT_QUEUE_WAIT_SEC = 0.25
@@ -627,7 +626,7 @@ def _global_timeout_for_sample(sample: dict[str, Any], timeout: int) -> tuple[in
     num_inputs = _num_inputs_for_sample(sample)
     timeout = max(1, int(timeout))
     estimated = (timeout + 1) * num_inputs + _GLOBAL_TIMEOUT_GRACE_SEC
-    return min(_MAX_GLOBAL_TIMEOUT_SEC, estimated), num_inputs
+    return estimated, num_inputs
 
 
 def _terminate_process(process: multiprocessing.Process) -> None:

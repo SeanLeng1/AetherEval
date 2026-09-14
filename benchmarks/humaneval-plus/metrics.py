@@ -1,14 +1,10 @@
-import contextlib
-import faulthandler
-import io
-import multiprocessing
-import os
-import platform
+import json
 import re
-import signal
-import tempfile
-from multiprocessing import Value
+from functools import lru_cache
 from typing import Any
+
+from evalplus.eval import PASS, untrusted_check
+from evalplus.gen.util import trusted_exec
 
 from aethereval.metrics.common import (
     aggregate_binary_results,
@@ -19,7 +15,7 @@ from aethereval.metrics.common import (
 from aethereval.core.types import GenerationRecord, Sample
 
 PRIMARY_METRIC = "pass@1"
-
+SCORING_PROTOCOL = "evalplus-0.3.1"
 
 _CODE_BLOCK_RE = re.compile(
     r"```(?:python)?[ \t]*\n?(.*?)```", re.IGNORECASE | re.DOTALL
@@ -28,9 +24,6 @@ _ANSWER_BLOCK_RE = re.compile(
     r"here is the completed function:\s*```(?:python)?[ \t]*\n?(.*?)```",
     re.IGNORECASE | re.DOTALL,
 )
-_DEFAULT_TIMEOUT_SEC = 20.0
-_PROCESS_TERMINATE_GRACE_SEC = 1.0
-_PROCESS_KILL_GRACE_SEC = 1.0
 
 
 def _empty_aggregate_result() -> dict[str, float]:
@@ -44,10 +37,6 @@ def _empty_aggregate_result() -> dict[str, float]:
         "pass@1": 0.0,
         "pass@1_stderr": 0.0,
     }
-
-
-class _TimeoutException(Exception):
-    pass
 
 
 def _record_plus_score(record: GenerationRecord) -> float:
@@ -65,182 +54,6 @@ def _record_base_score(record: GenerationRecord) -> float:
 
 def _record_has_parsed(record: GenerationRecord) -> bool:
     return isinstance(record.parsed, dict) and bool(record.parsed)
-
-
-@contextlib.contextmanager
-def _time_limit(seconds: float):
-    def _signal_handler(signum: int, frame: Any) -> None:  # noqa: ARG001
-        raise _TimeoutException("Timed out.")
-
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    signal.signal(signal.SIGALRM, _signal_handler)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-
-
-class _WriteOnlyStringIO(io.StringIO):
-    def read(self, *args: Any, **kwargs: Any) -> str:
-        raise OSError
-
-    def readline(self, *args: Any, **kwargs: Any) -> str:
-        raise OSError
-
-    def readlines(self, *args: Any, **kwargs: Any) -> list[str]:
-        raise OSError
-
-    def readable(self, *args: Any, **kwargs: Any) -> bool:
-        return False
-
-
-class _redirect_stdin(contextlib._RedirectStream):  # type: ignore[misc]
-    _stream = "stdin"
-
-
-@contextlib.contextmanager
-def _swallow_io():
-    stream = _WriteOnlyStringIO()
-    with contextlib.redirect_stdout(stream):
-        with contextlib.redirect_stderr(stream):
-            with _redirect_stdin(stream):
-                yield
-
-
-@contextlib.contextmanager
-def _chdir(path: str):
-    cwd = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(cwd)
-
-
-@contextlib.contextmanager
-def _create_tempdir():
-    with tempfile.TemporaryDirectory() as dirname:
-        with _chdir(dirname):
-            yield dirname
-
-
-def _reliability_guard(maximum_memory_bytes: int | None = None) -> None:
-    if maximum_memory_bytes is not None:
-        import resource
-
-        resource.setrlimit(
-            resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes)
-        )
-        resource.setrlimit(
-            resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes)
-        )
-        if platform.uname().system != "Darwin":
-            resource.setrlimit(
-                resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes)
-            )
-
-    faulthandler.disable()
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.kill = None  # type: ignore[assignment]
-    os.system = None  # type: ignore[assignment]
-    os.putenv = None  # type: ignore[assignment]
-    os.remove = None  # type: ignore[assignment]
-    os.removedirs = None  # type: ignore[assignment]
-    os.rmdir = None  # type: ignore[assignment]
-    os.fchdir = None  # type: ignore[assignment]
-    os.setuid = None  # type: ignore[assignment]
-    os.fork = None  # type: ignore[assignment]
-    os.forkpty = None  # type: ignore[assignment]
-    os.killpg = None  # type: ignore[assignment]
-    os.rename = None  # type: ignore[assignment]
-    os.renames = None  # type: ignore[assignment]
-    os.truncate = None  # type: ignore[assignment]
-    os.replace = None  # type: ignore[assignment]
-    os.unlink = None  # type: ignore[assignment]
-    os.fchmod = None  # type: ignore[assignment]
-    os.fchown = None  # type: ignore[assignment]
-    os.chmod = None  # type: ignore[assignment]
-    os.chown = None  # type: ignore[assignment]
-    os.chroot = None  # type: ignore[assignment]
-    os.lchflags = None  # type: ignore[assignment]
-    os.lchmod = None  # type: ignore[assignment]
-    os.lchown = None  # type: ignore[assignment]
-    os.getcwd = None  # type: ignore[assignment]
-    os.chdir = None  # type: ignore[assignment]
-
-    import shutil
-
-    shutil.rmtree = None  # type: ignore[assignment]
-    shutil.move = None  # type: ignore[assignment]
-    shutil.chown = None  # type: ignore[assignment]
-
-
-def _unsafe_execute(
-    result: Value, solution: str, test_code: str, timeout_sec: float
-) -> None:
-    with _create_tempdir():
-        import os as _os
-        import shutil as _shutil
-
-        orig = {
-            "rmtree": _shutil.rmtree,
-            "rmdir": _os.rmdir,
-            "chdir": _os.chdir,
-            "unlink": _os.unlink,
-        }
-        _reliability_guard()
-        check_program = solution + "\n" + test_code
-
-        try:
-            exec_globals: dict[str, Any] = {}
-            with _swallow_io():
-                with _time_limit(timeout_sec):
-                    exec(check_program, exec_globals)  # noqa: S102
-            result.value = 1
-        except _TimeoutException:
-            result.value = -1
-        except BaseException:
-            result.value = 0
-        finally:
-            _shutil.rmtree = orig["rmtree"]
-            _os.rmdir = orig["rmdir"]
-            _os.chdir = orig["chdir"]
-            _os.unlink = orig["unlink"]
-
-
-def _terminate_process(process: multiprocessing.Process) -> None:
-    if not process.is_alive():
-        process.join(timeout=0.01)
-        return
-
-    process.terminate()
-    process.join(timeout=_PROCESS_TERMINATE_GRACE_SEC)
-
-    if process.is_alive():
-        process.kill()
-        process.join(timeout=_PROCESS_KILL_GRACE_SEC)
-
-
-def _run_olmes_style_check(
-    solution: str, test_code: str, timeout_sec: float
-) -> tuple[bool, str]:
-    if not test_code.strip():
-        return False, "missing_test"
-
-    result = Value("i", 0)
-    process = multiprocessing.Process(
-        target=_unsafe_execute,
-        args=(result, solution, test_code, timeout_sec),
-    )
-    process.start()
-    process.join(timeout=timeout_sec + 1.0)
-    _terminate_process(process)
-
-    if result.value == 1:
-        return True, "passed"
-    if result.value == -1:
-        return False, "timed out"
-    return False, "failed"
 
 
 def _strip_fence_wrapper(text: str) -> str:
@@ -306,32 +119,58 @@ def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
     return prompt + joiner + continuation, is_full_solution
 
 
+@lru_cache(maxsize=256)
+def _oracle(reference: str, entry_point: str, inputs_json: str):
+    # Key by contents, not task ID: a different dataset must not reuse stale outputs.
+    # EvalPlus trusted_exec deep-copies each input before calling the reference.
+    return trusted_exec(reference, json.loads(inputs_json), entry_point, record_time=True)
+
+
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
-    entry_point = str(sample.data["entry_point"])
+    data = sample.data
+    entry_point = str(data["entry_point"])
     solution, is_full_solution = _candidate_solution(sample, generation)
-    test_body = str(sample.data.get("test", "")).rstrip()
-    check_code = test_body
-    if check_code:
-        check_code = f"{check_code}\ncheck({entry_point})"
+    prompt = str(data["prompt"])
+    reference = (
+        prompt
+        + ("" if prompt.endswith("\n") else "\n")
+        + str(data["canonical_solution"])
+    )
+    statuses = {}
+    for split in ("base", "plus"):
+        if split == "plus" and statuses["base"] != PASS:
+            statuses["plus"] = "skipped"
+            break
+        inputs = data[f"{split}_input"]
+        if not inputs:
+            raise ValueError(f"{sample.id}: {split}_input is empty")
+        expected, ref_time = _oracle(reference, entry_point, json.dumps(inputs))
+        statuses[split], _ = untrusted_check(
+            "humaneval",
+            solution,
+            inputs,
+            entry_point,
+            expected=expected,
+            atol=float(data["atol"]),
+            ref_time=ref_time,
+            fast_check=True,
+        )
 
-    timeout_sec = max(0.1, float(sample.data.get("timeout", _DEFAULT_TIMEOUT_SEC)))
-    passed, exec_result = _run_olmes_style_check(solution, check_code, timeout_sec)
-
+    base_pass = statuses["base"] == PASS
+    plus_pass = base_pass and statuses["plus"] == PASS
     parsed = {
-        "base_status": exec_result,
-        "plus_status": exec_result,
-        "base_pass": passed,
-        "plus_pass": passed,
-        "exec_result": exec_result,
+        "base_status": statuses["base"],
+        "plus_status": statuses["plus"],
+        "base_pass": base_pass,
+        "plus_pass": plus_pass,
     }
     return {
-        "score": 1.0 if passed else 0.0,
-        "is_pass": passed,
+        "score": float(plus_pass),
+        "is_pass": plus_pass,
         "parsed": parsed,
         "meta": {
-            "base_pass": passed,
-            "plus_pass": passed,
-            "exec_result": exec_result,
+            **parsed,
+            "scoring_protocol": SCORING_PROTOCOL,
             "full_solution": is_full_solution,
         },
     }

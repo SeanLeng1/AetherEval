@@ -16,9 +16,9 @@ reasoning model finishes within it. Override the budget explicitly for extended
 reasoning experiments. The former `n=10, temperature=0.6, top_p=0.95, 4096`
 profile was a local sampled evaluation, not this reference profile.
 
-The existing chat prompt asks for reasoning plus fenced code and uses local
-extraction/execution. Those are not proven identical to EvalPlus prompting,
-sanitization and execution; this audit aligns decoding, not the complete scorer.
+The chat prompt asks for reasoning plus fenced code and uses local extraction.
+These are not identical to EvalPlus prompting and sanitization. Test execution
+now uses EvalPlus 0.3.1, including its tolerances, special oracles and time limits.
 
 ## Files
 
@@ -54,8 +54,20 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 - For each generation:
   - extract the final code candidate (prefer answer block / fenced code)
   - execute `prompt + continuation`
-  - run `test + check(entry_point)` inside a local sandboxed subprocess with timeout
-- `score` / `is_pass` is pass/fail of that unit-test execution.
+  - compute reference outputs from the canonical solution (cached per process)
+  - run `base_input` and `plus_input` using EvalPlus's subprocess checker
+- `score` / `is_pass` requires both suites to pass. If base fails, Plus is skipped.
+- `accuracy_base` reports base tests; `accuracy_plus` requires base and Plus.
+- Records identify the checker with `meta.scoring_protocol=evalplus-0.3.1`.
+
+Older scores ran only `test + check(entry_point)` and copied that result into
+both base and Plus fields. They are not verified HumanEval+ scores. Re-score
+saved generations with `--eval-only` (same model-name, output-dir and run-id);
+no generation or training is needed. Existing result files are not automatically
+migrated. Install the updated dependencies first (`pip install -e .`).
+
+Generated programs are untrusted: run evaluation in an isolated environment
+without credentials or valuable files; EvalPlus's guard is not a security sandbox.
 
 Reported metrics include:
 - `accuracy` (alias of `accuracy_plus`)

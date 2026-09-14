@@ -47,7 +47,7 @@ def _token_f1(prediction: str, gold: str) -> float:
 
 
 def score_open_qa(sample: Sample, generation: str) -> dict[str, Any]:
-    # Reference NQ-Open and TriviaQA evaluation scores the submitted answer
+    # Reference TriviaQA evaluation scores the submitted answer
     # itself.  Silently extracting a later ``Final answer:`` line would make
     # exact match more permissive than those protocols.
     prediction = str(generation).strip()

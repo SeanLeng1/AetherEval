@@ -79,7 +79,6 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("zebralogic", tasks)
         self.assertIn("livecodebench", tasks)
         self.assertNotIn("qampari-oracle5", tasks)
-        self.assertIn("nq-open", tasks)
         self.assertIn("triviaqa", tasks)
 
     def test_contract_validation(self) -> None:
@@ -168,7 +167,6 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["humaneval-plus"]["n"], 1)
         self.assertEqual(defaults["humaneval-plus"]["temperature"], 0.0)
         self.assertEqual(defaults["humaneval-plus"]["max_new_tokens"], 768)
-        self.assertEqual(defaults["nq-open"]["n"], 1)
         self.assertEqual(defaults["triviaqa"]["n"], 1)
 
     def test_instruction_following_primary_metrics(self) -> None:
