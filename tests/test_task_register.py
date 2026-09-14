@@ -161,13 +161,14 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("max_new_tokens", defaults["livecodebench"])
         self.assertEqual(defaults["livecodebench"]["temperature"], 0.2)
         self.assertEqual(defaults["livecodebench"]["top_p"], 0.95)
-        self.assertEqual(defaults["livecodebench"]["max_new_tokens"], 2000)
+        self.assertEqual(defaults["livecodebench"]["max_new_tokens"], 32768)
         self.assertEqual(defaults["livecodebench"]["stop"], ["###"])
         self.assertEqual(defaults["mmlu-pro"]["max_new_tokens"], 2048)
         self.assertEqual(defaults["mmlu-pro"]["stop"], ["Question:"])
         self.assertEqual(defaults["humaneval-plus"]["n"], 1)
         self.assertEqual(defaults["humaneval-plus"]["temperature"], 0.0)
-        self.assertEqual(defaults["humaneval-plus"]["max_new_tokens"], 768)
+        self.assertEqual(defaults["humaneval-plus"]["max_new_tokens"], 32768)
+        self.assertEqual(defaults["mbpp-plus"]["max_new_tokens"], 32768)
         self.assertEqual(defaults["triviaqa"]["n"], 1)
 
     def test_instruction_following_primary_metrics(self) -> None:

@@ -21,15 +21,18 @@ aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
 
 ## Protocol
 
-- Prompt matches the [EvalPlus chat API provider](https://github.com/evalplus/evalplus/blob/v0.3.1/evalplus/provider/openai.py),
-  using the instruction in [codegen.py](https://github.com/evalplus/evalplus/blob/v0.3.1/evalplus/codegen.py).
-  Includes the official coding-assistant system message and no additional reasoning
-  instruction. The local backend applies
-  the model's chat template. This is a chat profile, not EvalPlus's base-model
-  completion or vLLM assistant-prefill profile.
-- Greedy defaults: `n=1`, `temperature=0`, `top_p=0.95`, `max_new_tokens=768`.
+- Prompt uses the same short-reasoning-then-fenced-code format as our HumanEval+
+  task, with `### Question`, `### Format`, and `### Answer` sections. The question
+  retains MBPP+'s original specification and examples; no reference solution or
+  private test inputs are included. There is no assistant/code prefill.
+  The local backend applies the model's chat template. This is a local reasoning
+  chat profile, not the unmodified EvalPlus chat or completion prompt.
+- Greedy defaults: `n=1`, `temperature=0`, `top_p=0.95`, `max_new_tokens=32768`.
   `top_p` follows the official chat request helper (temperature zero is greedy).
-  The output budget is the reference decoder default; explicitly report overrides.
+  The output budget is a local extension of the reference decoder's 768-token
+  default. It accommodates reasoning plus code without forcing a model-specific
+  thinking mode. The serving context must also
+  fit the prompt; EOS can end generation before the ceiling.
 - Use the official `sanitize`, `mbpp_deserialize_inputs`, and
   `untrusted_check(dataset="mbpp")`, including special oracles and official time limits.
   Reference execution also honors `MBPP_OUTPUT_NOT_NONE_TASKS`.

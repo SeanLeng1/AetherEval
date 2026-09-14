@@ -104,9 +104,9 @@ healthbench:
     judge_max_new_tokens: 2048
 
 humaneval-plus:
-  # EvalPlus documented greedy profile; DecoderBase supplies the 768-token default.
+  # Greedy decoding with a local extended output budget (EvalPlus defaults to 768).
   n: 1
-  max_new_tokens: 768
+  max_new_tokens: 32768
   temperature: 0.0
   top_p: 1.0
 
@@ -125,9 +125,9 @@ ifeval:
   top_p: 1.0
 
 livecodebench:
-  # Official codegeneration runner/parser.py defaults.
+  # Reference sampling settings; local extended budget instead of 2000 tokens.
   n: 10
-  max_new_tokens: 2000
+  max_new_tokens: 32768
   temperature: 0.2
   top_p: 0.95
   stop: ["###"]
@@ -153,9 +153,9 @@ math500:
   top_p: 0.7
 
 mbpp-plus:
-  # EvalPlus chat greedy profile; reference decoder output budget.
+  # Local reasoning-and-code prompt, greedy decoding, extended output budget.
   n: 1
-  max_new_tokens: 768
+  max_new_tokens: 32768
   temperature: 0.0
   top_p: 0.95
 

@@ -35,12 +35,25 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
 
 def build_prompt(sample: Sample) -> list[dict[str, str]]:
-    # EvalPlus 0.3.1 OpenAIChatDecoder prompt, rendered by our local backend.
-    return [{"role": "system", "content": "You are a helpful assistant good at coding."}, {
-        "role": "user",
-        "content": (
-            "Please provide a self-contained Python script that solves the following "
-            "problem in a markdown code block:"
-            f"\n```python\n{sample.data['prompt'].strip()}\n```"
-        ),
-    }]
+    # Match our HumanEval+ reasoning-and-code format; no assistant/code prefill.
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert Python programmer. "
+                "You will be given a function specification and must return a correct completed "
+                "Python function that passes all tests."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"### Question:\n{sample.data['prompt']}\n\n"
+                "### Format:\n"
+                "Provide a SHORT reasoning on how to solve the task, then return the completed "
+                "function enclosed in a Python code block as:\n"
+                "```python\n# YOUR CODE HERE\n```\n\n"
+                "### Answer: (use the provided format with backticks)\n\n"
+            ),
+        },
+    ]

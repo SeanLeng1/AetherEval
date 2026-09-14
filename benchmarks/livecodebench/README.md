@@ -8,11 +8,12 @@ Official repository: [LiveCodeBench/LiveCodeBench](https://github.com/LiveCodeBe
 Checked [runner/parser.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/parser.py)
 and [vllm_runner.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/vllm_runner.py).
 
-Defaults follow the reference code-generation runner:
-`n=10, temperature=0.2, top_p=0.95, max_new_tokens=2000, stop=["###"]`.
-The README also explicitly specifies `n=10, temperature=0.2`.
-Reasoning-model evaluations may use longer budgets; those must be reported as
-overrides, not conflated with this reference profile.
+Defaults retain the reference sampling settings with a local extended budget:
+`n=10, temperature=0.2, top_p=0.95, max_new_tokens=32768, stop=["###"]`.
+The 32768-token ceiling includes reasoning and code, replacing the reference
+runner's 2000-token default. Report this budget explicitly; it is not the
+unmodified reference profile. The serving context must also fit the prompt.
+EOS or the retained stop sequence can still terminate generation earlier.
 
 The local `lighteval/code_generation_lite` v6 snapshot is not automatically the
 official runner's `release_latest` set. Prompt formatting, date window and local

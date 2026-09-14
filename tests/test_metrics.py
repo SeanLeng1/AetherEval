@@ -1110,8 +1110,12 @@ class MetricsTests(unittest.TestCase):
                         sample, "```python\n" + sample.data["canonical_solution"] + "\n```"
                     )
                     self.assertTrue(result["is_pass"])
-            self.assertEqual(bundle.task_module.build_prompt(samples[0])[0]["content"],
-                             "You are a helpful assistant good at coding.")
+            prompt = bundle.task_module.build_prompt(samples[0])
+            humaneval = load_task("humaneval-plus")
+            expected = humaneval.task_module.build_prompt(samples[0])
+            self.assertEqual(prompt, expected)
+            self.assertIn("Provide a SHORT reasoning", prompt[1]["content"])
+            self.assertEqual([message["role"] for message in prompt], ["system", "user"])
 
         sample = Sample(id="Mbpp/99999", data={
             "prompt": "", "entry_point": "f", "canonical_solution": "def f(x): return x",
