@@ -30,8 +30,40 @@ and provision the chosen inference backend separately. HumanEval+ and MBPP+ also
 require the scoring-only EvalPlus installation (already included in AetherRL Docker):
 
 ```bash
-python -m pip install --no-deps evalplus==0.3.1
-python -c "from evalplus.eval import untrusted_check; from evalplus.gen.util import trusted_exec"
+python -m pip install --no-deps \
+  evalplus==0.3.1 tempdir==0.7.1 wget==3.2 appdirs==1.4.4 termcolor==3.3.0
+```
+
+The runtime must also provide NumPy, psutil and tqdm. MBPP+ additionally uses
+`tree-sitter-python` and EvalPlus's official sanitizer. AetherRL Docker pins
+`tree-sitter==0.21.3` for BFCL, installs `tree-sitter-python==0.21.0`, and adapts
+only the sanitizer's parser constructor to that API. It checks both MBPP+ and
+BFCL parsers at image build time; the test-execution and sanitizing rules are unchanged.
+For a separate environment without the BFCL pin, EvalPlus's native sanitizer
+instead requires `tree-sitter>=0.22.0` with a compatible Python grammar package.
+
+To repair an older AetherRL container without rebuilding, run the scoring-dependency
+command above, then apply the same parser-constructor adaptation:
+
+```bash
+python -m pip install --no-deps tree-sitter-python==0.21.0
+python - <<'PY'
+from importlib.metadata import version
+from pathlib import Path
+import evalplus
+
+assert version("evalplus") == "0.3.1" and version("tree-sitter") == "0.21.3"
+path = Path(evalplus.__file__).with_name("sanitize.py")
+old = "parser = Parser(Language(tree_sitter_python.language()))"
+new = 'parser = Parser()\n    parser.set_language(Language(tree_sitter_python.language(), "python"))'
+source = path.read_text()
+assert old in source or new in source, "Unexpected EvalPlus sanitizer version"
+path.write_text(source.replace(old, new))
+from evalplus.data.mbpp import mbpp_deserialize_inputs
+from evalplus.sanitize import sanitize
+assert sanitize("def f(x):\n    return x", entrypoint="f") == "def f(x):\n    return x"
+print("MBPP+ imports and sanitizer OK")
+PY
 ```
 
 EvalPlus is intentionally not an automatic project dependency: its unused Gemini
@@ -75,6 +107,16 @@ aethereval \
   --output-dir outputs \
   --max-new-tokens 256
 ```
+
+### CPU scoring parallelism
+
+Add `--num-proc 32` (or `metrics.num_proc: 32` in YAML) to parallelize local
+per-response scoring, including math-verify, HumanEval+, MBPP+ and LiveCodeBench.
+The default is `1`. This also works with `--eval-only` and resume; it does not
+regenerate answers or change grading, aggregation, or the output order.
+Choose the count for the CPU cores and memory available on the invoking node,
+not the GPU count. Code workers can launch their existing test subprocesses.
+RM batch scoring and LLM-judge concurrency (`--judge-workers`) are unchanged.
 
 ### Ray data parallelism
 
@@ -433,6 +475,12 @@ candidate generation phase first, shuts the candidate backend down, and then
 loads the judge in eval-only mode. Candidate and judge weights therefore never
 occupy GPU memory at the same time. Explicit `--generate-only` and `--eval-only`
 commands remain supported as well.
+
+During eval-only, non-judge metrics run first, then local judge tasks are grouped
+by model and runtime configuration (DP/TP, SGLang arguments and batch size).
+Each group shares one loaded judge; it is unloaded before the next group.
+Per-task prompts, sampling settings and scoring rules remain separate, and API
+judging and candidate generation retain their original task order.
 
 Local judging is opt-in. It preserves each benchmark's existing judge prompt,
 sampling settings, and parser, but replacing its official GPT/Claude judge with a

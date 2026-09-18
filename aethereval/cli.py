@@ -327,6 +327,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     metrics_group = parser.add_argument_group("metrics")
     metrics_group.add_argument(
+        "--num-proc",
+        type=int,
+        default=None,
+        help="CPU processes for per-response scoring, e.g. math/code (default: 1); independent of judge workers.",
+    )
+    metrics_group.add_argument(
         "--bootstrap-resamples",
         type=int,
         default=None,

@@ -6,10 +6,12 @@ from unittest import mock
 
 from aethereval.core.runner import (
     _merge_generation_config,
+    _score_generation_outputs,
     inspect_prompts,
     run_evaluation,
 )
-from aethereval.core.types import GenerationInput, GenerationOutput
+from aethereval.core.task_register import _load_module_from_path
+from aethereval.core.types import GenerationInput, GenerationOutput, Sample
 
 
 class FakeTokenizer:
@@ -278,6 +280,43 @@ def _write_batch_benchmark(root: Path) -> None:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_parallel_scoring_preserves_order_and_allows_test_subprocesses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metrics.py"
+            path.write_text(
+                "import multiprocessing as mp\n"
+                "import threading\n"
+                "import time\n"
+                "def score_generation(sample, generation):\n"
+                "    assert threading.current_thread() is threading.main_thread()\n"
+                "    child = mp.Process(target=int, args=('1',))\n"
+                "    child.start()\n"
+                "    child.join(10)\n"
+                "    assert child.exitcode == 0\n"
+                "    time.sleep(0.1 if generation == '1' else 0)\n"
+                "    return {'score': float(generation), 'parsed': sample.id}\n",
+                encoding="utf-8",
+            )
+            samples = {key: Sample(id=key) for key in ("a", "b")}
+            outputs = [
+                GenerationOutput("b", "", ["1", "2"]),
+                GenerationOutput("a", "", ["3"]),
+            ]
+            kwargs = dict(
+                metrics_module=_load_module_from_path("parallel_test_metrics", path),
+                samples_by_id=samples,
+                outputs=outputs,
+                total_records=3,
+                progress_desc="test scoring",
+            )
+            serial = _score_generation_outputs(**kwargs, metric_options={"num_proc": 1})
+            parallel = _score_generation_outputs(**kwargs, metric_options={"num_proc": 2})
+            self.assertEqual(parallel, serial)
+            self.assertEqual(list(parallel), ["b", "a"])
+            outputs[0].generations[0] = "invalid"
+            with self.assertRaises(ValueError):
+                _score_generation_outputs(**kwargs, metric_options={"num_proc": 2})
+
     def test_eval_only_manages_offline_judge_and_keeps_runtime_object_out_of_json(
         self,
     ) -> None:
@@ -336,6 +375,87 @@ class RunnerTests(unittest.TestCase):
             with run_config_path.open(encoding="utf-8") as f:
                 run_config = json.load(f)
             self.assertNotIn("_judge_client", run_config["metric_options"])
+
+    def test_local_judge_groups_reuse_services_and_close_on_failure(self) -> None:
+        from aethereval.core import runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            names = ["judge-a1", "cpu", "judge-b", "judge-a2", "judge-context"]
+            defaults = {}
+            for name in names:
+                _write_toy_benchmark(root)
+                (root / "toy").rename(root / name)
+                if name == "cpu":
+                    continue
+                path = root / name / "metrics.py"
+                path.write_text("USES_LLM_JUDGE = True\n" + path.read_text())
+                defaults[name] = {"metrics": {
+                    "judge_model": "local/b" if name == "judge-b" else "local/a",
+                    "judge_sglang_args": {
+                        "context_length": 16384 if name == "judge-context" else 8192,
+                    },
+                    "judge_temperature": 0.7 if name == "judge-a2" else 0.0,
+                }}
+            kwargs = dict(
+                model="candidate/model", tasks=",".join(names),
+                output_dir=Path(tmp) / "outputs", run_id="grouped", benchmarks_dir=root,
+            )
+            run_evaluation(**kwargs, backend=FakeBackend(), generate_only=True)
+            original_run_task = runner._run_repeated_task
+
+            for mode in ("local", "api", "failure"):
+                with self.subTest(mode=mode):
+                    events, clients, scored_options = [], [], {}
+
+                    def create_judge(**config):
+                        index = len(clients)
+                        client = mock.Mock()
+                        client.close.side_effect = lambda: events.append(("close", index))
+                        clients.append(client)
+                        events.append(("load", index))
+                        return client
+
+                    def score_task(**options):
+                        name = options["task_name"]
+                        events.append(("score", name))
+                        scored_options[name] = options["metric_options"]
+                        if mode == "failure" and name == "judge-a2":
+                            raise RuntimeError("test scoring failure")
+                        return original_run_task(**options)
+
+                    with (
+                        mock.patch("aethereval.core.task_defaults._load_task_default_overrides", return_value=defaults),
+                        mock.patch.object(runner, "OfflineJudgeClient", side_effect=create_judge) as constructor,
+                        mock.patch.object(runner, "_run_repeated_task", side_effect=score_task),
+                    ):
+                        options = {"judge_backend": "api" if mode == "api" else "local"}
+                        if mode == "failure":
+                            with self.assertRaisesRegex(RuntimeError, "test scoring failure"):
+                                run_evaluation(**kwargs, eval_only=True, metric_options=options)
+                        else:
+                            result = run_evaluation(**kwargs, eval_only=True, metric_options=options)
+                            self.assertTrue(all(item["evaluation_complete"] for item in result["results"].values()))
+
+                    if mode == "api":
+                        constructor.assert_not_called()
+                        self.assertEqual(events, [("score", name) for name in names])
+                        continue
+                    expected = [
+                        ("score", "cpu"), ("load", 0), ("score", "judge-a1"),
+                        ("score", "judge-a2"), ("close", 0),
+                    ]
+                    if mode == "local":
+                        expected += [
+                            ("load", 1), ("score", "judge-b"), ("close", 1),
+                            ("load", 2), ("score", "judge-context"), ("close", 2),
+                        ]
+                    self.assertEqual(events, expected)
+                    self.assertIs(scored_options["judge-a1"]["_judge_client"], scored_options["judge-a2"]["_judge_client"])
+                    self.assertEqual(scored_options["judge-a1"]["judge_temperature"], 0.0)
+                    self.assertEqual(scored_options["judge-a2"]["judge_temperature"], 0.7)
+                    for client in clients:
+                        client.close.assert_called_once_with()
 
     def test_generate_only_then_eval_only_without_candidate_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -631,6 +751,7 @@ class RunnerTests(unittest.TestCase):
                 run_id="run1",
                 backend=backend,
                 benchmarks_dir=root,
+                metric_options={"num_proc": 2},
             )
             self.assertIn("toy", first["results"])
             summary = first["results"]["toy"]
@@ -663,6 +784,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(first_row["meta"]["response_token_count"], 1)
 
             resume_backend = NeverCalledBackend()
+            original_predictions = predictions_path.read_text()
             second = run_evaluation(
                 model="fake-model",
                 tasks="toy",
@@ -670,10 +792,12 @@ class RunnerTests(unittest.TestCase):
                 run_id="run1",
                 backend=resume_backend,
                 benchmarks_dir=root,
+                metric_options={"num_proc": 2},
             )
             summary2 = second["results"]["toy"]
             self.assertEqual(summary2["new_records"], 0)
             self.assertEqual(summary2["existing_records"], 2)
+            self.assertEqual(predictions_path.read_text(), original_predictions)
 
     def test_batch_metric_hook_scores_generations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -688,7 +812,7 @@ class RunnerTests(unittest.TestCase):
                 run_id="batch_run",
                 backend=FakeBackend(),
                 benchmarks_dir=root,
-                metric_options={"batch_offset": 1.0},
+                metric_options={"batch_offset": 1.0, "num_proc": 2},
             )
 
             summary = result["results"]["batch-toy"]

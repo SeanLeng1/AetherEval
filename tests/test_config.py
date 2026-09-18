@@ -7,6 +7,19 @@ from aethereval.config import load_yaml_config, resolve_run_arguments
 
 
 class ConfigTests(unittest.TestCase):
+    def test_num_proc_yaml_cli_and_validation(self) -> None:
+        from aethereval.cli import build_parser
+
+        args = build_parser().parse_args(["--model", "candidate"])
+        self.assertNotIn("num_proc", resolve_run_arguments(args, {})["metric_options"])
+        cfg = {"metrics": {"num_proc": 4}}
+        self.assertEqual(resolve_run_arguments(args, cfg)["metric_options"]["num_proc"], 4)
+        args.num_proc = 2
+        self.assertEqual(resolve_run_arguments(args, cfg)["metric_options"]["num_proc"], 2)
+        args.num_proc = 0
+        with self.assertRaisesRegex(ValueError, "num_proc must be >= 1"):
+            resolve_run_arguments(args, cfg)
+
     def test_local_judge_defaults_to_all_runtime_gpus_as_tensor_parallel(self) -> None:
         from aethereval.cli import build_parser
 

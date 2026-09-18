@@ -1,5 +1,7 @@
 import json
+import multiprocessing
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,7 +17,13 @@ from .io import (
     write_jsonl,
 )
 from .run_summary import build_run_summary, load_task_summaries, phase_name
-from .task_register import BENCHMARKS_DIR, discover_tasks, load_task, parse_task_names
+from .task_register import (
+    BENCHMARKS_DIR,
+    _load_module_from_path,
+    discover_tasks,
+    load_task,
+    parse_task_names,
+)
 from .task_defaults import (
     resolve_task_default_gen,
     resolve_task_default_metrics,
@@ -39,6 +47,7 @@ from aethereval.backends import (
 from benchmark_utils.local_judge import OfflineJudgeClient
 
 _UNSCORED_META_KEY = "_aethereval_unscored"
+_SCORE_WORKER_METRICS: Any = None
 
 
 def _info(message: str) -> None:
@@ -467,6 +476,20 @@ def _normalize_batch_score_results(
     return normalized
 
 
+def _init_score_worker(metrics_path: str) -> None:
+    global _SCORE_WORKER_METRICS
+    # Benchmark modules are loaded by path and cannot be pickled into spawned workers.
+    _SCORE_WORKER_METRICS = _load_module_from_path(
+        "aethereval_worker_metrics", Path(metrics_path)
+    )
+
+
+def _score_in_worker(sample: Sample, generation: str):
+    return _score_generation(
+        metrics_module=_SCORE_WORKER_METRICS, sample=sample, generation=generation
+    )
+
+
 def _score_generation_outputs(
     *,
     metrics_module: Any,
@@ -486,9 +509,42 @@ def _score_generation_outputs(
         raw_results = batch_score_fn(samples, outputs, score_options)
         return _normalize_batch_score_results(raw_results=raw_results, outputs=outputs)
 
+    num_proc = int(metric_options.get("num_proc", 1))
+    if num_proc < 1:
+        raise ValueError("num_proc must be >= 1")
     score_bar = _make_progress_bar(total_records, progress_desc)
     scored: dict[str, list[tuple[float, bool, Any, dict[str, Any]]]] = {}
     try:
+        if num_proc > 1 and total_records:
+            workers = min(num_proc, total_records)
+            _info(f"{progress_desc}: {workers} CPU scoring processes")
+            # Spawn avoids inheriting GPU state; executor workers are non-daemonic,
+            # so EvalPlus/LiveCodeBench can still launch their test subprocesses.
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_init_score_worker,
+                initargs=(str(Path(metrics_module.__file__).resolve()),),
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _score_in_worker, samples_by_id[output.sample_id], text
+                    ): (output.sample_id, index)
+                    for output in outputs
+                    for index, text in enumerate(output.generations)
+                }
+                by_index = {}
+                for future in as_completed(futures):
+                    by_index[futures[future]] = future.result()
+                    if score_bar is not None:
+                        score_bar.update(1)
+            return {
+                output.sample_id: [
+                    by_index[output.sample_id, index]
+                    for index in range(len(output.generations))
+                ]
+                for output in outputs
+            }
         for output in outputs:
             sample = samples_by_id[output.sample_id]
             scored[output.sample_id] = []
@@ -1359,7 +1415,7 @@ def run_evaluation(
     )
 
     local_judge_client: OfflineJudgeClient | None = None
-    local_judge_key: tuple[Any, ...] | None = None
+    local_judge_key: str | None = None
     try:
         run_config_common = {
             "model": model,
@@ -1377,14 +1433,9 @@ def run_evaluation(
         }
         if metric_options:
             resolved_metric_options.update(metric_options)
-        summaries: dict[str, Any] = {}
+        task_plan = []
         for task_name in selected:
-            _info(f"===== start task: {task_name} =====")
             bundle = load_task(task_name, task_root)
-            task_spec = tasks_map[task_name]
-            task_output_dir = run_root / task_name
-            task_backend = backend
-            created_evaluation_backend = False
             task_metric_options = resolve_task_default_metrics(
                 task_name, resolved_metric_options
             )
@@ -1394,10 +1445,7 @@ def run_evaluation(
                 and str(task_metric_options.get("judge_backend", "api")).lower()
                 == "local"
             )
-            if not uses_local_judge and local_judge_client is not None:
-                local_judge_client.close()
-                local_judge_client = None
-                local_judge_key = None
+            judge_config = None
             if uses_local_judge:
                 judge_model = str(task_metric_options.get("judge_model", "")).strip()
                 if not judge_model:
@@ -1415,32 +1463,55 @@ def run_evaluation(
                     task_metric_options.get("judge_sglang_args", {})
                 )
                 judge_batch_size = int(task_metric_options.get("judge_workers", 64))
-                requested_judge_key = (
-                    judge_model,
-                    judge_dp_size,
-                    judge_tp_size,
-                    judge_batch_size,
-                    json.dumps(judge_model_kwargs, sort_keys=True, default=str),
-                )
-                if (
-                    local_judge_client is not None
-                    and local_judge_key != requested_judge_key
-                ):
-                    local_judge_client.close()
-                    local_judge_client = None
-                    local_judge_key = None
+                judge_config = {
+                    "model": judge_model,
+                    "dp_size": judge_dp_size,
+                    "tensor_parallel_size": judge_tp_size,
+                    "model_kwargs": judge_model_kwargs,
+                    "batch_size": judge_batch_size,
+                }
+            judge_key = (
+                json.dumps(judge_config, sort_keys=True, default=str)
+                if judge_config is not None
+                else None
+            )
+            task_plan.append(
+                (task_name, bundle, task_metric_options, judge_config, judge_key)
+            )
+
+        if eval_only and any(item[4] is not None for item in task_plan):
+            # Finish non-judge metrics (including GPU RMs) before loading judges.
+            # Stable groups reuse one service per configuration without co-residency.
+            groups = {None: []}
+            for item in task_plan:
+                groups.setdefault(item[4], []).append(item)
+            task_plan = [item for group in groups.values() for item in group]
+            _info(f"local judge task order: {[item[0] for item in task_plan]}")
+
+        summaries: dict[str, Any] = {}
+        for (
+            task_name, bundle, task_metric_options, judge_config, requested_judge_key
+        ) in task_plan:
+            _info(f"===== start task: {task_name} =====")
+            task_spec = tasks_map[task_name]
+            task_output_dir = run_root / task_name
+            task_backend = backend
+            created_evaluation_backend = False
+            if (
+                local_judge_client is not None
+                and local_judge_key != requested_judge_key
+            ):
+                local_judge_client.close()
+                local_judge_client = None
+                local_judge_key = None
+            if judge_config is not None:
                 if local_judge_client is None:
                     _info(
-                        f"offline judge: model={judge_model} "
-                        f"dp_size={judge_dp_size} tp_size={judge_tp_size}"
+                        f"offline judge: model={judge_config['model']} "
+                        f"dp_size={judge_config['dp_size']} "
+                        f"tp_size={judge_config['tensor_parallel_size']}"
                     )
-                    local_judge_client = OfflineJudgeClient(
-                        model=judge_model,
-                        dp_size=judge_dp_size,
-                        tensor_parallel_size=judge_tp_size,
-                        model_kwargs=judge_model_kwargs,
-                        batch_size=judge_batch_size,
-                    )
+                    local_judge_client = OfflineJudgeClient(**judge_config)
                     local_judge_key = requested_judge_key
                 task_metric_options["_judge_client"] = local_judge_client
             if (

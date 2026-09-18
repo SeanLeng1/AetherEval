@@ -230,6 +230,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         )
     )
     metric_keys = (
+        "num_proc",
         "rm_model_path",
         "cm_model_path",
         "rm_dp_size",
@@ -253,6 +254,10 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         for key in metric_keys
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
+    if "num_proc" in metric_options:
+        metric_options["num_proc"] = int(metric_options["num_proc"])
+        if metric_options["num_proc"] < 1:
+            raise ValueError("num_proc must be >= 1")
     if rm_sglang_args:
         metric_options["rm_sglang_args"] = rm_sglang_args
     if judge_backend == "local":
