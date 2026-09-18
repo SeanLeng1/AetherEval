@@ -62,6 +62,11 @@ Why `v6`:
 
 - Implemented in `metrics.py`
 - Runtime executor is benchmark-local in `lcb_eval_runtime.py` (call-based + stdio execution).
+- Each candidate runs in a fresh subprocess with a 4 GiB address-space/data limit.
+  Python allocation failures are reported as `Memory Limit Exceeded` and count as
+  failed answers, not excluded samples. This is a local execution limit, not a
+  claim about the official leaderboard's memory budget. Parallel workers each
+  have this limit; it is not a whole-job memory cap.
 - Code extraction uses fenced-code parsing (last fenced block; no raw-text fallback).
 - Per generation score:
   - `1.0` if all tests pass

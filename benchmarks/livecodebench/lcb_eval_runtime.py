@@ -2,8 +2,6 @@ import ast
 import faulthandler
 import json
 import multiprocessing
-import platform
-from queue import Empty
 import signal
 import sys
 import time
@@ -84,7 +82,7 @@ def timeout_handler(signum: int, frame: Any) -> None:
 _GLOBAL_TIMEOUT_GRACE_SEC = 5
 _TERMINATE_GRACE_SEC = 1.0
 _KILL_GRACE_SEC = 1.0
-_RESULT_QUEUE_WAIT_SEC = 0.25
+MAXIMUM_MEMORY_BYTES = 4 * 1024**3
 
 
 class Capturing(list):
@@ -289,6 +287,8 @@ def grade_call_based(
                     "error_code": -2,
                     "error_message": "Wrong Answer",
                 }
+        except MemoryError:
+            raise
         except Exception as e:  # noqa: BLE001
             signal.alarm(0)
             if "timeoutexception" in repr(e).lower():
@@ -347,6 +347,8 @@ def grade_stdio(
                 call_method(method, gt_inp)
                 total_execution_time += time.time() - start
                 signal.alarm(0)
+            except MemoryError:
+                raise
             except Exception as e:  # noqa: BLE001
                 signal.alarm(0)
                 if "timeoutexception" in repr(e).lower():
@@ -430,7 +432,7 @@ def run_test(
     timeout: int = 6,
 ) -> tuple[list[int | bool], dict[str, Any]]:
     signal.signal(signal.SIGALRM, timeout_handler)
-    reliability_guard()
+    reliability_guard(maximum_memory_bytes=MAXIMUM_MEMORY_BYTES)
 
     if debug:
         print(f"start = {datetime.now().time()}")
@@ -466,6 +468,8 @@ def run_test(
             if result is None:
                 raise RuntimeError("call-based grader returned None")
             return result
+        except MemoryError:
+            raise
         except Exception as e:  # noqa: BLE001
             return [-4], {
                 "error_code": -4,
@@ -485,6 +489,8 @@ def run_test(
         if result is None:
             raise RuntimeError("stdio grader returned None")
         return result
+    except MemoryError:
+        raise
     except Exception as e:  # noqa: BLE001
         return [-4], {
             "error_code": -4,
@@ -498,17 +504,12 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     if maximum_memory_bytes is not None:
         import resource
 
-        resource.setrlimit(
-            resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes)
-        )
-        resource.setrlimit(
-            resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes)
-        )
-        if not platform.uname().system == "Darwin":
-            resource.setrlimit(
-                resource.RLIMIT_STACK,
-                (maximum_memory_bytes, maximum_memory_bytes),
+        for kind in (resource.RLIMIT_AS, resource.RLIMIT_DATA):
+            limit = min(
+                value for value in (maximum_memory_bytes, *resource.getrlimit(kind))
+                if value != resource.RLIM_INFINITY
             )
+            resource.setrlimit(kind, (limit, limit))
 
     faulthandler.disable()
 
@@ -574,41 +575,26 @@ def _temp_run(
     sample: dict[str, Any],
     generation: str,
     debug: bool,
-    result_queue: Any,
+    result_pipe: Any,
     timeout: int,
 ) -> None:
     try:
-        res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
-        result_queue.put((res, metadata))
-    except BaseException as exc:
-        # Preserve worker crashes as runtime errors instead of turning them into
-        # a synthetic global-timeout result.
         try:
-            result_queue.put(
-                (
-                    [-4],
-                    {
-                        "error_code": -4,
-                        "error_message": f"Worker Error: {type(exc).__name__}: {exc}",
-                    },
-                )
-            )
-        except Exception:
-            pass
+            res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
+        except BaseException as exc:
+            res = [-4]
+            metadata = {
+                "error_code": -4,
+                "error_message": (
+                    f"Memory Limit Exceeded ({MAXIMUM_MEMORY_BYTES // 1024**2} MiB)"
+                    if isinstance(exc, MemoryError)
+                    else f"Worker Error: {type(exc).__name__}: {exc}"
+                ),
+            }
+        # Send synchronously: a Queue feeder could lose the result at process exit.
+        result_pipe.send((res, metadata))
     finally:
-        try:
-            result_queue.cancel_join_thread()
-        except Exception:
-            pass
-        try:
-            result_queue.close()
-        except Exception:
-            pass
-        try:
-            if hasattr(result_queue, "join_thread"):
-                result_queue.join_thread()
-        except Exception:
-            pass
+        result_pipe.close()
 
 
 def _num_inputs_for_sample(sample: dict[str, Any]) -> int:
@@ -650,34 +636,37 @@ def check_correctness(
 ) -> tuple[list[int | bool], dict[str, Any]]:
     timeout = max(1, int(timeout))
     global_timeout_sec, num_inputs = _global_timeout_for_sample(sample, timeout)
-    result_queue = multiprocessing.Queue(maxsize=1)
+    # A fresh interpreter avoids inheriting the parent's dataset/model mappings,
+    # which would otherwise count against the candidate's address-space limit.
+    context = multiprocessing.get_context("spawn")
+    reader, writer = context.Pipe(duplex=False)
 
-    p = multiprocessing.Process(
+    p = context.Process(
         target=_temp_run,
-        args=(sample, generation, debug, result_queue, timeout),
+        args=(sample, generation, debug, writer, timeout),
     )
     p.start()
-    p.join(timeout=global_timeout_sec)
-    _terminate_process(p)
+    writer.close()
 
     payload: tuple[list[int | bool], dict[str, Any]] | None = None
     try:
-        payload = result_queue.get(timeout=_RESULT_QUEUE_WAIT_SEC)
-    except Empty:
-        payload = None
-    except Exception:
-        payload = None
+        timed_out = not reader.poll(global_timeout_sec)
+        if not timed_out:
+            try:
+                payload = reader.recv()
+            except EOFError:
+                pass
+            p.join(timeout=_TERMINATE_GRACE_SEC)
     finally:
-        try:
-            result_queue.cancel_join_thread()
-        except Exception:
-            pass
-        try:
-            result_queue.close()
-        except Exception:
-            pass
+        _terminate_process(p)
+        reader.close()
 
     if payload is None:
+        if not timed_out:
+            return [-4], {
+                "error_code": -4,
+                "error_message": f"Worker exited without a result (exit code {p.exitcode})",
+            }
         if debug:
             print("global timeout")
         return (

@@ -1008,6 +1008,31 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["accuracy_atcoder"], 0.5, places=6)
         self.assertAlmostEqual(result["accuracy_leetcode"], 0.0, places=6)
 
+    def test_livecodebench_memory_limit(self) -> None:
+        import resource
+
+        from benchmarks.livecodebench.lcb_eval_runtime import MAXIMUM_MEMORY_BYTES
+
+        metrics = load_task("livecodebench").metrics_module
+        parent_limit = resource.getrlimit(resource.RLIMIT_AS)
+        allocation = f"bytearray({2 * MAXIMUM_MEMORY_BYTES})"
+        for fn_name, code in (
+            (None, allocation),
+            ("solve", f"def solve(x):\n    return {allocation}"),
+            ("solve", f"payload = {allocation}\ndef solve(x):\n    return 42"),
+        ):
+            with self.subTest(fn_name=fn_name, code=code):
+                sample = Sample(id="memory", data={
+                    "fn_name": fn_name, "inputs": ["0"], "outputs": ["42"], "timeout_sec": 2,
+                })
+                scored = metrics.score_generation(sample, f"```python\n{code}\n```")
+                self.assertEqual(scored["score"], 0.0)
+                self.assertIn("Memory Limit Exceeded", scored["meta"]["runtime_error"])
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_AS), parent_limit)
+        # An oversized candidate must not poison the next execution.
+        sample = Sample(id="normal", data={"inputs": [""], "outputs": ["42"]})
+        self.assertEqual(metrics.score_generation(sample, "```python\nprint(42)\n```")["score"], 1.0)
+
     def test_livecodebench_score_generation_requires_fenced_code(self) -> None:
         bundle = load_task("livecodebench")
         metrics_module = bundle.metrics_module
