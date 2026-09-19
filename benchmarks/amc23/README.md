@@ -9,7 +9,7 @@ The local [RLLab/eval-set](https://huggingface.co/datasets/RLLab/eval-set) subse
 is a repackaged problem collection, not an official MAA evaluation repository.
 
 No official MAA LLM decoding protocol was identified. Defaults
-`n=16, temperature=1, top_p=0.7, max_new_tokens=32768` are our
+`n=16, temperature=0.6, top_p=0.95, max_new_tokens=32768` are our
 long-reasoning profile. Numeric-answer extraction with math-verify differs
 from administering the original multiple-choice contest. Report this local
 variant and distinguish mean sampled accuracy from `pass@k`.

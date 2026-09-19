@@ -1,6 +1,3 @@
-# Audited 2026-09-13; sources and protocol differences: benchmarks/*/README.md.
-# Official paper/leaderboard settings take precedence over generic runner defaults.
-# An explicit local profile is retained where no model-independent standard exists.
 agieval-en:
   # Official chat evaluation is greedy; 4096 is our local output ceiling.
   n: 1
@@ -12,22 +9,22 @@ aime24:
   # Local long-reasoning profile, not a decoding standard published by MAA.
   n: 16
   max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
+  temperature: 0.6
+  top_p: 0.95
 
 aime25:
   # Local long-reasoning profile, not a decoding standard published by MAA.
   n: 16
   max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
+  temperature: 0.6
+  top_p: 0.95
 
 amc23:
   # Local long-reasoning profile, not a decoding standard published by MAA.
   n: 16
   max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
+  temperature: 0.6
+  top_p: 0.95
 
 arena-hard-v2:
   # Local candidate profile; official api_config.yaml sets sampling per model/endpoint.
@@ -81,8 +78,8 @@ gpqa-diamond:
   # Local repeated long-reasoning profile; neither original GPQA nor simple-evals default.
   n: 32
   max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
+  temperature: 0.6
+  top_p: 0.95
 
 healthbench:
   # simple-evals non-reasoning ChatCompletionSampler profile; not all model profiles.
@@ -142,25 +139,22 @@ llmeval-med:
     judge_max_new_tokens: 4096
 
 math500:
-  # Local long-reasoning profile; dataset releases do not mandate this sampling tuple.
   n: 16
   max_new_tokens: 32768
-  temperature: 1.0
-  top_p: 0.7
+  temperature: 0.6
+  top_p: 0.95
 
 mbpp-plus:
-  # Local reasoning-and-code prompt, greedy decoding, extended output budget.
   n: 1
   max_new_tokens: 32768
   temperature: 0.0
   top_p: 0.95
 
 minerva:
-  # Minerva paper single-sample decoding; local prompting/grading still differ.
-  n: 1
-  max_new_tokens: 512
-  temperature: 0.0
-  top_p: 1.0
+  n: 16
+  max_new_tokens: 32768
+  temperature: 0.6
+  top_p: 0.95
 
 mmlu-pro:
   # Official local runner settings; AetherEval still uses a zero-shot prompt, so the
@@ -171,11 +165,12 @@ mmlu-pro:
   top_p: 1.0
 
 olympiad-bench:
-  # Official text-only GPT-4 reference profile, not a universal model-specific budget.
-  n: 1
-  max_new_tokens: 2048
-  temperature: 0.0
-  top_p: 1.0
+  # Same long-reasoning profile as the other math tasks; the official 2048-token GPT-4
+  # reference budget truncates reasoning models.
+  n: 16
+  max_new_tokens: 32768
+  temperature: 0.6
+  top_p: 0.95
 
 researchqa:
   # Local candidate ceiling; official compute_coverage.py fixes judge temperature at zero.

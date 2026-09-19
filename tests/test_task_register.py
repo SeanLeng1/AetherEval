@@ -143,12 +143,10 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["aime24"]["n"], 16)
         self.assertEqual(defaults["amc23"]["n"], 16)
         self.assertEqual(defaults["math500"]["n"], 16)
-        self.assertEqual(defaults["minerva"]["n"], 1)
-        self.assertEqual(defaults["minerva"]["max_new_tokens"], 512)
-        self.assertEqual(defaults["minerva"]["temperature"], 0.0)
-        self.assertEqual(defaults["olympiad-bench"]["n"], 1)
-        self.assertEqual(defaults["olympiad-bench"]["max_new_tokens"], 2048)
-        self.assertEqual(defaults["olympiad-bench"]["temperature"], 0.0)
+        # Every math task shares one prompt, so one long-reasoning profile.
+        for task in ("aime24", "aime25", "amc23", "math500", "minerva", "olympiad-bench"):
+            self.assertEqual(defaults[task], defaults["aime24"], task)
+        self.assertEqual(defaults["minerva"]["max_new_tokens"], 32768)
         self.assertEqual(defaults["safe-alignment"]["n"], 1)
         self.assertEqual(defaults["safe-alignment"]["temperature"], 0.0)
         self.assertEqual(defaults["safe-alignment"]["max_new_tokens"], 1024)

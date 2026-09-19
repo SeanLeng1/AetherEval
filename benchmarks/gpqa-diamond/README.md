@@ -10,7 +10,7 @@ The [original baseline](https://github.com/idavidrein/gpqa/blob/56686c06f5e19865
 has distinct answer-only, CoT and self-consistency paths.
 
 There is no single sampling tuple shared by those paths and all simple-evals
-model profiles. Current `n=32, temperature=1, top_p=0.7,
+model profiles. Current `n=32, temperature=0.6, top_p=0.95,
 max_new_tokens=32768` is our long-reasoning profile, not an official default.
 Simple-evals' CLI normally repeats GPQA ten times and reshuffles options;
 AetherEval samples multiple answers under each prepared, fixed option ordering.

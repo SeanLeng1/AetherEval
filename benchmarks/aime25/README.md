@@ -11,7 +11,7 @@ config `aime25`, with transcriptions from
 This is not an official MAA LLM evaluator.
 
 No official MAA model-generation repository or temperature/top-p/token budget was
-identified. The defaults `n=16, temperature=1, top_p=0.7,
+identified. The defaults `n=16, temperature=0.6, top_p=0.95,
 max_new_tokens=32768` are an **AetherEval long-reasoning profile**, not an
 official AIME protocol. Average accuracy estimates single-sample success;
 `pass@k` is not majority-vote accuracy. Report the sampled profile and keep it

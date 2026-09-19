@@ -8,7 +8,7 @@ Official sources: [hendrycks/math](https://github.com/hendrycks/math) for MATH a
 [openai/prm800k](https://github.com/openai/prm800k) for the 500-problem test subset.
 A reference evaluator is [OpenAI simple-evals/math_eval.py](https://github.com/openai/simple-evals/blob/652c89d0ca9df547706735883097e9537d40dc47/math_eval.py).
 
-Defaults `n=16, temperature=1, top_p=0.7, max_new_tokens=32768`
+Defaults `n=16, temperature=0.6, top_p=0.95, max_new_tokens=32768`
 are our long-reasoning profile, not a universal MATH500 standard.
 Simple-evals selects decoding through model-specific samplers and uses an
 LLM equivalence checker; this task instead uses a zero-shot boxed-answer
