@@ -9,11 +9,14 @@ Checked [runner/parser.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/2
 and [vllm_runner.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/vllm_runner.py).
 
 Defaults retain the reference sampling settings with a local extended budget:
-`n=10, temperature=0.2, top_p=0.95, max_new_tokens=32768, stop=["###"]`.
+`n=10, temperature=0.2, top_p=0.95, max_new_tokens=32768`, reporting pass@1/5/10.
 The 32768-token ceiling includes reasoning and code, replacing the reference
 runner's 2000-token default. Report this budget explicitly; it is not the
 unmodified reference profile. The serving context must also fit the prompt.
-EOS or the retained stop sequence can still terminate generation earlier.
+The reference `stop="###"` is not used: upstream applies it to base-model
+completion only, and under this task's reasoning prompt it would truncate the
+answer at the first markdown heading. Candidate tests run in a spawned worker
+with numpy preloaded (as the reference harness does) under a 4 GiB memory limit.
 
 The local `lighteval/code_generation_lite` v6 snapshot is not automatically the
 official runner's `release_latest` set. Prompt formatting, date window and local

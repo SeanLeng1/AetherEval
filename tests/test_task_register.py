@@ -70,7 +70,6 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("minerva", tasks)
         self.assertIn("olympiad-bench", tasks)
         self.assertIn("safe-alignment", tasks)
-        self.assertIn("apibank", tasks)
         self.assertIn("mmlu-pro", tasks)
         self.assertIn("agieval-en", tasks)
         self.assertIn("bbh", tasks)
@@ -80,7 +79,6 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertIn("zebralogic", tasks)
         self.assertIn("livecodebench", tasks)
         self.assertNotIn("qampari-oracle5", tasks)
-        self.assertIn("triviaqa", tasks)
 
     def test_contract_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,22 +152,19 @@ class TaskRegisterTests(unittest.TestCase):
         self.assertEqual(defaults["safe-alignment"]["n"], 1)
         self.assertEqual(defaults["safe-alignment"]["temperature"], 0.0)
         self.assertEqual(defaults["safe-alignment"]["max_new_tokens"], 1024)
-        self.assertEqual(defaults["apibank"]["n"], 1)
-        self.assertEqual(defaults["apibank"]["max_new_tokens"], 4096)
         self.assertNotIn("metrics", defaults["healthbench"])
         self.assertNotIn("judge_model", defaults["healthbench"])
         self.assertIn("max_new_tokens", defaults["livecodebench"])
         self.assertEqual(defaults["livecodebench"]["temperature"], 0.2)
         self.assertEqual(defaults["livecodebench"]["top_p"], 0.95)
         self.assertEqual(defaults["livecodebench"]["max_new_tokens"], 32768)
-        self.assertEqual(defaults["livecodebench"]["stop"], ["###"])
+        self.assertNotIn("stop", defaults["livecodebench"])
         self.assertEqual(defaults["mmlu-pro"]["max_new_tokens"], 2048)
-        self.assertEqual(defaults["mmlu-pro"]["stop"], ["Question:"])
+        self.assertNotIn("stop", defaults["mmlu-pro"])
         self.assertEqual(defaults["humaneval-plus"]["n"], 1)
         self.assertEqual(defaults["humaneval-plus"]["temperature"], 0.0)
         self.assertEqual(defaults["humaneval-plus"]["max_new_tokens"], 32768)
         self.assertEqual(defaults["mbpp-plus"]["max_new_tokens"], 32768)
-        self.assertEqual(defaults["triviaqa"]["n"], 1)
 
     def test_instruction_following_primary_metrics(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

@@ -42,3 +42,4 @@ include = ["aethereval*", "benchmark_utils*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 "aethereval.backends.sglang" = ["encodings/*.tiktoken"]
+"benchmarks.creative-writing-v3" = ["prompts/*.txt"]

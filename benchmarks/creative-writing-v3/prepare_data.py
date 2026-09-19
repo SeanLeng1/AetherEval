@@ -3,17 +3,22 @@ import argparse
 import json
 from pathlib import Path
 
+from benchmark_utils.data import read_text
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--source",
-        default="/tmp/creative-writing-bench/data/creative_writing_prompts_v3.json",
+        default=(
+            "https://raw.githubusercontent.com/EQ-bench/creative-writing-bench/"
+            "c7c3ceef54c40a8ae02dc1c2e1a5e40970fe5c0b/data/creative_writing_prompts_v3.json"
+        ),
     )
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--output", default=str(Path(__file__).parent / "data/eval.jsonl"))
     args = parser.parse_args()
-    prompts = json.loads(Path(args.source).read_text(encoding="utf-8"))
+    prompts = json.loads(read_text(args.source))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as dst:

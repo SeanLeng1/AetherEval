@@ -708,6 +708,13 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["accuracy_sat_en"], 1.0, places=6)
         self.assertAlmostEqual(result["accuracy_logiqa_en"], 0.0, places=6)
 
+        # Primary metric follows OLMES: macro average over subsets.
+        self.assertEqual(metrics_module.PRIMARY_METRIC, "macro_accuracy")
+        sample_results.append({**sample_results[1], "sample_id": "a3"})
+        result = self._aggregate(metrics_module, sample_results, {"n": 1})
+        self.assertAlmostEqual(result["accuracy"], 1 / 3, places=6)
+        self.assertAlmostEqual(result["macro_accuracy"], 0.5, places=6)
+
     def test_agieval_score_generation_parsing_long_output_window(self) -> None:
         bundle = load_task("agieval_en")
         metrics_module = bundle.metrics_module
@@ -872,7 +879,12 @@ class MetricsTests(unittest.TestCase):
                         "gen_idx": 0,
                         "score": 1.0,
                         "is_pass": True,
-                        "parsed": {"parsed": 1.0, "cell_accuracy": 1.0},
+                        "parsed": {
+                            "parsed": 1.0,
+                            "cell_accuracy": 1.0,
+                            "correct_cells": 4,
+                            "total_cells": 4,
+                        },
                     },
                     {
                         "sample_id": "z1",
@@ -891,7 +903,12 @@ class MetricsTests(unittest.TestCase):
                         "gen_idx": 0,
                         "score": 0.0,
                         "is_pass": False,
-                        "parsed": {"parsed": 1.0, "cell_accuracy": 0.0},
+                        "parsed": {
+                            "parsed": 1.0,
+                            "cell_accuracy": 0.0,
+                            "correct_cells": 0,
+                            "total_cells": 12,
+                        },
                     },
                     {
                         "sample_id": "z2",
@@ -905,7 +922,8 @@ class MetricsTests(unittest.TestCase):
         ]
         result = self._aggregate(metrics_module, sample_results, {"n": 2})
         self.assertAlmostEqual(result["puzzle_accuracy"], 0.5, places=6)
-        self.assertAlmostEqual(result["cell_accuracy"], 0.5, places=6)
+        # ZeroEval micro-averages cells over puzzles: 4 of 4 + 12 cells.
+        self.assertAlmostEqual(result["cell_accuracy"], 0.25, places=6)
         self.assertAlmostEqual(result["parsed"], 1.0, places=6)
 
     def test_zebralogic_score_generation_json_with_braces_in_string(self) -> None:
@@ -1146,6 +1164,11 @@ class MetricsTests(unittest.TestCase):
             "prompt": "", "entry_point": "f", "canonical_solution": "def f(x): return x",
             "base_input": [[1]], "plus_input": [[2]], "atol": 0,
         })
+        for trailing_block in ("```text\n2\n```", "```python\nassert f(1) == 1\n```"):
+            generation = (
+                "```python\ndef f(x):\n    return x\n```\nExample:\n" + trailing_block
+            )
+            self.assertTrue(bundle.metrics_module.score_generation(sample, generation)["is_pass"])
         scored = bundle.metrics_module.score_generation(sample, "def f(x): return 1")
         self.assertTrue(scored["parsed"]["base_pass"])
         self.assertFalse(scored["parsed"]["plus_pass"])
@@ -1211,7 +1234,7 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(plus_failure["parsed"]["base_pass"])
         self.assertFalse(plus_failure["parsed"]["plus_pass"])
         self.assertEqual(plus_failure["score"], 0.0)
-        self.assertEqual(plus_failure["meta"]["scoring_protocol"], "evalplus-0.3.1")
+        self.assertEqual(plus_failure["meta"]["scoring_protocol"], "evalplus-26d6d00")
 
         base_failure = metrics_module.score_generation(sample, "    return 0\n")
         self.assertFalse(base_failure["parsed"]["base_pass"])
@@ -1292,6 +1315,51 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(scored["score"], 1.0)
         self.assertTrue(scored["parsed"]["base_pass"])
         self.assertTrue(scored["parsed"]["plus_pass"])
+
+    def test_humaneval_plus_ignores_usage_example_blocks(self) -> None:
+        metrics_module = load_task("humaneval_plus").metrics_module
+        sample = Sample(
+            id="HumanEval/test_blocks",
+            gold=None,
+            meta={"entry_point": "add"},
+            data={
+                "task_id": "HumanEval/test_blocks",
+                "prompt": 'def add(a, b):\n    """Return sum of two numbers."""\n',
+                "entry_point": "add",
+                "canonical_solution": "    return a + b\n",
+                "base_input": [[1, 2], [3, 4]],
+                "plus_input": [[-1, 1], [10, -3]],
+                "atol": 0.0,
+            },
+        )
+        example = (
+            "values = [(1, 2), (3, 4), (5, 6), (7, 8)]\n"
+            "for left, right in values:\n"
+            "    result = add(left, right)\n"
+            "    print(left, right, result)\n"
+        )
+        full = "```python\ndef add(a, b):\n    return a + b\n```"
+        cases = {
+            "full function, longer example": f"{full}\nUsage:\n```python\n{example}```",
+            "body, then example": f"```python\n    return a + b\n```\n```python\n{example}```",
+            "draft, then final": f"```python\ndef add(a, b):\n    return 0\n```\n{full}",
+            "draft, then final body": "```python\ndef add(a, b):\n    return 0\n```\n```python\n    return a + b\n```",
+            "separate import": "```python\nimport operator\n```\n```python\ndef add(a, b):\n    return operator.add(a, b)\n```",
+            "separate helper": "```python\ndef helper(a, b):\n    return a + b\n```\n```python\ndef add(a, b):\n    return helper(a, b)\n```",
+            "helper after entry point": "```python\ndef add(a, b):\n    return helper(a, b)\n```\n```python\ndef helper(a, b):\n    return a + b\n```",
+        }
+        for name, generation in cases.items():
+            with self.subTest(name):
+                scored = metrics_module.score_generation(sample, generation)
+                self.assertEqual(scored["score"], 1.0)
+
+        for generation in (
+            "",
+            f"{full}\n```python\ndef add(a, b):\n    return 0\n```",
+            f"{full}\n```python\n    return 0\n```",
+        ):
+            with self.subTest(generation=generation):
+                self.assertEqual(metrics_module.score_generation(sample, generation)["score"], 0.0)
 
     def test_humaneval_plus_aggregate(self) -> None:
         bundle = load_task("humaneval_plus")
@@ -1381,6 +1449,80 @@ class MetricsTests(unittest.TestCase):
 
         self.assertEqual(sample.data["base_input"], before_base)
         self.assertEqual(sample.data["plus_input"], before_plus)
+
+    def test_strip_reasoning_keeps_only_final_answer(self) -> None:
+        from aethereval.backends.prompt import prefilled_reasoning_prefix
+        from aethereval.metrics.common import strip_reasoning
+
+        self.assertEqual(strip_reasoning("<think>draft</think>\n\nfinal"), "final")
+        self.assertEqual(strip_reasoning("plain answer"), "plain answer")
+        # Budget exhausted while thinking: there is no answer to grade.
+        self.assertEqual(strip_reasoning("<think>so it is \\boxed{204}"), "")
+        # A literal closing tag in the answer is not a reasoning boundary.
+        code = 'def f():\n    return "</think>"'
+        self.assertEqual(strip_reasoning(code), code)
+        self.assertEqual(strip_reasoning("<think>x</think>" + code), code)
+        # Templates that pre-fill the opener: the backend restores it.
+        self.assertEqual(prefilled_reasoning_prefix("<|im_start|>assistant\n<think>\n"), "<think>\n")
+        self.assertEqual(prefilled_reasoning_prefix("<|im_start|>assistant\n"), "")
+        self.assertEqual(
+            prefilled_reasoning_prefix("assistant\n<think>\n\n</think>\n\n"), ""
+        )
+
+    def test_mcq_extractor_ignores_article_a(self) -> None:
+        from aethereval.metrics.common import extract_choice
+
+        letters = ["A", "B", "C", "D"]
+        for text in ("The answer depends on a catalyst.", "Answer: a catalyst."):
+            self.assertIsNone(extract_choice(text, {}, letters)[0])
+        self.assertEqual(extract_choice("Answer: (c)", {}, letters)[0], "C")
+        self.assertEqual(extract_choice("The final answer is C.", {}, letters)[0], "C")
+        for text in ("Answer: c", "c", "**c**", "The final answer is c.\nExplanation follows."):
+            self.assertEqual(extract_choice(text, {}, letters)[0], "C")
+        self.assertEqual(extract_choice("Answer: a", {}, letters)[0], "A")
+
+    def test_math_scoring_preserves_text_and_compares_tiny_values(self) -> None:
+        from benchmark_utils.math_scoring import score_with_math_verify
+
+        # Gold notation is repaired in the dataset, not rewritten by the scorer.
+        gold = "so the mass is $\\boxed{4.5 \\times 10^{33}}$ g."
+        self.assertEqual(
+            score_with_math_verify(gold, "\\boxed{4.5 \\times 10^{33}}")[0], 1.0
+        )
+        self.assertEqual(score_with_math_verify("\\boxed{10}", "2.88e-19")[0], 0.0)
+        tiny = "energy is $\\boxed{2.88 \\times 10^{-19}}$"
+        self.assertEqual(
+            score_with_math_verify(tiny, "\\boxed{2.88 \\times 10^{-19}}")[0], 1.0
+        )
+        self.assertEqual(
+            score_with_math_verify(tiny, "\\boxed{5.76 \\times 10^{-19}}")[0], 0.0
+        )
+
+    def test_bbh_extraction_edge_cases(self) -> None:
+        extract = load_task("bbh").metrics_module._extract_answer
+        cases = [
+            ("web_of_lies", "I know the answer now. Yes", "Yes"),
+            ("word_sorting", "So the answer is: apple banana", "apple banana"),
+            ("word_sorting", "So the answer is **apple banana**.", "apple banana"),
+            ("multistep_arithmetic_two", "So the answer is 1,234.", "1,234"),
+            ("dyck_languages", "So the answer is `] ) >`", "] ) >"),
+            # Bare letters at an answer position beat the position-free fallbacks.
+            ("date_understanding", "Check (A).. (C) is off. So the answer is B.", "(B)"),
+            ("date_understanding", "The answer is B. I hope this helps.", "(B)"),
+            ("date_understanding", "So the answer is **B**. I checked it.", "(B)"),
+            ("date_understanding", "The answer is \\boxed{B}. A quick check.", "(B)"),
+            ("date_understanding", "**Answer:** D. I am sure", "(D)"),
+            ("date_understanding", "The answer is I think (B)", "(B)"),
+            ("date_understanding", "the answer is a bit tricky. (D)", "(D)"),
+            ("date_understanding", "So the answer is (C).", "(C)"),
+            # The position-free fallback skips prose "I" / "A" as well.
+            ("date_understanding", "B. I hope this helps.", "(B)"),
+            ("date_understanding", "I think", ""),
+            ("date_understanding", "A quick check", ""),
+        ]
+        for subset, text, expected in cases:
+            with self.subTest(subset=subset, text=text):
+                self.assertEqual(extract(text, subset)[0], expected)
 
 
 if __name__ == "__main__":

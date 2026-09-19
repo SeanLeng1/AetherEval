@@ -22,7 +22,7 @@ Native implementation of the released 667-item LLMEval-Med dataset.
 - Candidate generation: `n=1`, sampling enabled, explicit local temperature `1.0`, max new tokens `2048`.
 - Multi-turn groups are generated round-by-round; every later prompt includes the model's earlier answers exactly as chat history.
 - Judge: `gpt-4o`; AetherEval explicitly sets temperature `1.0`, top-p `1.0`, and a local `4096`-token cap where upstream omits these fields.
-- Three judge repetitions are averaged per question before the `>=4` usability threshold.
+- Three judge repetitions are averaged per question before the `>=4` usability threshold. As in upstream `Aggregate.py`, only repetitions with a valid 0-5 score enter the average; a question with no valid repetition counts as not usable.
 - Primary metric: sample-weighted Overall Performance (`OP`, percent).
 
 The paper's MTG score requires human ratings across five dimensions and a safety

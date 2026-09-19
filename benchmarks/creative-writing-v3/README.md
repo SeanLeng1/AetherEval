@@ -19,6 +19,9 @@ defaults for every locally served model.
 
 Native rubric-score implementation of Creative Writing Bench V3.
 
+Static judge templates and criteria live in `prompts/`; benchmark samples remain
+in `data/eval.jsonl`. Rebuild samples with `python benchmarks/init.py creative-writing-v3`.
+
 - 32 prompts × the first 3 seed modifiers = 96 generated pieces.
 - Candidate generation: temperature `0.7`, min-p `0.1`, max new tokens `12000`, `n=1` per expanded row.
 - Responses shorter than 500 characters are retried up to three total attempts.

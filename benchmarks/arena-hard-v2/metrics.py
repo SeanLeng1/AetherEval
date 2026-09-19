@@ -46,6 +46,28 @@ After providing your explanation, you must output only one of the following choi
 5. Assistant B is significantly better: [[B>>A]]
 
 Example output: "My final verdict is tie: [[A=B]]"."""
+# Upstream JUDGE_SETTINGS["creative_writing"]: no "generate your own answer" step.
+CREATIVE_WRITING_SYSTEM_PROMPT = """Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user prompt displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+When evaluating the assistants' answers, compare both assistants' answers. You must identify and correct any mistakes or inaccurate information.
+
+Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+1. Assistant A is significantly better: [[A>>B]]
+2. Assistant A is slightly better: [[A>B]]
+3. Tie, relatively the same: [[A=B]]
+4. Assistant B is slightly better: [[B>A]]
+5. Assistant B is significantly better: [[B>>A]]
+
+Example output: "My final verdict is tie: [[A=B]]"."""
+SYSTEM_PROMPTS = {
+    "hard_prompt": SYSTEM_PROMPT,
+    "creative_writing": CREATIVE_WRITING_SYSTEM_PROMPT,
+}
 LABEL_TO_SCORE = {
     "A>B": [1.0],
     "A>>B": [1.0] * 3,
@@ -83,7 +105,7 @@ def score_generations_batch(
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     settings = resolve_judge_settings(metric_options, default_model=DEFAULT_JUDGE_MODEL)
-    jobs: list[tuple[int, int, int, str]] = []
+    jobs: list[tuple[int, int, int, str, str]] = []
     candidate_metadata: list[list[dict[str, Any]]] = []
     for sample_idx, (sample, output) in enumerate(
         zip(samples, generation_outputs, strict=True)
@@ -94,6 +116,7 @@ def score_generations_batch(
         for gen_idx, generation in enumerate(output.generations):
             per_sample_metadata.append(_style_metadata(generation))
             baseline = sample.data["baseline_answer"]
+            category = str(sample.meta["category"])
             jobs.append(
                 (
                     sample_idx,
@@ -104,6 +127,7 @@ def score_generations_batch(
                         answer_a=baseline,
                         answer_b=generation,
                     ),
+                    category,
                 )
             )
             jobs.append(
@@ -116,15 +140,16 @@ def score_generations_batch(
                         answer_a=generation,
                         answer_b=baseline,
                     ),
+                    category,
                 )
             )
         candidate_metadata.append(per_sample_metadata)
 
-    def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
-        _, _, _, prompt = job
+    def judge(job: tuple[int, int, int, str, str]) -> dict[str, Any]:
+        _, _, _, prompt, category = job
         last_text = ""
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPTS[category]},
             {"role": "user", "content": prompt},
         ]
         for _ in range(NORMAL_FORMAT_ATTEMPTS):
@@ -201,15 +226,20 @@ def aggregate(
     }
     candidate_rows: list[dict[str, Any]] = []
     candidate_scores: list[float] = []
+    creative_scores: list[float] = []
     judge_failures = 0
     for sample in sample_results:
         uid = str(sample["sample_id"])
+        category = str(sample["meta"].get("category", "hard_prompt"))
         for record in sample.get("records", []):
             meta = record.get("meta", {})
             if meta.get("judge_failed"):
                 judge_failures += 1
                 continue
             for score in meta["battle_scores"]:
+                if category == "creative_writing":
+                    creative_scores.append(float(score))
+                    continue
                 candidate_scores.append(float(score))
                 candidate_rows.append(
                     {
@@ -222,10 +252,15 @@ def aggregate(
                 )
 
     cohort_rows: list[dict[str, Any]] = []
+    hard_uids = {
+        str(sample["sample_id"])
+        for sample in sample_results
+        if str(sample["meta"].get("category", "hard_prompt")) == "hard_prompt"
+    }
     with STYLE_COHORT_FILE.open(encoding="utf-8") as source:
         for line in source:
             row = json.loads(line)
-            if row["uid"] not in baseline_by_uid:
+            if row["uid"] not in hard_uids:
                 continue
             for score in row["battle_scores"]:
                 cohort_rows.append(
@@ -238,21 +273,29 @@ def aggregate(
                     }
                 )
 
+    seed = int(options.get("bootstrap_seed", 42))
     if candidate_rows:
         median, lower, upper = _style_controlled_score(
             cohort_rows + candidate_rows,
             target_model="__candidate__",
-            seed=int(options.get("bootstrap_seed", 42)),
+            seed=seed,
             rounds=100,
         )
     else:
         median = lower = upper = 0.0
+    creative, creative_lower, creative_upper = _bootstrap_win_rate(
+        creative_scores, seed=seed, rounds=100
+    )
     metrics: dict[str, Any] = {
         "style_controlled_win_rate": median * 100.0,
         "style_controlled_ci_lower": lower * 100.0,
         "style_controlled_ci_upper": upper * 100.0,
         "raw_win_rate": _mean(candidate_scores) * 100.0,
         "scored_judgments": float(len(candidate_scores)),
+        "creative_writing_win_rate": creative * 100.0,
+        "creative_writing_ci_lower": creative_lower * 100.0,
+        "creative_writing_ci_upper": creative_upper * 100.0,
+        "creative_writing_scored_judgments": float(len(creative_scores)),
         "judge_failures": float(judge_failures),
     }
     if judge_failures:
@@ -261,6 +304,25 @@ def aggregate(
             "matching the official result loader."
         ]
     return metrics
+
+
+def _bootstrap_win_rate(
+    scores: list[float], *, seed: int, rounds: int
+) -> tuple[float, float, float]:
+    # show_result.py print_leaderboard: creative writing has no style control; the
+    # score is the mean of 100 bootstrap means with 5%/95% quantiles.
+    if not scores:
+        return 0.0, 0.0, 0.0
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    values = np.asarray(scores, dtype=float)
+    means = rng.choice(values, size=(rounds, len(values)), replace=True).mean(axis=1)
+    return (
+        float(means.mean()),
+        float(np.quantile(means, 0.05)),
+        float(np.quantile(means, 0.95)),
+    )
 
 
 def _parse_label(text: str) -> str | None:

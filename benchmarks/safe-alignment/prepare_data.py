@@ -1,10 +1,16 @@
+import io
 import json
 import os
 from pathlib import Path
 from typing import Any
 
+from benchmark_utils.data import read_bytes
 
-DEFAULT_SOURCE_ROOT = Path("/tmp/GD2PO/safe-alignment/dataset")
+
+DEFAULT_SOURCE_ROOT = (
+    "https://raw.githubusercontent.com/Qwen-Applications/GD2PO/"
+    "f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/safe-alignment/dataset"
+)
 DATA_FILE = "data/eval.jsonl"
 SOURCE_URL = (
     "https://github.com/Qwen-Applications/GD2PO/tree/main/safe-alignment/dataset"
@@ -12,14 +18,12 @@ SOURCE_URL = (
 
 
 def main() -> None:
-    source_root = Path(
-        os.environ.get("GD2PO_SAFE_ALIGNMENT_DATA_ROOT", str(DEFAULT_SOURCE_ROOT))
-    )
+    source_root = os.environ.get("GD2PO_SAFE_ALIGNMENT_DATA_ROOT", DEFAULT_SOURCE_ROOT)
     task_dir = Path(__file__).resolve().parent
     prepare_safe_alignment_data(source_root, task_dir)
 
 
-def prepare_safe_alignment_data(source_root: Path, task_dir: Path) -> None:
+def prepare_safe_alignment_data(source_root: str | Path, task_dir: Path) -> None:
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover
@@ -35,8 +39,8 @@ def prepare_safe_alignment_data(source_root: Path, task_dir: Path) -> None:
 
     rows: list[dict[str, Any]] = []
     for prefix, relative_path in datasets:
-        parquet_path = source_root / relative_path
-        table = pq.read_table(parquet_path)
+        parquet_path = f"{str(source_root).rstrip('/')}/{relative_path}"
+        table = pq.read_table(io.BytesIO(read_bytes(parquet_path)))
         for idx, row in enumerate(table.to_pylist()):
             sample_id = f"{prefix}_{idx:05d}"
             rows.append(

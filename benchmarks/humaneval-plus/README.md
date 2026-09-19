@@ -15,9 +15,10 @@ The 32768-token ceiling includes reasoning and code; it is our evaluation choice
 not EvalPlus's reference decoder default of 768. The serving context must also
 accommodate the prompt. This ceiling does not require every response to use it.
 
-The chat prompt asks for reasoning plus fenced code and uses local extraction.
-These are not identical to EvalPlus prompting and sanitization. Test execution
-now uses EvalPlus 0.3.1, including its tolerances, special oracles and time limits.
+The chat prompt asks for reasoning plus fenced code, which is not EvalPlus's
+prompt. Local code-block assembly is followed by EvalPlus `sanitize`; execution
+uses EvalPlus commit `26d6d00bb1fd0fa37f39c99d5290da67891d1c5e`, with that
+revision's native tolerances, special oracles and time limits.
 
 ## Files
 
@@ -51,13 +52,27 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 
 - Implemented in `metrics.py`
 - For each generation:
-  - extract the final code candidate (prefer answer block / fenced code)
-  - execute `prompt + continuation`
+  - assemble imports, helpers and definitions across code blocks, retaining the
+    last function/class definition and dropping top-level usage examples, then use
+    EvalPlus `sanitize(..., entrypoint=...)` to retain the implementation dependencies
+  - indented function bodies are parsed as `prompt + body`; the final body can
+    replace an earlier complete draft, while prompt imports/helpers remain available
   - compute reference outputs from the canonical solution (cached per process)
   - run `base_input` and `plus_input` using EvalPlus's subprocess checker
+- The pinned upstream commit includes the `find_zero` fix (#241); no local oracle
+  patch is applied. It uses a 4-second minimum per-test time limit, up from
+  0.3.1's 1 second. Serial and spawned workers use the same installed evaluator.
+- HumanEval/32's canonical Newton solver is numerically sensitive to the Python
+  runtime. In our audit, Python 3.10.14 passed all 788 Plus inputs; Python 3.12.4
+  failed 7. Python 3.12's changed float `sum` changes the iteration trajectory;
+  this is not evidence that the tolerance should be relaxed. Python 3.12 remains
+  supported: keep its native arithmetic and the official inputs/tolerance, and
+  use the same runtime for all compared models. Generated solutions are still
+  checked by the official root-residual oracle, not by matching canonical outputs.
 - `score` / `is_pass` requires both suites to pass. If base fails, Plus is skipped.
 - `accuracy_base` reports base tests; `accuracy_plus` requires base and Plus.
-- Records identify the checker with `meta.scoring_protocol=evalplus-0.3.1`.
+- Records identify the checker with
+  `meta.scoring_protocol=evalplus-26d6d00`.
 
 Older scores ran only `test + check(entry_point)` and copied that result into
 both base and Plus fields. They are not verified HumanEval+ scores. Re-score

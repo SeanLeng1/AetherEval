@@ -10,32 +10,30 @@ PRIMARY_METRIC = "puzzle_accuracy"
 
 
 def extract_last_complete_json(text: str) -> dict[str, Any] | None:
-    decoder = json.JSONDecoder()
-    best_obj: dict[str, Any] | None = None
-    best_end = -1
-    best_start = -1
+    # Port of ZeroEval src/evaluation/eval_utils.py: brace-stack scan for the last
+    # top-level {...}, parsed after removing newlines (models often put literal
+    # newlines inside the "reasoning" string, which strict JSON rejects).
+    stack: list[int] = []
+    last_json_start: int | None = None
+    last_json_str: str | None = None
+    for index, char in enumerate(text):
+        if char == "{":
+            stack.append(index)
+            if last_json_start is None:
+                last_json_start = index
+        elif char == "}" and stack:
+            stack.pop()
+            if not stack:
+                last_json_str = text[last_json_start : index + 1]
+                last_json_start = None
 
-    for start, char in enumerate(text):
-        if char != "{":
-            continue
+    if last_json_str:
         try:
-            obj, consumed = decoder.raw_decode(text[start:])
+            obj = json.loads(last_json_str.replace("\n", ""))
         except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-
-        end = start + int(consumed)
-        # "last complete JSON object": prefer the one that ends latest.
-        # If multiple objects share the same end, keep the outermost one.
-        if end > best_end or (
-            end == best_end and (best_start < 0 or start < best_start)
-        ):
-            best_obj = obj
-            best_end = end
-            best_start = start
-
-    return best_obj
+            return None
+        return obj if isinstance(obj, dict) else None
+    return None
 
 
 def _normalize_cell(value: Any) -> str:
@@ -107,6 +105,11 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     }
 
 
+def _micro(cells: list[tuple[int, int]]) -> float:
+    total = sum(total_cells for _, total_cells in cells)
+    return sum(correct for correct, _ in cells) / total if total else 0.0
+
+
 def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
@@ -121,11 +124,12 @@ def aggregate(
         }
 
     puzzle_per_sample: list[float] = []
-    cell_per_sample: list[float] = []
+    # ZeroEval reports Cell Acc as correct_cells / total_cells over all puzzles.
+    cell_per_sample: list[tuple[int, int]] = []
     parsed_per_sample: list[float] = []
 
     puzzle_by_diff: dict[str, list[float]] = defaultdict(list)
-    cell_by_diff: dict[str, list[float]] = defaultdict(list)
+    cell_by_diff: dict[str, list[tuple[int, int]]] = defaultdict(list)
     parsed_by_diff: dict[str, list[float]] = defaultdict(list)
 
     for item in sample_results:
@@ -137,7 +141,10 @@ def aggregate(
         record = records[0]
         parsed = record.parsed if isinstance(record.parsed, dict) else {}
         sample_puzzle = float(record.score)
-        sample_cell = float(parsed.get("cell_accuracy", 0.0))
+        sample_cell = (
+            int(parsed.get("correct_cells", 0)),
+            int(parsed.get("total_cells", 0)),
+        )
         sample_parsed = float(parsed.get("parsed", 0.0))
         puzzle_per_sample.append(sample_puzzle)
         cell_per_sample.append(sample_cell)
@@ -160,13 +167,13 @@ def aggregate(
 
     result: dict[str, float] = {
         "puzzle_accuracy": mean(puzzle_per_sample),
-        "cell_accuracy": mean(cell_per_sample),
+        "cell_accuracy": _micro(cell_per_sample),
         "parsed": mean(parsed_per_sample),
     }
 
     for difficulty in sorted(puzzle_by_diff.keys()):
         result[f"puzzle_accuracy_sub_{difficulty}"] = mean(puzzle_by_diff[difficulty])
-        result[f"cell_accuracy_sub_{difficulty}"] = mean(cell_by_diff[difficulty])
+        result[f"cell_accuracy_sub_{difficulty}"] = _micro(cell_by_diff[difficulty])
         result[f"parsed_sub_{difficulty}"] = mean(parsed_by_diff[difficulty])
 
     return result

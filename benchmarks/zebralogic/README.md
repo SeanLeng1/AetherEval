@@ -49,10 +49,11 @@ benchmarks/zebralogic/
 ## Metrics
 
 - Implemented in `metrics.py`
-- Parses the last complete JSON object in generation output.
+- Parses the last top-level `{...}` with ZeroEval's brace-stack extractor (newlines
+  removed before `json.loads`); unparseable output counts as no answer.
 - Compares generated `solution` cells against gold table.
 - Reports:
   - `puzzle_accuracy` (all cells correct)
-  - `cell_accuracy` (fraction of correct cells)
+  - `cell_accuracy` (correct cells / total cells over all puzzles, as ZeroEval's `Cell Acc`)
   - `parsed` (JSON parse success rate)
   - difficulty subgroup means (`*_sub_easy`, `*_sub_hard`)

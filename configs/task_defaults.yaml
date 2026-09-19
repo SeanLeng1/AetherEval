@@ -29,14 +29,6 @@ amc23:
   temperature: 1.0
   top_p: 0.7
 
-apibank:
-  # GD2PO generate_deterministic.py profile, not original API-Bank dialogue evaluation.
-  n: 1
-  num_repeats: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
 arena-hard-v2:
   # Local candidate profile; official api_config.yaml sets sampling per model/endpoint.
   n: 1
@@ -81,7 +73,8 @@ creative-writing-v3:
   metrics:
     judge_model: claude-sonnet-4-6
     judge_temperature: 0.0
-    judge_top_p: 1.0
+    # No judge_top_p: upstream sends only temperature, and the Anthropic API rejects
+    # requests that set both.
     judge_max_new_tokens: 4096
 
 gpqa-diamond:
@@ -130,7 +123,10 @@ livecodebench:
   max_new_tokens: 32768
   temperature: 0.2
   top_p: 0.95
-  stop: ["###"]
+  # No stop: the reference "###" is for base-model completion and would cut a
+  # reasoning answer at the first markdown heading, before any code.
+  metrics:
+    pass_k_values: [1, 5, 10]
 
 llmeval-med:
   # Upstream enables sampling but inherits model defaults; 1/1 is our explicit profile.
@@ -167,12 +163,12 @@ minerva:
   top_p: 1.0
 
 mmlu-pro:
-  # Official local runner settings; AetherEval still uses a zero-shot prompt.
+  # Official local runner settings; AetherEval still uses a zero-shot prompt, so the
+  # runner's few-shot stop "Question:" is deliberately not carried over.
   n: 1
   max_new_tokens: 2048
   temperature: 0.0
   top_p: 1.0
-  stop: ["Question:"]
 
 olympiad-bench:
   # Official text-only GPT-4 reference profile, not a universal model-specific budget.
@@ -180,32 +176,6 @@ olympiad-bench:
   max_new_tokens: 2048
   temperature: 0.0
   top_p: 1.0
-
-rar-medical:
-  # Local held-out RaR/CriPO-style rubric profile, not the RaR paper's HealthBench eval.
-  n: 1
-  max_new_tokens: 8192
-  temperature: 0.0
-  top_p: 0.7
-  metrics:
-    judge_model: google/gemma-4-26B-A4B-it
-    judge_temperature: 1.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 4096
-    judge_enable_thinking: false
-
-rar-science:
-  # Local held-out RaR/CriPO-style rubric profile, not the RaR paper's GPQA eval.
-  n: 1
-  max_new_tokens: 8192
-  temperature: 0.0
-  top_p: 0.7
-  metrics:
-    judge_model: google/gemma-4-26B-A4B-it
-    judge_temperature: 1.0
-    judge_top_p: 1.0
-    judge_max_new_tokens: 4096
-    judge_enable_thinking: false
 
 researchqa:
   # Local candidate ceiling; official compute_coverage.py fixes judge temperature at zero.
@@ -248,13 +218,6 @@ safe-alignment-dynamic:
     rm_dtype: float16
     rm_sglang_args:
       context_length: 32768
-
-triviaqa:
-  # Local closed-book short-answer profile, not original reading-comprehension inference.
-  n: 1
-  max_new_tokens: 64
-  temperature: 0.0
-  top_p: 1.0
 
 writingbench:
   # Official leaderboard generation settings; reduce only for a model's actual limit.

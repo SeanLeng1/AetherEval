@@ -5,8 +5,11 @@
 Audited 2026-09-13. Executable defaults: `configs/task_defaults.yaml`.
 
 Official problem authority: [MAA American Mathematics Competitions](https://maa.org/student-programs/amc/).
-The [HuggingFaceH4/aime_2024 release](https://huggingface.co/datasets/HuggingFaceH4/aime_2024)
-is the dataset mirror used here, not an official MAA LLM evaluator.
+The dataset mirror used here is [RLLab/eval-set](https://huggingface.co/datasets/RLLab/eval-set),
+config `aime24`, with transcriptions from MathArena's
+[AIME I](https://huggingface.co/datasets/MathArena/aime_2024_I) and
+[AIME II](https://huggingface.co/datasets/MathArena/aime_2024_II).
+This is not an official MAA LLM evaluator.
 
 No official MAA model-generation repository or temperature/top-p/token budget was
 identified. The defaults `n=16, temperature=1, top_p=0.7,
@@ -28,9 +31,12 @@ benchmarks/aime24/
 
 ## Data
 
-- Source dataset: `HuggingFaceH4/aime_2024` (split: `train`)
+- Source dataset: `RLLab/eval-set`, config `aime24` (split: `train`)
 - Local offline file: `data/eval.jsonl`
 - Regeneration script: `prepare_data.py`
+- Run root `push.py --push` before rebuilding local data to publish the MathArena transcriptions.
+- All 30 exam questions, row order and gold strings are retained; transcription fixes change prompt text.
+- Asymptote/TikZ diagram code is removed during construction; prose, formulas and tables are retained. Use fresh generations after rebuilding.
 
 ## Prompting
 

@@ -10,6 +10,7 @@ from ..prompt import (
     count_text_tokens,
     count_token_ids,
     load_chat_tokenizer,
+    prefilled_reasoning_prefix,
     validate_system_role_support as _validate_system_role_support,
 )
 from .service import SGLangService
@@ -249,7 +250,9 @@ def _run_service_generation(
                 if count is not None
                 else count_text_tokens(request["text"], tokenizer)
             )
-        grouped_texts[item_idx].append(_extract_text(output))
+        grouped_texts[item_idx].append(
+            prefilled_reasoning_prefix(request["text"]) + _extract_text(output)
+        )
         grouped_token_counts[item_idx].append(_extract_output_token_count(output))
 
     results: list[dict[str, Any]] = []

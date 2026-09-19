@@ -1,5 +1,7 @@
+import json
 import math
 import random
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -10,7 +12,6 @@ from benchmark_utils.llm_judge import (
     chat_completion,
     local_constraint_body,
     parallel_map,
-    parse_json_object,
     resolve_judge_settings,
 )
 
@@ -271,9 +272,14 @@ def _clipped_mean(values: list[float]) -> float:
 
 
 def _parse_grade(text: str) -> dict[str, Any] | None:
+    # simple-evals parse_json_to_dict: strip a ```json fence, then strict json.loads;
+    # anything else is re-sampled rather than salvaged from surrounding prose.
+    cleaned = re.sub(r"^```json\s*|\s*```$", "", text.strip())
     try:
-        parsed = parse_json_object(text)
-    except (ValueError, TypeError):
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
         return None
     if (
         parsed.get("criteria_met") is not True

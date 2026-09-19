@@ -55,7 +55,7 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     }
     return {
         "score": float(plus_pass), "is_pass": plus_pass, "parsed": parsed,
-        "meta": {"scoring_protocol": "evalplus-0.3.1", "source_version": "v0.2.0"},
+        "meta": {"scoring_protocol": "evalplus-26d6d00", "source_version": "v0.2.0"},
     }
 
 

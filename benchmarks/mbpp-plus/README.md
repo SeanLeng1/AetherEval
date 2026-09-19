@@ -1,7 +1,7 @@
 # MBPP+
 
 Pinned dataset: **MBPP+ v0.2.0, 378 tasks**, full release (not NoExtreme).
-Pinned evaluator: **EvalPlus 0.3.1**, installed separately with `--no-deps`
+Pinned evaluator: **EvalPlus `26d6d00bb1fd0fa37f39c99d5290da67891d1c5e`**, installed separately with `--no-deps`
 (already included in AetherRL Docker; see [installation](../../README.md#install)).
 
 ## Offline use
@@ -37,6 +37,8 @@ aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
 - Use the official `sanitize`, `mbpp_deserialize_inputs`, and
   `untrusted_check(dataset="mbpp")`, including special oracles and official time limits.
   Reference execution also honors `MBPP_OUTPUT_NOT_NONE_TASKS`.
+  This revision uses a 4-second minimum per-test time limit (0.3.1 used 1 second);
+  re-score saved generations with `--eval-only` after upgrading.
 - Primary `pass@1` and `accuracy_plus` require both base and Plus tests to pass.
   `accuracy_base` is reported separately on the same 378 tasks, not the original
   full MBPP benchmark. A base failure skips Plus execution without changing pass/fail.

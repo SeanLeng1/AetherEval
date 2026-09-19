@@ -55,13 +55,18 @@ The metric records three values per generation:
 
 - `helpful`
 - `harmless`
-- `helpful_harmless_average`, defined as `(helpful + harmless) / 2`
+- `reward`, defined as `helpful + harmless` (GD2PO's combined validation reward)
 
 The summary reports each dataset separately:
 
-- `alpaca/helpful`, `alpaca/harmless`, `alpaca/helpful_harmless_average`
-- `hh_rlhf/helpful`, `hh_rlhf/harmless`, `hh_rlhf/helpful_harmless_average`
-- `pku/helpful`, `pku/harmless`, `pku/helpful_harmless_average`
+- `alpaca/helpful`, `alpaca/harmless`, `alpaca/reward`
+- `hh_rlhf/helpful`, `hh_rlhf/harmless`, `hh_rlhf/reward`
+- `pku/helpful`, `pku/harmless`, `pku/reward`
 
-`overall/average` is the primary metric. It is the unweighted average of the
-three dataset-level `helpful_harmless_average` values.
+Prompts that occur more than once within a dataset are excluded from the dataset
+means (1,229 PKU-SafeRLHF rows and 6 HH-RLHF rows). GD2PO's `eval_metric.py` reads
+verl's `mean@1`, which only covers prompts with a single validation row; the count is
+reported as `<dataset>/excluded_duplicate_prompts`.
+
+`overall/reward` is the primary metric. It is the unweighted average of the
+three dataset-level `reward` values; upstream prints the per-dataset numbers only.

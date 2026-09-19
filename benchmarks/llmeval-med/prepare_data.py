@@ -4,17 +4,25 @@ import ast
 import json
 from pathlib import Path
 
+from benchmark_utils.data import read_text
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-dir", default="/tmp/LLMEval-Med")
+    parser.add_argument(
+        "--source-dir",
+        default=(
+            "https://raw.githubusercontent.com/llmeval/LLMEval-Med/"
+            "a5a90f9273994334073c539136ce85f0815fffbc"
+        ),
+    )
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "data"))
     args = parser.parse_args()
-    source = Path(args.source_dir)
+    source = args.source_dir.rstrip("/")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    dataset = json.loads((source / "dataset/dataset.json").read_text(encoding="utf-8"))
+    dataset = json.loads(read_text(f"{source}/dataset/dataset.json"))
     with (output / "eval.jsonl").open("w", encoding="utf-8") as dst:
         for category, rows in dataset.items():
             for row in rows:
@@ -23,14 +31,14 @@ def main() -> None:
                 payload["category"] = category
                 dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    prompts = _extract_prompts(source / "evaluate/Evaluate.py")
+    prompts = _extract_prompts(f"{source}/evaluate/Evaluate.py")
     (output / "judge_prompts.json").write_text(
         json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-def _extract_prompts(path: Path) -> dict[str, str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _extract_prompts(path: str | Path) -> dict[str, str]:
+    tree = ast.parse(read_text(path))
     prompts: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:

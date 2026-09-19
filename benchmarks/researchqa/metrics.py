@@ -136,8 +136,9 @@ def score_generations_batch(
                         "judge_format_failures": sum(
                             "error" in item for item in rubric_grades
                         ),
+                        # compute_coverage.py skips such an item and averages the
+                        # rest; aggregate() does the same instead of aborting the run.
                         "judge_failed": judge_failed,
-                        "_aethereval_unscored": judge_failed,
                     },
                 }
             )

@@ -59,7 +59,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             "llmeval_med": ("gpt-4o", 1.0, 1.0, 4096),
             "healthbench": ("gpt-4.1-2025-04-14", 0.5, 1.0, 2048),
             "writingbench": ("claude-sonnet-4-5", 1.0, 0.95, 2048),
-            "creative_writing_v3": ("claude-sonnet-4-6", 0.0, 1.0, 4096),
+            "creative_writing_v3": ("claude-sonnet-4-6", 0.0, None, 4096),
             "researchqa": ("gpt-4.1-mini", 0.0, 1.0, 4096),
             "arena_hard_v2": ("gpt-4.1", 0.0, 1.0, 16000),
         }
@@ -70,7 +70,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 bundle = load_task(task_name, BENCHMARKS)
                 self.assertEqual(defaults["judge_model"], judge_model)
                 self.assertEqual(defaults["judge_temperature"], temperature)
-                self.assertEqual(defaults["judge_top_p"], top_p)
+                self.assertEqual(defaults.get("judge_top_p"), top_p)
                 self.assertEqual(defaults["judge_max_new_tokens"], max_new_tokens)
                 self.assertEqual(
                     bundle.metrics_module.DEFAULT_JUDGE_MODEL,
@@ -109,7 +109,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             "writingbench": (1000, 1, 16000, 0.7),
             "creative_writing_v3": (96, 1, 12000, 0.7),
             "researchqa": (3750, 1, 2048, 0.0),
-            "arena_hard_v2": (500, 1, 8192, 0.0),
+            "arena_hard_v2": (750, 1, 8192, 0.0),
         }
         for name, (count, n, max_tokens, temperature) in expected.items():
             with self.subTest(task=name):
@@ -190,7 +190,8 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             clear=True,
         ):
             settings = resolve_judge_settings(
-                {}, default_model="claude-sonnet-4-5"
+                {"judge_temperature": 1.0, "judge_top_p": 0.95},
+                default_model="claude-sonnet-4-5",
             )
 
         self.assertIsNone(settings.base_url)
@@ -205,6 +206,9 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             )
         self.assertEqual(completion.call_args.kwargs["model"], "claude-sonnet-4-5")
         self.assertNotIn("base_url", completion.call_args.kwargs)
+        # The Anthropic API rejects temperature together with top_p.
+        self.assertEqual(completion.call_args.kwargs["temperature"], 1.0)
+        self.assertNotIn("top_p", completion.call_args.kwargs)
 
     def test_litellm_forces_openai_transport_for_custom_gateway(self) -> None:
         with mock.patch.dict(
@@ -592,7 +596,8 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             self.assertEqual(research_unscored["score"], 0.0)
             self.assertFalse(research_unscored["is_pass"])
             self.assertTrue(research_unscored["meta"]["judge_failed"])
-            self.assertTrue(research_unscored["meta"]["_aethereval_unscored"])
+            # Upstream compute_coverage.py skips the item instead of aborting.
+            self.assertNotIn("_aethereval_unscored", research_unscored["meta"])
             self.assertEqual(
                 research_unscored["meta"]["judge_format_failures"],
                 len(research_sample.data["rubric"]),
@@ -651,7 +656,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             self.assertFalse(unscored["is_pass"])
             self.assertEqual(unscored["meta"]["judge_scores"], [-1])
             self.assertEqual(
-                unscored["parsed"][0]["error"], "judge returned no [1-5] score"
+                unscored["parsed"][0]["error"], "judge returned no [0-5] score"
             )
 
             arena = load_task("arena_hard_v2", BENCHMARKS)
@@ -786,6 +791,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
 
         medical = load_task("llmeval_med", BENCHMARKS)
         medical_sample = medical.task_module.load_samples(medical.spec.task_dir)[0]
+        self.assertIn("[0]", medical.metrics_module.GRADE_SCHEMA["properties"]["得分"]["enum"])
         medical_result = run_case(
             medical.metrics_module,
             [medical_sample],
@@ -796,10 +802,10 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                     ["answer"],
                 )
             ],
-            '{"判断依据":"ok","得分":"[4]"}',
+            '{"判断依据":"ok","得分":"[0]"}',
             "json_schema",
         )
-        self.assertEqual(medical_result[0][0]["score"], 4.0)
+        self.assertEqual(medical_result[0][0]["score"], 0.0)
 
         arena = load_task("arena_hard_v2", BENCHMARKS)
         arena_sample = arena.task_module.load_samples(arena.spec.task_dir)[0]

@@ -100,8 +100,8 @@ class SafeAlignmentTests(unittest.TestCase):
         )
 
         self.assertEqual(len(results), 2)
-        self.assertAlmostEqual(results[0][0]["score"], 0.75)
-        self.assertAlmostEqual(results[1][0]["meta"]["helpful_harmless_average"], 0.875)
+        self.assertAlmostEqual(results[0][0]["score"], 1.5)
+        self.assertAlmostEqual(results[1][0]["meta"]["reward"], 1.75)
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(backend.calls[0]["model_paths"], ["rm", "cm"])
         self.assertEqual(backend.calls[0]["num_conversations"], 2)
@@ -153,7 +153,7 @@ class SafeAlignmentTests(unittest.TestCase):
                         "s1",
                         helpful=1.0,
                         harmless=0.5,
-                        helpful_harmless_average=0.75,
+                        reward=1.5,
                     )
                 ],
             },
@@ -168,7 +168,7 @@ class SafeAlignmentTests(unittest.TestCase):
                         "s2",
                         helpful=1.5,
                         harmless=0.5,
-                        helpful_harmless_average=1.0,
+                        reward=2.0,
                     )
                 ],
             },
@@ -183,7 +183,7 @@ class SafeAlignmentTests(unittest.TestCase):
                         "s3",
                         helpful=3.0,
                         harmless=1.0,
-                        helpful_harmless_average=2.0,
+                        reward=4.0,
                     )
                 ],
             },
@@ -198,7 +198,7 @@ class SafeAlignmentTests(unittest.TestCase):
                         "s4",
                         helpful=4.0,
                         harmless=2.0,
-                        helpful_harmless_average=3.0,
+                        reward=6.0,
                     )
                 ],
             },
@@ -208,10 +208,10 @@ class SafeAlignmentTests(unittest.TestCase):
 
         self.assertAlmostEqual(result["alpaca/helpful"], 1.25)
         self.assertAlmostEqual(result["alpaca/harmless"], 0.5)
-        self.assertAlmostEqual(result["alpaca/helpful_harmless_average"], 0.875)
-        self.assertAlmostEqual(result["hh_rlhf/helpful_harmless_average"], 2.0)
-        self.assertAlmostEqual(result["pku/helpful_harmless_average"], 3.0)
-        self.assertAlmostEqual(result["overall/average"], (0.875 + 2.0 + 3.0) / 3.0)
+        self.assertAlmostEqual(result["alpaca/reward"], 1.75)
+        self.assertAlmostEqual(result["hh_rlhf/reward"], 4.0)
+        self.assertAlmostEqual(result["pku/reward"], 6.0)
+        self.assertAlmostEqual(result["overall/reward"], (1.75 + 4.0 + 6.0) / 3.0)
 
 
 def _record(
@@ -219,14 +219,14 @@ def _record(
     *,
     helpful: float,
     harmless: float,
-    helpful_harmless_average: float,
+    reward: float,
 ) -> dict:
     return {
         "sample_id": sample_id,
         "gen_idx": 0,
         "prompt": [{"role": "user", "content": sample_id}],
         "generation": "answer",
-        "score": helpful_harmless_average,
+        "score": reward,
         "is_pass": True,
         "parsed": None,
         "gold": None,
@@ -234,7 +234,7 @@ def _record(
         "meta": {
             "helpful": helpful,
             "harmless": harmless,
-            "helpful_harmless_average": helpful_harmless_average,
+            "reward": reward,
         },
     }
 

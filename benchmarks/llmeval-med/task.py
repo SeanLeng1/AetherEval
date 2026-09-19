@@ -8,6 +8,7 @@ from aethereval.core.types import (
     GenerationRecord,
     Sample,
 )
+from aethereval.metrics.common import strip_reasoning
 
 
 TASK_NAME = "llmeval-med"
@@ -121,7 +122,7 @@ def generate_outputs(
             else:
                 raise ValueError(f"Missing LLMEval-Med response for {sample.id}")
             histories.setdefault(key, []).append(
-                (str(sample.data["problem"]), answer)
+                (str(sample.data["problem"]), strip_reasoning(answer))
             )
 
     return [sample_output for sample in samples if (sample_output := generated.get(sample.id))]

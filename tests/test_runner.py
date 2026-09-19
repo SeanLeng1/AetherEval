@@ -280,6 +280,37 @@ def _write_batch_benchmark(root: Path) -> None:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_evalplus_find_zero_scoring_matches_across_process_counts(self) -> None:
+        metrics = _load_module_from_path(
+            "find_zero_test_metrics",
+            Path(__file__).resolve().parents[1] / "benchmarks/humaneval-plus/metrics.py",
+        )
+        sample = Sample(
+            id="HumanEval/32-linear-probe",
+            data={
+                "prompt": 'def find_zero(xs):\n    """Find the root."""\n',
+                "entry_point": "find_zero",
+                "canonical_solution": "    return -xs[0] / xs[1]\n",
+                "base_input": [[[1, 2]]],
+                "plus_input": [[[2, 1]]],
+                "atol": 0.0001,
+            },
+        )
+        kwargs = dict(
+            metrics_module=metrics,
+            samples_by_id={sample.id: sample},
+            outputs=[GenerationOutput(
+                sample.id, sample.data["prompt"],
+                [sample.data["canonical_solution"], "    return 0\n"],
+            )],
+            total_records=2,
+            progress_desc="find_zero spawn regression",
+        )
+        serial = _score_generation_outputs(**kwargs, metric_options={"num_proc": 1})
+        parallel = _score_generation_outputs(**kwargs, metric_options={"num_proc": 2})
+        self.assertEqual([result[0] for result in serial[sample.id]], [1.0, 0.0])
+        self.assertEqual(parallel, serial)
+
     def test_parallel_scoring_preserves_order_and_allows_test_subprocesses(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "metrics.py"

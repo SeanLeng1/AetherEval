@@ -27,7 +27,7 @@ GRADE_SCHEMA = {
     "type": "object",
     "properties": {
         "判断依据": {"type": "string"},
-        "得分": {"type": "string", "enum": ["[1]", "[2]", "[3]", "[4]", "[5]"]},
+        "得分": {"type": "string", "enum": ["[0]", "[1]", "[2]", "[3]", "[4]", "[5]"]},
     },
     "required": ["判断依据", "得分"],
     "additionalProperties": False,
@@ -88,7 +88,7 @@ def score_generations_batch(
                 messages,
             )
             match = re.search(r"\[(\d+)\]", last)
-            if match and 1 <= int(match.group(1)) <= 5:
+            if match and 0 <= int(match.group(1)) <= 5:
                 return {
                     "score": int(match.group(1)),
                     "raw": last,
@@ -104,7 +104,7 @@ def score_generations_batch(
                     extra_body=constraint,
                 )
                 match = re.search(r"\[(\d+)\]", last)
-                if match and 1 <= int(match.group(1)) <= 5:
+                if match and 0 <= int(match.group(1)) <= 5:
                     return {
                         "score": int(match.group(1)),
                         "raw": last,
@@ -118,7 +118,7 @@ def score_generations_batch(
             "score": -1,
             "raw": last,
             "format_attempts": NORMAL_FORMAT_ATTEMPTS + int(constraint is not None),
-            "error": "judge returned no [1-5] score",
+            "error": "judge returned no [0-5] score",
         }
 
     grades = parallel_map(
@@ -131,7 +131,10 @@ def score_generations_batch(
         for _ in range(generation_count):
             repeat_grades = grades[offset : offset + repeats]
             offset += repeats
-            score = sum(float(item["score"]) for item in repeat_grades) / repeats
+            # Upstream Aggregate.py averages only the runs with a valid 0-5 score; a
+            # question with no valid run stays in the denominator as not usable.
+            valid = [float(item["score"]) for item in repeat_grades if item["score"] >= 0]
+            score = sum(valid) / len(valid) if valid else -1.0
             per_sample.append(
                 {
                     "score": score,
@@ -157,7 +160,8 @@ def aggregate(
         for record in sample.get("records", []):
             score = float(record["score"])
             categories[category].append(score)
-            all_scores.append(score)
+            if score >= 0:
+                all_scores.append(score)
             judge_failures += sum("error" in item for item in record.get("parsed", []))
 
     metrics: dict[str, Any] = {}
@@ -169,7 +173,7 @@ def aggregate(
         metrics[f"{code}_usability_rate"] = (
             usable / len(scores) * 100.0 if scores else 0.0
         )
-        metrics[f"{code}_avg_judge_score"] = _mean(scores)
+        metrics[f"{code}_avg_judge_score"] = _mean([x for x in scores if x >= 0])
         total_usable += usable
         total_count += len(scores)
     metrics["OP"] = total_usable / total_count * 100.0 if total_count else 0.0

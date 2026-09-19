@@ -1,11 +1,12 @@
 import re
+from collections import defaultdict
 from typing import Any
 
 from aethereval.core.types import Sample
-from aethereval.metrics.common import aggregate_mcq_results
+from aethereval.metrics.common import aggregate_mcq_results, mean, to_records
 
 
-PRIMARY_METRIC = "accuracy"
+PRIMARY_METRIC = "macro_accuracy"
 _AGIEVAL_PARSE_TAIL_CHARS = 1_000
 
 # Generation-only answer parsing: this task does not use MCQ loglikelihood scoring.
@@ -126,4 +127,16 @@ def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    return aggregate_mcq_results(sample_results, metric_options, group_key="subset")
+    result = aggregate_mcq_results(sample_results, metric_options, group_key="subset")
+    # OLMES agi_eval_english reports the macro average over its subsets; `accuracy`
+    # stays the micro average over questions.
+    by_subset: dict[str, list[float]] = defaultdict(list)
+    for item in sample_results:
+        records = to_records(item["records"])
+        if records:
+            by_subset[str(item["meta"].get("subset", ""))].append(
+                mean([float(record.score) for record in records])
+            )
+    subset_scores = [mean(scores) for scores in by_subset.values()]
+    result["macro_accuracy"] = mean(subset_scores) if subset_scores else 0.0
+    return result

@@ -32,6 +32,29 @@ def to_records(raw_records: list[dict[str, Any]]) -> list[GenerationRecord]:
     return records
 
 
+_THINK_END = "</think>"
+_THINK_START = "<think>"
+
+
+def strip_reasoning(text: str) -> str:
+    """Return the final answer of a reasoning model, without its thinking block.
+
+    Official graders (Arena-Hard, Creative Writing, IFBench, HealthBench samplers)
+    score only the text after the reasoning. A thinking block is recognised only at
+    the very start of the generation (backends restore a `<think>` that the chat
+    template pre-filled into the prompt) and ends at the first `</think>`, so a
+    literal "</think>" inside the answer, e.g. in code, is left alone. An opened but
+    unterminated block means the budget ran out while thinking: nothing to score.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith(_THINK_START):
+        return text
+    end = stripped.find(_THINK_END, len(_THINK_START))
+    if end < 0:
+        return ""
+    return stripped[end + len(_THINK_END) :].lstrip()
+
+
 def mean(values: list[float]) -> float:
     return math.fsum(values) / len(values) if values else 0.0
 
@@ -239,17 +262,27 @@ def _normalize_choice(value: str, valid_set: set[str]) -> str | None:
 def _choice_patterns(valid_letters: str) -> list[tuple[str, re.Pattern[str]]]:
     char_class = "".join(re.escape(letter) for letter in valid_letters)
     # Match standalone choice letters only (avoid picking letters inside words like "because").
-    choice_re = rf"(?<![A-Za-z0-9])\(?[{char_class}]\)?(?![A-Za-z0-9])"
+    # A bare letter must be upper case so the article "a" is never read as choice A;
+    # a parenthesised letter may be either case.
+    choice_re = (
+        rf"(?<![A-Za-z0-9])(?:\([{char_class}]\)|(?-i:[{char_class}])\)?)(?![A-Za-z0-9])"
+    )
+    # At an explicit answer position, also allow a lowercase letter terminated by
+    # punctuation or the end of the line, but not the article in "a catalyst".
+    answer_re = (
+        rf"(?:{choice_re}|(?<![A-Za-z0-9])[{char_class}]"
+        rf"(?=[ \t]*(?:[.)\],:;!?]|\r?$)))"
+    )
     return [
         (
             "final_answer",
             re.compile(
-                rf"(?i)final\s+answer(?:\s+is)?\s*[:：]?\s*(?P<choice>{choice_re})"
+                rf"(?im)final\s+answer(?:\s+is)?\s*[:：]?\s*(?P<choice>{answer_re})"
             ),
         ),
         (
             "answer_colon",
-            re.compile(rf"(?i)\banswer\s*[:：]\s*(?P<choice>{choice_re})"),
+            re.compile(rf"(?im)\banswer\s*[:：]\s*(?P<choice>{answer_re})"),
         ),
         (
             "answer_anchor",
@@ -270,7 +303,7 @@ def _choice_patterns(valid_letters: str) -> list[tuple[str, re.Pattern[str]]]:
         (
             "line_start",
             re.compile(
-                rf"(?im)^\s*(?:\*\*)?\s*(?P<choice>{choice_re})(?:\*\*)?\s*(?:[\)\].,:]|$)"
+                rf"(?im)^\s*(?:\*\*)?\s*(?P<choice>\(?[{char_class}]\)?)(?:\*\*)?\s*(?:[\)\].,:]|$)"
             ),
         ),
     ]

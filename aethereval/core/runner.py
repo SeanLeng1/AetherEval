@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import multiprocessing
 from collections import defaultdict
@@ -5,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
+from aethereval.metrics.common import strip_reasoning
 from aethereval.progress import Progress
 
 from .io import (
@@ -500,6 +502,13 @@ def _score_generation_outputs(
     total_records: int,
     progress_desc: str,
 ) -> dict[str, list[tuple[float, bool, Any, dict[str, Any]]]]:
+    # Records keep the raw generation; graders only see the post-reasoning answer.
+    outputs = [
+        dataclasses.replace(
+            output, generations=[strip_reasoning(text) for text in output.generations]
+        )
+        for output in outputs
+    ]
     batch_score_fn = getattr(metrics_module, "score_generations_batch", None)
     if callable(batch_score_fn):
         samples = [samples_by_id[output.sample_id] for output in outputs]

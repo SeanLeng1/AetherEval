@@ -4,18 +4,31 @@ import json
 import urllib.request
 from pathlib import Path
 
+from tqdm import tqdm
+
 
 HF_ROOT = "https://huggingface.co/datasets/lmarena-ai/arena-hard-auto/resolve/main/data/arena-hard-v2.0"
-BASELINE_URL = f"{HF_ROOT}/model_answer/o3-mini-2025-01-31.jsonl"
+# Per-category baselines from upstream utils/judge_utils.py JUDGE_SETTINGS.
+BASELINES = {
+    "hard_prompt": "o3-mini-2025-01-31",
+    "creative_writing": "gemini-2.0-flash-001",
+}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--questions",
-        default="/tmp/arena-hard-auto/data/arena-hard-v2.0/question.jsonl",
+        default=(
+            "https://raw.githubusercontent.com/lmarena/arena-hard-auto/"
+            "196f6b826783b3da7310e361a805fa36f0be83f3/data/arena-hard-v2.0/question.jsonl"
+        ),
     )
-    parser.add_argument("--baseline", default=BASELINE_URL)
+    parser.add_argument(
+        "--baseline-root",
+        default=f"{HF_ROOT}/model_answer",
+        help="Directory or URL prefix holding the official baseline answer files.",
+    )
     parser.add_argument("--output-dir", default=str(Path(__file__).parent / "data"))
     parser.add_argument(
         "--cohort-cache",
@@ -25,20 +38,24 @@ def main() -> None:
     args = parser.parse_args()
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    questions = [json.loads(line) for line in Path(args.questions).open(encoding="utf-8")]
-    baseline_rows = _read_jsonl(args.baseline)
-    baseline = {row["uid"]: row for row in baseline_rows}
+    questions = _read_jsonl(args.questions)
+    baselines = {
+        category: {
+            row["uid"]: row
+            for row in _read_jsonl(f"{args.baseline_root.rstrip('/')}/{model}.jsonl")
+        }
+        for category, model in BASELINES.items()
+    }
     hard_uids = {row["uid"] for row in questions if row["category"] == "hard_prompt"}
 
     with (output / "eval.jsonl").open("w", encoding="utf-8") as dst:
         for question in questions:
-            if question["category"] != "hard_prompt":
-                continue
-            base = baseline[question["uid"]]
+            base = baselines[question["category"]][question["uid"]]
             payload = dict(question)
             payload["baseline_answer"] = base["messages"][-1]["content"]["answer"]
             payload["baseline_metadata"] = base["metadata"]
             dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    print(f"wrote {output / 'eval.jsonl'} rows={len(questions)}", flush=True)
 
     _prepare_style_cohort(output / "style_cohort.jsonl", Path(args.cohort_cache), hard_uids)
 
@@ -55,8 +72,10 @@ def _prepare_style_cohort(output: Path, cache: Path, hard_uids: set[str]) -> Non
     judgment_names = {Path(item["path"]).name for item in judgment_tree}
     names = sorted((answer_names & judgment_names) - {f"{BASELINE_MODEL}.jsonl"})
 
+    print(f"Style cohort: {len(names)} models; cache={cache}", flush=True)
+    count = 0
     with output.open("w", encoding="utf-8") as dst:
-        for name in names:
+        for name in tqdm(names, desc="Arena-Hard style cohort", unit="model"):
             answer_path = cache / f"answer-{name}"
             judgment_path = cache / f"judgment-{name}"
             _download(f"{HF_ROOT}/model_answer/{name}", answer_path)
@@ -84,10 +103,13 @@ def _prepare_style_cohort(output: Path, cache: Path, hard_uids: set[str]) -> Non
                     "model_metadata": answer_rows[uid]["metadata"],
                 }
                 dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                count += 1
+    print(f"wrote {output} rows={count}", flush=True)
 
 
 def _read_jsonl(source: str) -> list[dict]:
     if source.startswith(("http://", "https://")):
+        print(f"[arena-hard-v2] Reading {source}", flush=True)
         with urllib.request.urlopen(source) as response:
             return [json.loads(line) for line in response]
     with Path(source).open(encoding="utf-8") as file:
@@ -95,6 +117,7 @@ def _read_jsonl(source: str) -> list[dict]:
 
 
 def _load_json(url: str):
+    print(f"[arena-hard-v2] Listing {url}", flush=True)
     with urllib.request.urlopen(url) as response:
         return json.load(response)
 
@@ -103,9 +126,14 @@ def _download(url: str, output: Path) -> None:
     if output.exists() and output.stat().st_size:
         return
     partial = output.with_suffix(output.suffix + ".part")
-    with urllib.request.urlopen(url) as response, partial.open("wb") as dst:
-        while chunk := response.read(1024 * 1024):
-            dst.write(chunk)
+    with tqdm(desc=output.name, unit="B", unit_scale=True, unit_divisor=1024, leave=False) as progress:
+        with urllib.request.urlopen(url) as response, partial.open("wb") as dst:
+            size = response.headers.get("Content-Length")
+            progress.total = int(size) if size else None
+            progress.refresh()
+            while chunk := response.read(1024 * 1024):
+                dst.write(chunk)
+                progress.update(len(chunk))
     partial.replace(output)
 
 

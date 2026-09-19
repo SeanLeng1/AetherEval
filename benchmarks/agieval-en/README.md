@@ -29,16 +29,12 @@ benchmarks/agieval-en/
 
 ## Data
 
-- Source datasets:
-  - `dmayhem93/agieval-aqua-rat`
-  - `dmayhem93/agieval-gaokao-english`
-  - `dmayhem93/agieval-logiqa-en`
-  - `dmayhem93/agieval-lsat-ar`
-  - `dmayhem93/agieval-lsat-lr`
-  - `dmayhem93/agieval-lsat-rc`
-  - `dmayhem93/agieval-sat-en`
-  - `dmayhem93/agieval-sat-en-without-passage`
-  - `dmayhem93/agieval-sat-math`
+- Source: official [ruixiangcui/AGIEval](https://github.com/ruixiangcui/AGIEval) `data/v1_1/<subset>.jsonl`,
+  pinned to commit `84ab72d`, for `aqua-rat`, `gaokao-english`, `logiqa-en`, `lsat-ar`,
+  `lsat-lr`, `lsat-rc`, `sat-en`, `sat-math` (2646 questions). These are the 8 tasks of
+  OLMES `agi_eval_english`; `sat-en-without-passage` is not part of that suite.
+  The `dmayhem93/agieval-*` HF mirrors are not used: they lost option (D) of three
+  SAT-English questions, one of which is the gold answer.
 - Local offline file: `data/eval.jsonl`
 - Regeneration script: `prepare_data.py`
 
@@ -58,8 +54,10 @@ benchmarks/agieval-en/
   - exact `Therefore, the answer is (X)`
   - template fallbacks (`so the answer is ...`, `answer: ...`, etc.)
   - final raw letter fallback
+- Primary metric: `macro_accuracy`, the unweighted mean of the 8 subset accuracies
+  (OLMES `agi_eval_english` convention).
 - Reported metrics include:
-  - `accuracy`, `accuracy_stderr`
+  - `accuracy` (micro over questions), `accuracy_stderr`
   - `accuracy@n` when `n>1`
   - `pass@k` with default `k=1,2,4,...,n`
   - `parsed_rate`

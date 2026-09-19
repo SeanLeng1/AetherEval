@@ -20,11 +20,12 @@ deep-research agent evaluation.
 
 Native implementation of rubric coverage on the 3,750-item ResearchQA test set.
 
-- Candidate task protocol: citation-supported answer, source cutoff at the item's `date`, approximately 250 words, `n=1`, temperature `0`.
-- `max_new_tokens=2048` is a local output ceiling; the paper specifies the 250-word instruction but no common API max-token value.
+- Candidate task protocol: the official leaderboard-submission prompt for systems without default attribution (240-260 words, in-line citations, `<ANSWER>\n\n<CITATIONS>` output), `n=1`, temperature `0`.
+- `max_new_tokens=2048` is a local output ceiling; the submission instructions fix the word range but no API max-token value.
 - Judge: `gpt-4.1-mini`, temperature `0`, rubric batches of 8, three format attempts.
 - Primary metric: normalized rubric `coverage` on a 0–100 scale.
 
-The paper states the constraints but does not release the exact candidate prompt
-string. This implementation expresses those constraints directly and records the
-rendered prompt in every prediction for auditability.
+The candidate prompt is the one in the official "Leaderboard Submission" document
+linked from the upstream README. It carries no date-cutoff sentence. An item whose
+judge labels stay malformed after the retries is skipped and the coverage is averaged
+over the remaining items, as `compute_coverage.py` does.

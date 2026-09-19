@@ -23,21 +23,21 @@ DEFAULT_JUDGE_MODEL = str(
         "judge_model", "claude-sonnet-4-6"
     )
 )
-ROOT = Path(__file__).resolve().parent
+PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 CRITERIA = [
     line.strip()
-    for line in (ROOT / "criteria.txt").read_text(encoding="utf-8").splitlines()
+    for line in (PROMPT_DIR / "criteria.txt").read_text(encoding="utf-8").splitlines()
     if line.strip()
 ]
 NEGATIVE_CRITERIA = [
     line.strip()
-    for line in (ROOT / "negative_criteria.txt")
+    for line in (PROMPT_DIR / "negative_criteria.txt")
     .read_text(encoding="utf-8")
     .splitlines()
     if line.strip()
 ]
 NEGATIVE_CRITERIA_SET = set(NEGATIVE_CRITERIA)
-JUDGE_PROMPT = (ROOT / "judge_prompt.txt").read_text(encoding="utf-8").rstrip("\n")
+JUDGE_PROMPT = (PROMPT_DIR / "judge_prompt.txt").read_text(encoding="utf-8").rstrip("\n")
 SCORE_SCHEMA = {
     "type": "object",
     "properties": {

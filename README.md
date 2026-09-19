@@ -31,14 +31,22 @@ require the scoring-only EvalPlus installation (already included in AetherRL Doc
 
 ```bash
 python -m pip install --no-deps \
-  evalplus==0.3.1 tempdir==0.7.1 wget==3.2 appdirs==1.4.4 termcolor==3.3.0
+  "evalplus @ git+https://github.com/evalplus/evalplus.git@26d6d00bb1fd0fa37f39c99d5290da67891d1c5e" \
+  tempdir==0.7.1 wget==3.2 appdirs==1.4.4 termcolor==3.3.0
 ```
+
+EvalPlus is pinned to upstream commit `26d6d00`, which includes the HumanEval/32
+`find_zero` fix. No local oracle patch or patch command is needed. This revision
+also uses upstream's 4-second minimum per-test time limit (0.3.1 used 1 second).
+After upgrading an existing environment, restart evaluation and re-score saved
+HumanEval+/MBPP+ generations with `--eval-only`; regeneration is unnecessary.
 
 The runtime must also provide NumPy, psutil and tqdm. MBPP+ additionally uses
 `tree-sitter-python` and EvalPlus's official sanitizer. AetherRL Docker pins
 `tree-sitter==0.21.3` for BFCL, installs `tree-sitter-python==0.21.0`, and adapts
-only the sanitizer's parser constructor to that API. It checks both MBPP+ and
-BFCL parsers at image build time; the test-execution and sanitizing rules are unchanged.
+the sanitizer's parser constructor to that API. It checks both MBPP+ and
+BFCL parsers at image build time. Test execution and sanitizing rules otherwise
+come directly from the pinned upstream revision.
 For a separate environment without the BFCL pin, EvalPlus's native sanitizer
 instead requires `tree-sitter>=0.22.0` with a compatible Python grammar package.
 
@@ -52,7 +60,7 @@ from importlib.metadata import version
 from pathlib import Path
 import evalplus
 
-assert version("evalplus") == "0.3.1" and version("tree-sitter") == "0.21.3"
+assert version("tree-sitter") == "0.21.3"
 path = Path(evalplus.__file__).with_name("sanitize.py")
 old = "parser = Parser(Language(tree_sitter_python.language()))"
 new = 'parser = Parser()\n    parser.set_language(Language(tree_sitter_python.language(), "python"))'
@@ -124,7 +132,7 @@ Evaluation commands run directly in the invoking shell. SGLang data-parallel
 replicas are Ray actors behind one SMG router:
 
 ```bash
-aethereval --model /path/to/model --tasks apibank --dp-size 8 --tp-size 1
+aethereval --model /path/to/model --tasks ifeval --dp-size 8 --tp-size 1
 ```
 
 For multiple nodes, start and join the Ray cluster manually before invoking
@@ -271,6 +279,29 @@ aethereval \
 
 This prints the first 5 prompts after chat-template rendering and exits.
 
+## Rebuild Benchmark Data
+
+From the repository root, after installing preparation dependencies (`pip install -e '.[dynamic]'`):
+
+```bash
+python benchmarks/init.py                     # all native benchmarks
+python benchmarks/init.py minerva aime25      # selected benchmarks only
+```
+
+The entry point calls each benchmark's existing `prepare_data.py` in a separate
+process and stops on the first failure. It overwrites prepared files in
+`benchmarks/<task>/data/`; it does not run generation, judging, or modify evaluation
+results. Source downloads may use their normal caches. BFCL is excluded because
+its official external runner manages its data. No temporary upstream checkout is
+required. Task-specific options remain available via
+`python -m benchmarks.<task>.prepare_data --help` where supported.
+
+Dynamic Safe Alignment also regenerates `data/protocol.json` from current training
+score statistics by default. To preserve a particular RL/SFT experiment's mapping,
+prepare that task with `--rl-data` or `--revision` instead. Rebuilt prompts or gold
+answers may differ when an upstream dataset has changed; old evaluation results
+are not automatically refreshed.
+
 ## Benchmark Contract
 
 Each benchmark folder must include:
@@ -282,6 +313,7 @@ benchmarks/<task_name>/
   task.py
   metrics.py
   prepare_data.py
+  prompts/          # optional static prompt templates / criteria
 ```
 
 `task.py` must define:
@@ -359,21 +391,6 @@ its HF data once before running; the original `safe-alignment` task is unchanged
 0.3.1. Generation uses the existing local backend; base and Plus tests are scored
 offline with the official checker. See [protocol and preparation](benchmarks/mbpp-plus/README.md).
 
-## Open-QA Benchmarks
-
-`triviaqa` uses deterministic short-answer generation (`n=1`, temperature zero)
-and local alias-normalized scoring on the 11,313-example public
-`unfiltered.nocontext` validation split; the primary metric is normalized exact match.
-
-```bash
-aethereval \
-  --model /path/to/policy \
-  --tasks triviaqa \
-  --output-dir outputs
-```
-
-The task directory includes a preparation script and its exact split/metric notes.
-
 ## Native LLM-Judge Benchmarks
 
 These benchmarks use the regular offline backend for candidate generation and an
@@ -381,16 +398,13 @@ OpenAI-compatible chat-completions endpoint only for judging:
 
 - `llmeval-med` — 667 items, multi-turn generation, GPT-4o judge, primary `OP`.
 - `healthbench` — 5,000 items, GPT-4.1 judge, primary rubric `score`.
-- `rar-medical` — official ScaleAI RaR-Medicine test split, Gemma-4 judge,
-  primary weighted rubric `score`.
-- `rar-science` — official ScaleAI RaR-Science test split, Gemma-4 judge,
-  primary weighted rubric `score`.
 - `writingbench` — 1,000 items, Claude Sonnet 4.5 judge, primary `overall_score`.
 - `creative-writing-v3` — 96 pieces, Claude Sonnet 4.6 judge, primary
   `eqbench_creative_score`.
 - `researchqa` — 3,750 items, GPT-4.1-mini judge, primary rubric `coverage`.
-- `arena-hard-v2` — 500 hard prompts, GPT-4.1 judge, primary
-  `style_controlled_win_rate`.
+- `arena-hard-v2` — 500 hard prompts + 250 creative-writing prompts, GPT-4.1 judge,
+  primary `style_controlled_win_rate` (hard prompts); `creative_writing_win_rate`
+  is reported separately.
 
 The documented per-task judge model and sampling defaults live under each task's
 `metrics` section in `configs/task_defaults.yaml`. Judge resolution follows the
@@ -402,8 +416,6 @@ remain separate from candidate generation settings.
 | --- | ---: | ---: | ---: |
 | `llmeval-med` | 1.0 | 1.0 | 4096 |
 | `healthbench` | 0.5 | 1.0 | 2048 |
-| `rar-medical` | 1.0 | 1.0 | 4096 |
-| `rar-science` | 1.0 | 1.0 | 4096 |
 | `writingbench` | 1.0 | 0.95 | 2048 |
 | `creative-writing-v3` | 0.0 | 1.0 | 4096 |
 | `researchqa` | 0.0 | 1.0 | 4096 |
@@ -523,6 +535,12 @@ It is applied locally while rendering the chat template, is shown by `--inspect`
 and is saved in each task's `run_config.json` so `--eval-only` inherits the mode
 used by `--generate-only`.
 
+Before scoring or judging, the runner removes the reasoning block: graders see only
+the text after the last `</think>`, and an opened but unterminated `<think>` (budget
+exhausted while thinking) is scored as an empty answer. `predictions.jsonl` keeps the
+raw generation. This mirrors Arena-Hard (`end_think_token`), Creative Writing,
+IFBench and the HealthBench reasoning samplers, which all grade the final answer only.
+
 This switch does not automatically change temperature, top-p, output length, or
 any task-specific generation defaults. Set those separately only when the target
 model and benchmark protocol call for them. BFCL is not affected because its
@@ -555,10 +573,6 @@ Some benchmarks do not fit the native `task.py`/`metrics.py` contract because th
 their own generation loop, agent runtime, or reference output layout. These live under
 `benchmarks/<name>/` with an `external.py` API. The CLI task router still lets you
 select them with `--tasks`; it dispatches them to their external runner internally.
-
-API-Bank is a native task and should be run with `--tasks apibank`. It keeps `n=1`
-and defaults to four complete benchmark repetitions (`num_repeats: 4`), whose numeric
-metrics are averaged. Use `--num-repeats 1` for a quick single run.
 
 Current external benchmarks:
 
@@ -607,7 +621,7 @@ outputs/<run_id>/bfcl/
   summary.json
 ```
 
-See `benchmarks/apibank/README.md` and `benchmarks/bfcl/README.md` for exact metrics,
+See `benchmarks/bfcl/README.md` for exact metrics,
 runtime requirements, and output details.
 
 ## Bootstrap

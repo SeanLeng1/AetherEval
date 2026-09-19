@@ -576,7 +576,7 @@ class ExternalCliTests(unittest.TestCase):
         args = build_parser().parse_args(
             [
                 "--tasks",
-                "apibank,bfcl",
+                "ifeval,bfcl",
                 "--model",
                 "rlla-gdpo",
                 "--backend",

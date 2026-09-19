@@ -76,6 +76,16 @@ def validate_system_role_support(
         )
 
 
+def prefilled_reasoning_prefix(rendered_prompt: str) -> str:
+    """`<think>` opener that the chat template put into the prompt, if any.
+
+    Templates such as Qwen3-Thinking-2507 and DeepSeek-R1 end the generation prompt
+    with `<think>`, so the completion holds only the closing tag. Backends prepend
+    this prefix to keep every stored generation self-describing.
+    """
+    return "<think>\n" if rendered_prompt.rstrip().endswith("<think>") else ""
+
+
 def _prompt_to_text(
     prompt: PromptType,
     tokenizer: Any,

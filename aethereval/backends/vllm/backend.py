@@ -7,6 +7,7 @@ from ..prompt import (
     _prompt_to_text,
     chat_template_kwargs_from_generation_config,
     count_token_ids,
+    prefilled_reasoning_prefix,
 )
 
 
@@ -69,8 +70,9 @@ def _run_generation(
             raise RuntimeError(
                 f"vLLM returned {len(outputs)} outputs for {len(items)} prompts."
             )
-        for item, output in zip(items, outputs):
-            texts = [candidate.text for candidate in output.outputs]
+        for item, prompt_text, output in zip(items, prompts, outputs):
+            reasoning_prefix = prefilled_reasoning_prefix(prompt_text)
+            texts = [reasoning_prefix + candidate.text for candidate in output.outputs]
             if len(texts) != n:
                 raise RuntimeError(
                     f"vLLM returned {len(texts)} candidates for sample {item['sample_id']}; expected {n}."

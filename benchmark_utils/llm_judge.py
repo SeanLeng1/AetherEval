@@ -163,7 +163,11 @@ def chat_completion(
         request_options["temperature"] = effective_temperature
     if effective_max_tokens is not None:
         request_options["max_tokens"] = effective_max_tokens
-    if effective_top_p is not None:
+    # The native Anthropic API rejects requests that set both temperature and top_p.
+    native_claude = settings.base_url is None and "claude" in model.lower()
+    if effective_top_p is not None and not (
+        native_claude and effective_temperature is not None
+    ):
         request_options["top_p"] = effective_top_p
     if seed is not None:
         request_options["seed"] = int(seed)

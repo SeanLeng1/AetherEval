@@ -8,6 +8,7 @@ from aethereval.core.types import (
     GenerationRecord,
     Sample,
 )
+from aethereval.metrics.common import strip_reasoning
 
 
 TASK_NAME = "creative-writing-v3"
@@ -70,7 +71,13 @@ def generate_outputs(
             )
             for sample_id in remaining
         ]
-        outputs = backend.generate(inputs, gen_cfg)
+        # Upstream retries are unseeded; a fixed seed would replay the same short text.
+        attempt_cfg = (
+            gen_cfg
+            if attempt == 0
+            else {key: value for key, value in gen_cfg.items() if key != "seed"}
+        )
+        outputs = backend.generate(inputs, attempt_cfg)
         by_id = {output.sample_id: output for output in outputs}
         if set(by_id) != set(remaining):
             raise ValueError("creative_writing_v3 backend output ids mismatch")
@@ -81,7 +88,8 @@ def generate_outputs(
             if len(output.generations) != 1:
                 raise ValueError("creative_writing_v3 expects one generation per sample")
             text = output.generations[0].strip()
-            failed = output.error is not None or len(text) < 500
+            # Upstream drops reasoning blocks before its 500-character check.
+            failed = output.error is not None or len(strip_reasoning(text)) < 500
             if failed and attempt < 2:
                 retry.append(sample_id)
                 continue

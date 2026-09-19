@@ -2,6 +2,7 @@ import ast
 import faulthandler
 import json
 import multiprocessing
+import os
 import signal
 import sys
 import time
@@ -571,6 +572,18 @@ def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
     sys.modules["tkinter"] = None
 
 
+def _preload_numpy() -> None:
+    # Official testing_util imports numpy at module load, so candidates can import
+    # numpy/scipy/pandas after reliability_guard. A spawned worker starts without it,
+    # and numpy's own import calls os.putenv, which the guard disables.
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[name] = "1"
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        pass
+
+
 def _temp_run(
     sample: dict[str, Any],
     generation: str,
@@ -579,6 +592,7 @@ def _temp_run(
     timeout: int,
 ) -> None:
     try:
+        _preload_numpy()
         try:
             res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)
         except BaseException as exc:

@@ -13,6 +13,7 @@ MATH_PROMPT_TEMPLATE = (
     "{Question}\n\n"
     "Please think step by step, and put your final answer within \\boxed{{}}."
 )
+DATASET_NAME = "RLLab/eval-set"
 
 
 def load_aime_samples(task_dir: Path, data_file: str) -> list[Sample]:
@@ -49,7 +50,7 @@ def build_aime_prompt(sample: Sample) -> str:
     return MATH_PROMPT_TEMPLATE.format(Question=str(sample.data["problem"]))
 
 
-def prepare_aime_dataset(dataset_name: str, task_dir: Path) -> None:
+def prepare_aime_dataset(subset: str, task_dir: Path) -> None:
     try:
         from datasets import load_dataset
     except ImportError as exc:  # pragma: no cover
@@ -60,17 +61,22 @@ def prepare_aime_dataset(dataset_name: str, task_dir: Path) -> None:
     out_path = task_dir / "data" / "eval.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    year = {"aime24": 2024, "aime25": 2025}[subset]
+    suffix = MATH_PROMPT_TEMPLATE.format(Question="")
     rows: list[dict[str, object]] = []
-    for row in load_dataset(dataset_name, "default", split="train"):
+    for idx, row in enumerate(load_dataset(DATASET_NAME, subset, split="train")):
+        problem = str(row["problem"]).strip()
+        if not problem.endswith(suffix):
+            raise ValueError(f"{subset} row {idx}: missing eval-set math prompt suffix")
         rows.append(
             {
-                "id": str(row["id"]),
-                "problem": str(row["problem"]),
-                "answer": str(row["answer"]),
-                "solution": str(row.get("solution", "")),
-                "url": row.get("url"),
-                "year": row.get("year"),
-                "source": dataset_name,
+                "id": f"{subset}_{idx}",
+                # build_aime_prompt adds this instruction exactly once.
+                "problem": problem[:-len(suffix)],
+                "answer": str(row["solution"]),
+                "year": year,
+                "source": DATASET_NAME,
+                "subset": subset,
             }
         )
 
