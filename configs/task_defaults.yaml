@@ -160,7 +160,7 @@ mmlu-pro:
   # Official local runner settings; AetherEval still uses a zero-shot prompt, so the
   # runner's few-shot stop "Question:" is deliberately not carried over.
   n: 1
-  max_new_tokens: 2048
+  max_new_tokens: 8192
   temperature: 0.0
   top_p: 1.0
 
@@ -175,7 +175,7 @@ olympiad-bench:
 researchqa:
   # Local candidate ceiling; official compute_coverage.py fixes judge temperature at zero.
   n: 1
-  max_new_tokens: 2048
+  max_new_tokens: 8192
   temperature: 0.0
   top_p: 1.0
   metrics:
@@ -230,6 +230,6 @@ writingbench:
 zebralogic:
   # ZeroEval README profile; its current generic CLI uses a different token ceiling.
   n: 1
-  max_new_tokens: 4096
+  max_new_tokens: 8192
   temperature: 0.0
   top_p: 1.0
