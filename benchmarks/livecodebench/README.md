@@ -51,12 +51,12 @@ Why `v6`:
 ## Prompting
 
 - Implemented in `task.py`
-- Uses a chat prompt with:
+- Uses the official generic chat prompt verbatim
+  ([prompts/code_generation.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/prompts/code_generation.py),
+  `get_generic_question_template_answer` with `SYSTEM_MESSAGE_GENERIC`):
   - system: expert Python programmer instruction
-  - user sections: `### Question`, `### Format`, `### Answer`
-  - includes a concise-reasoning instruction, adapted from OLMES's thinker
-    prompting without requiring `<think>` tags; this differs from the official
-    LiveCodeBench generic prompt
+  - user sections: `### Question`, `### Format: ...` (one line), `### Answer`
+  - no additional reasoning instruction (OLMES's olmo3 variant adds one; we do not)
   - with starter code: complete the provided stub
   - without starter code: read from `stdin`, write to `stdout`
 - The framework applies the model chat template.

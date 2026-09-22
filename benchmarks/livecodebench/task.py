@@ -175,27 +175,18 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
 
 def build_prompt(sample: Sample) -> list[dict[str, str]]:
+    # Official generic chat template: lcb_runner/prompts/code_generation.py
+    # (get_generic_question_template_answer), with SYSTEM_MESSAGE_GENERIC.
     question = str(sample.data["question_content"])
     starter_code = str(sample.data.get("starter_code", ""))
-
-    format_instruction: str
+    user_prompt = f"### Question:\n{question}\n\n"
     if starter_code:
-        format_instruction = (
-            f"{_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n```python\n{starter_code}\n```"
-        )
+        user_prompt += f"### Format: {_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
+        user_prompt += f"```python\n{starter_code}\n```\n\n"
     else:
-        format_instruction = (
-            f"{_FORMATTING_WITHOUT_STARTER_CODE}\n```python\n# YOUR CODE HERE\n```"
-        )
-
-    user_prompt = (
-        f"### Question:\n{question}\n\n"
-        "### Format:\n"
-        "Provide CONCISE reasoning on how to arrive at the answer.\n"
-        f"{format_instruction}\n\n"
-        "### Answer: (use the provided format with backticks)\n\n"
-    )
-
+        user_prompt += f"### Format: {_FORMATTING_WITHOUT_STARTER_CODE}\n"
+        user_prompt += "```python\n# YOUR CODE HERE\n```\n\n"
+    user_prompt += "### Answer: (use the provided format with backticks)\n\n"
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

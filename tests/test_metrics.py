@@ -1096,15 +1096,11 @@ class MetricsTests(unittest.TestCase):
             prompt_no_starter[0]["content"],
         )
         self.assertIn("### Question:", prompt_no_starter[1]["content"])
-        self.assertIn("### Format:", prompt_no_starter[1]["content"])
         self.assertIn(
-            "Provide CONCISE reasoning on how to arrive at the answer.",
+            "### Format: Read the inputs from stdin solve the problem",
             prompt_no_starter[1]["content"],
         )
-        self.assertIn(
-            "Read the inputs from stdin solve the problem",
-            prompt_no_starter[1]["content"],
-        )
+        self.assertNotIn("reasoning", prompt_no_starter[1]["content"])
         self.assertIn(
             "### Answer: (use the provided format with backticks)",
             prompt_no_starter[1]["content"],
@@ -1124,11 +1120,7 @@ class MetricsTests(unittest.TestCase):
         )
         prompt_with_starter = bundle.task_module.build_prompt(sample_with_starter)
         self.assertIn(
-            "You will use the following starter code to write the solution to the problem",
-            prompt_with_starter[1]["content"],
-        )
-        self.assertIn(
-            "Provide CONCISE reasoning on how to arrive at the answer.",
+            "### Format: You will use the following starter code to write the solution",
             prompt_with_starter[1]["content"],
         )
         self.assertIn("class Solution:", prompt_with_starter[1]["content"])
