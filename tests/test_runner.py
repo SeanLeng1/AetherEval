@@ -5,13 +5,22 @@ from pathlib import Path
 from unittest import mock
 
 from aethereval.core.runner import (
+    _aggregate_repeat_token_usage,
+    _generation_token_meta,
     _merge_generation_config,
+    _records_to_generation_outputs,
     _score_generation_outputs,
+    _token_usage_summary,
     inspect_prompts,
     run_evaluation,
 )
 from aethereval.core.task_register import _load_module_from_path
-from aethereval.core.types import GenerationInput, GenerationOutput, Sample
+from aethereval.core.types import (
+    GenerationInput,
+    GenerationOutput,
+    GenerationRecord,
+    Sample,
+)
 
 
 class FakeTokenizer:
@@ -61,6 +70,7 @@ class FakeBackend:
                         "response_token_counts": [
                             len(answer.split()) for _ in range(item.num_generations)
                         ],
+                        "finish_reasons": ["stop"] * item.num_generations,
                     },
                 )
             )
@@ -89,6 +99,68 @@ class ShortGenerationBackend(FakeBackend):
                 generations=[],
             )
         ]
+
+
+class TokenUsageTests(unittest.TestCase):
+    def test_completed_length_uses_end_reason_not_score_or_length(self) -> None:
+        rows = [
+            ("stop", 4, None),
+            ("length", 100, None),
+            ("abort", 30, None),
+            (None, 9, None),
+            ("stop", 10, None),
+            ("stop", 20, "backend error"),
+        ]
+        records = [
+            GenerationRecord(
+                sample_id="a",
+                gen_idx=index,
+                prompt="q",
+                generation="answer",
+                score=0.0,
+                is_pass=False,
+                error=error,
+                meta={
+                    "prompt_token_count": 2,
+                    "response_token_count": count,
+                    **({"finish_reason": reason} if reason is not None else {}),
+                },
+            )
+            for index, (reason, count, error) in enumerate(rows)
+        ]
+        usage = _token_usage_summary(records)
+        self.assertEqual(usage["avg_response_tokens"], 173 / 6)
+        self.assertEqual(usage["avg_completed_response_tokens"], 7)
+        self.assertEqual(usage["num_completed_responses"], 2)
+        self.assertEqual(usage["total_completed_response_tokens"], 14)
+        for subset in ([], records[1:4], records[-1:]):
+            self.assertIsNone(
+                _token_usage_summary(subset)["avg_completed_response_tokens"]
+            )
+        outputs, _ = _records_to_generation_outputs(records)
+        for index, (reason, _, _) in enumerate(rows):
+            self.assertEqual(
+                _generation_token_meta(outputs[0], index)["finish_reason"], reason
+            )
+
+    def test_completed_length_pools_repeats_by_completed_count(self) -> None:
+        repeats = [
+            {"total_records": 2, "token_usage": {
+                "num_completed_responses": 1,
+                "total_completed_response_tokens": 20,
+            }},
+            {"total_records": 2, "token_usage": {
+                "num_completed_responses": 2,
+                "total_completed_response_tokens": 10,
+            }},
+            {"total_records": 2, "token_usage": {}},
+        ]
+        usage = _aggregate_repeat_token_usage(repeats)
+        self.assertEqual(usage["avg_completed_response_tokens"], 10)
+        self.assertEqual(usage["num_completed_responses"], 3)
+        self.assertIsNone(
+            _aggregate_repeat_token_usage([])["avg_completed_response_tokens"]
+        )
 
 
 class GenerationConfigTests(unittest.TestCase):
@@ -813,6 +885,9 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(first_row["prompt"][0]["role"], "user")
             self.assertIn("Question: 2 + 2", first_row["prompt"][0]["content"])
             self.assertEqual(first_row["meta"]["response_token_count"], 1)
+            self.assertEqual(first_row["meta"]["finish_reason"], "stop")
+            self.assertEqual(summary["metrics"]["avg_completed_response_tokens"], 1.0)
+            self.assertEqual(summary["token_usage"]["num_completed_responses"], 2)
 
             resume_backend = NeverCalledBackend()
             original_predictions = predictions_path.read_text()
@@ -828,6 +903,7 @@ class RunnerTests(unittest.TestCase):
             summary2 = second["results"]["toy"]
             self.assertEqual(summary2["new_records"], 0)
             self.assertEqual(summary2["existing_records"], 2)
+            self.assertEqual(summary2["metrics"]["avg_completed_response_tokens"], 1.0)
             self.assertEqual(predictions_path.read_text(), original_predictions)
 
     def test_batch_metric_hook_scores_generations(self) -> None:
@@ -960,6 +1036,8 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary["n"], 1)
             self.assertEqual(summary["num_repeats"], 2)
             self.assertEqual(summary["total_records"], 4)
+            self.assertEqual(summary["token_usage"]["num_completed_responses"], 4)
+            self.assertEqual(summary["metrics"]["avg_completed_response_tokens"], 1.0)
             self.assertEqual(summary["metrics"]["accuracy_first"], 1.0)
             self.assertEqual(summary["primary_score"], 1.0)
             self.assertFalse((task_dir / "predictions.jsonl").exists())

@@ -664,7 +664,8 @@ outputs/<run_id>/
 - `parsed`
 - `gold`
 - `error`
-- `meta` (always includes `prompt_token_count` and `response_token_count`)
+- `meta` (includes `prompt_token_count`, `response_token_count`, and
+  `finish_reason` for new generations)
 
 `summary.json` is task-level aggregate, and includes:
 
@@ -672,6 +673,15 @@ outputs/<run_id>/
 - `metrics.avg_prompt_tokens` / `metrics.avg_response_tokens`: model-tokenized
   average prompt and response lengths
 - `token_usage`: average and total prompt/response token counts
+- `metrics.avg_completed_response_tokens`: mean response tokens only for normal
+  EOS / configured-stop endings (`finish_reason="stop"`), regardless of correctness.
+  Length-truncated, aborted, and unknown-ending responses are excluded from this
+  additional length metric only; scores and the original length metric are unchanged.
+  `token_usage` also records this mean, `num_completed_responses`, and
+  `total_completed_response_tokens`. With no known completed responses, the mean
+  is `null` in `token_usage` and omitted from `metrics`, not reported as zero.
+  Legacy predictions without finish reasons remain unknown on resume/rescoring.
+  Repeats pool completed responses; the run summary retains task-macro averaging.
 - `primary_metric`: report metric name
 - `primary_score`: report metric value
 

@@ -272,6 +272,13 @@ def _ensure_output_token_metadata(
         output=output,
         tokenizer_getter=tokenizer_getter,
     )
+    reasons = output.meta.setdefault("finish_reasons", [None] * len(output.generations))
+    if (
+        not isinstance(reasons, list)
+        or len(reasons) != len(output.generations)
+        or any(reason is not None and not isinstance(reason, str) for reason in reasons)
+    ):
+        raise ValueError(f"Invalid finish_reasons for sample {output.sample_id}")
 
 
 def _ensure_outputs_token_metadata(
@@ -287,7 +294,7 @@ def _ensure_outputs_token_metadata(
         )
 
 
-def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str, int]:
+def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str, Any]:
     prompt_count = output.meta["prompt_token_count"]
     response_counts = output.meta["response_token_counts"]
     if not _is_token_count(prompt_count):
@@ -301,12 +308,14 @@ def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str
     return {
         "prompt_token_count": int(prompt_count),
         "response_token_count": int(response_counts[local_idx]),
+        "finish_reason": output.meta["finish_reasons"][local_idx],
     }
 
 
 def _token_usage_summary(records: list[GenerationRecord]) -> dict[str, Any]:
     prompt_counts: list[int] = []
     response_counts: list[int] = []
+    completed_counts: list[int] = []
     for record in records:
         prompt_count = record.meta.get("prompt_token_count")
         response_count = record.meta.get("response_token_count")
@@ -316,20 +325,21 @@ def _token_usage_summary(records: list[GenerationRecord]) -> dict[str, Any]:
             )
         prompt_counts.append(int(prompt_count))
         response_counts.append(int(response_count))
-
-    if not records:
-        return {
-            "avg_prompt_tokens": None,
-            "avg_response_tokens": None,
-            "total_prompt_tokens": 0,
-            "total_response_tokens": 0,
-        }
+        # Both backends report EOS / configured stop as "stop". Do not infer
+        # completion for legacy records from their length or their score.
+        if record.meta.get("finish_reason") == "stop" and not record.error:
+            completed_counts.append(int(response_count))
 
     return {
-        "avg_prompt_tokens": sum(prompt_counts) / len(prompt_counts),
-        "avg_response_tokens": sum(response_counts) / len(response_counts),
+        "avg_prompt_tokens": sum(prompt_counts) / len(records) if records else None,
+        "avg_response_tokens": sum(response_counts) / len(records) if records else None,
         "total_prompt_tokens": sum(prompt_counts),
         "total_response_tokens": sum(response_counts),
+        "avg_completed_response_tokens": (
+            sum(completed_counts) / len(completed_counts) if completed_counts else None
+        ),
+        "num_completed_responses": len(completed_counts),
+        "total_completed_response_tokens": sum(completed_counts),
     }
 
 
@@ -593,6 +603,9 @@ def _records_to_generation_outputs(
         ]
         if any(count is not None for count in response_counts):
             meta["response_token_counts"] = response_counts
+        meta["finish_reasons"] = [
+            record.meta.get("finish_reason") for record in sample_records
+        ]
         outputs.append(
             GenerationOutput(
                 sample_id=sample_id,
@@ -1028,6 +1041,10 @@ def _run_single_task(
         metrics["avg_prompt_tokens"] = token_usage["avg_prompt_tokens"]
     if not generate_only and token_usage["avg_response_tokens"] is not None:
         metrics["avg_response_tokens"] = token_usage["avg_response_tokens"]
+    if not generate_only and token_usage["avg_completed_response_tokens"] is not None:
+        metrics["avg_completed_response_tokens"] = token_usage[
+            "avg_completed_response_tokens"
+        ]
 
     summary = {
         "task": task_name,
@@ -1137,6 +1154,14 @@ def _aggregate_repeat_token_usage(
     total_records = sum(
         int(summary.get("total_records", 0)) for summary in repeat_summaries
     )
+    completed_tokens = sum(
+        int(summary.get("token_usage", {}).get("total_completed_response_tokens", 0))
+        for summary in repeat_summaries
+    )
+    completed_count = sum(
+        int(summary.get("token_usage", {}).get("num_completed_responses", 0))
+        for summary in repeat_summaries
+    )
     return {
         "avg_prompt_tokens": (
             total_prompt_tokens / total_records if total_records else None
@@ -1146,6 +1171,11 @@ def _aggregate_repeat_token_usage(
         ),
         "total_prompt_tokens": total_prompt_tokens,
         "total_response_tokens": total_response_tokens,
+        "avg_completed_response_tokens": (
+            completed_tokens / completed_count if completed_count else None
+        ),
+        "num_completed_responses": completed_count,
+        "total_completed_response_tokens": completed_tokens,
     }
 
 
@@ -1251,6 +1281,12 @@ def _run_repeated_task(
         for warning in summary.get("warnings", [])
     ]
     warnings = list(dict.fromkeys(warning_values))
+    token_usage = _aggregate_repeat_token_usage(repeat_summaries)
+    if not generate_only and token_usage["avg_completed_response_tokens"] is not None:
+        # Repeats can have different completion rates: pool completed responses.
+        metrics["avg_completed_response_tokens"] = token_usage[
+            "avg_completed_response_tokens"
+        ]
     summary = {
         "task": task_name,
         "phase": phase_name(generate_only=generate_only, eval_only=eval_only),
@@ -1279,7 +1315,7 @@ def _run_repeated_task(
             bool(item.get("evaluation_complete")) for item in repeat_summaries
         ),
         "metrics": metrics,
-        "token_usage": _aggregate_repeat_token_usage(repeat_summaries),
+        "token_usage": token_usage,
         "primary_metric": primary_metric,
         "primary_score": primary_score,
         "warnings": warnings,

@@ -623,12 +623,20 @@ class SGLangBackendTests(unittest.TestCase):
             return_value=[
                 {
                     "text": "a",
-                    "meta_info": {"prompt_tokens": 17, "completion_tokens": 1},
+                    "meta_info": {
+                        "prompt_tokens": 17,
+                        "completion_tokens": 1,
+                        "finish_reason": {"type": "stop", "matched": 2},
+                    },
                 },
                 [
                     {
                         "text": "b",
-                        "meta_info": {"prompt_tokens": 17, "completion_tokens": 1},
+                        "meta_info": {
+                            "prompt_tokens": 17,
+                            "completion_tokens": 1,
+                            "finish_reason": "length",
+                        },
                     }
                 ],
             ]
@@ -646,6 +654,7 @@ class SGLangBackendTests(unittest.TestCase):
             {"_show_progress": False},
         )
         self.assertEqual(outputs[0]["meta"]["prompt_token_count"], 17)
+        self.assertEqual(outputs[0]["meta"]["finish_reasons"], ["stop", "length"])
         tokenizer.encode.assert_not_called()
         self.assertEqual(
             sglang_backend._extract_prompt_token_count(
@@ -666,6 +675,7 @@ class SGLangBackendTests(unittest.TestCase):
             {"_show_progress": False},
         )
         self.assertEqual(outputs[0]["meta"]["prompt_token_count"], 3)
+        self.assertEqual(outputs[0]["meta"]["finish_reasons"], [None] * 4)
         tokenizer.encode.assert_called_once()
 
     def test_server_cli_args_preserve_model_options(self) -> None:

@@ -92,6 +92,10 @@ def _run_generation(
                         getattr(output, "prompt_token_ids", None)
                     ),
                     "response_token_counts": response_token_counts,
+                    "finish_reasons": [
+                        getattr(candidate, "finish_reason", None)
+                        for candidate in output.outputs
+                    ],
                 },
             }
 

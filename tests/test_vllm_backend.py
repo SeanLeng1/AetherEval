@@ -34,7 +34,9 @@ class _LLM:
         return [
             SimpleNamespace(
                 prompt_token_ids=[1, 2],
-                outputs=[SimpleNamespace(text="answer", token_ids=[3])],
+                outputs=[
+                    SimpleNamespace(text="answer", token_ids=[3], finish_reason="stop")
+                ],
             )
         ]
 
@@ -52,7 +54,7 @@ class VLLMBackendTests(unittest.TestCase):
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
                 llm = _LLM()
-                vllm_backend._run_generation(
+                outputs = vllm_backend._run_generation(
                     llm=llm,
                     tokenizer=_Tokenizer(),
                     vllm_module=_VLLMModule,
@@ -68,6 +70,7 @@ class VLLMBackendTests(unittest.TestCase):
                 )
 
                 self.assertEqual(llm.prompts, [f"thinking={enabled}:hello"])
+                self.assertEqual(outputs[0]["meta"]["finish_reasons"], ["stop"])
                 self.assertNotIn(
                     "enable_thinking",
                     llm.sampling_params.kwargs,

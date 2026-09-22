@@ -203,6 +203,26 @@ def _extract_prompt_token_count(output: Any) -> int | None:
     return None
 
 
+def _extract_finish_reason(output: Any) -> str | None:
+    if isinstance(output, list) and len(output) == 1:
+        return _extract_finish_reason(output[0])
+    if not isinstance(output, dict):
+        return None
+    meta_info = output.get("meta_info")
+    reason = meta_info.get("finish_reason") if isinstance(meta_info, dict) else None
+    if reason is None:
+        reason = output.get("finish_reason")
+    if isinstance(reason, dict):
+        reason = reason.get("type")
+    if isinstance(reason, str):
+        return reason
+    for key in ("choices", "outputs"):
+        nested = output.get(key)
+        if isinstance(nested, list) and nested:
+            return _extract_finish_reason(nested[0])
+    return None
+
+
 def _run_service_generation(
     service: SGLangService,
     tokenizer: Any,
@@ -239,6 +259,7 @@ def _run_service_generation(
     )
     grouped_texts: dict[int, list[str]] = defaultdict(list)
     grouped_token_counts: dict[int, list[int | None]] = defaultdict(list)
+    grouped_finish_reasons: dict[int, list[str | None]] = defaultdict(list)
     for item, request, output in zip(
         request_items, request_payloads, raw_outputs, strict=True
     ):
@@ -254,6 +275,7 @@ def _run_service_generation(
             prefilled_reasoning_prefix(request["text"]) + _extract_text(output)
         )
         grouped_token_counts[item_idx].append(_extract_output_token_count(output))
+        grouped_finish_reasons[item_idx].append(_extract_finish_reason(output))
 
     results: list[dict[str, Any]] = []
     for item in payloads:
@@ -274,6 +296,7 @@ def _run_service_generation(
                 "meta": {
                     "prompt_token_count": prompt_token_counts[item_idx],
                     "response_token_counts": grouped_token_counts[item_idx],
+                    "finish_reasons": grouped_finish_reasons[item_idx],
                 },
             }
         )
