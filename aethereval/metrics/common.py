@@ -33,26 +33,16 @@ def to_records(raw_records: list[dict[str, Any]]) -> list[GenerationRecord]:
 
 
 _THINK_END = "</think>"
-_THINK_START = "<think>"
 
 
 def strip_reasoning(text: str) -> str:
-    """Return the final answer of a reasoning model, without its thinking block.
+    """Keep text after the last closing tag; without one, preserve the response.
 
-    Official graders (Arena-Hard, Creative Writing, IFBench, HealthBench samplers)
-    score only the text after the reasoning. A thinking block is recognised only at
-    the very start of the generation (backends restore a `<think>` that the chat
-    template pre-filled into the prompt) and ends at the first `</think>`, so a
-    literal "</think>" inside the answer, e.g. in code, is left alone. An opened but
-    unterminated block means the budget ran out while thinking: nothing to score.
+    No opening tag is required. This is a text-level convention, so even a
+    literal closing tag in generated code is treated as an answer boundary.
     """
-    stripped = text.lstrip()
-    if not stripped.startswith(_THINK_START):
-        return text
-    end = stripped.find(_THINK_END, len(_THINK_START))
-    if end < 0:
-        return ""
-    return stripped[end + len(_THINK_END) :].lstrip()
+    _, marker, answer = text.rpartition(_THINK_END)
+    return answer.lstrip() if marker else text
 
 
 def mean(values: list[float]) -> float:
@@ -273,7 +263,14 @@ def _choice_patterns(valid_letters: str) -> list[tuple[str, re.Pattern[str]]]:
         rf"(?:{choice_re}|(?<![A-Za-z0-9])[{char_class}]"
         rf"(?=[ \t]*(?:[.)\],:;!?]|\r?$)))"
     )
+    boxed_re = rf"\\boxed\{{\s*(?P<choice>[{char_class}])\s*\}}"
     return [
+        # A terminal box is an explicit final answer, even when an earlier
+        # sentence named another option. Allow trailing LaTeX/Markdown delimiters.
+        (
+            "boxed_final",
+            re.compile(boxed_re + r"[\s.$\\\[\]{}*]*\Z", re.IGNORECASE),
+        ),
         (
             "final_answer",
             re.compile(
@@ -284,6 +281,8 @@ def _choice_patterns(valid_letters: str) -> list[tuple[str, re.Pattern[str]]]:
             "answer_colon",
             re.compile(rf"(?im)\banswer\s*[:：]\s*(?P<choice>{answer_re})"),
         ),
+        # Non-terminal boxes must not override a later explicit final answer.
+        ("boxed", re.compile(boxed_re, re.IGNORECASE)),
         (
             "answer_anchor",
             re.compile(rf"(?i)\banswer\b.{{0,80}}?(?P<choice>{choice_re})"),

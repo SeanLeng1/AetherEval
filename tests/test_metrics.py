@@ -318,6 +318,21 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result4["score"], 0.0)
         self.assertIsNone(result4["parsed"]["prediction"])
 
+        # Actual base-model responses often put a boxed option on the next line.
+        for text in (
+            "Final Answer:\n\\[\n\\boxed{C}\n\\]",
+            r"Answer: B. On reconsideration, \boxed{C}.",
+            r"Intermediate option: \boxed{A}. Final Answer: C.",
+            r"\boxed{C} is the selected option.",
+        ):
+            with self.subTest(text=text):
+                result = metrics_module.score_generation(sample, text)
+                self.assertEqual(result["parsed"]["prediction"], "C")
+                self.assertEqual(result["score"], 1.0)
+        self.assertEqual(metrics_module.score_generation(sample, r"\boxed{B}")["score"], 0.0)
+        for text in (r"\boxed{E}", r"\boxed{A+B}"):
+            self.assertIsNone(metrics_module.score_generation(sample, text)["parsed"]["prediction"])
+
     def test_gpqa_score_generation_parsing_long_output_window(self) -> None:
         bundle = load_task("gpqa_diamond")
         metrics_module = bundle.metrics_module
@@ -1447,13 +1462,17 @@ class MetricsTests(unittest.TestCase):
         from aethereval.metrics.common import strip_reasoning
 
         self.assertEqual(strip_reasoning("<think>draft</think>\n\nfinal"), "final")
+        self.assertEqual(strip_reasoning("draft</think>\n\nfinal"), "final")
+        self.assertEqual(strip_reasoning("draft</think>more draft</think>\nfinal"), "final")
         self.assertEqual(strip_reasoning("plain answer"), "plain answer")
-        # Budget exhausted while thinking: there is no answer to grade.
-        self.assertEqual(strip_reasoning("<think>so it is \\boxed{204}"), "")
-        # A literal closing tag in the answer is not a reasoning boundary.
+        # Without a closing tag the response is preserved, even with an opener.
+        unclosed = "<think>so it is \\boxed{204}"
+        self.assertEqual(strip_reasoning(unclosed), unclosed)
+        self.assertEqual(strip_reasoning("<think>so it is \\boxed{204}</think>"), "")
+        # Closing tags are always boundaries, including literal tags in code.
         code = 'def f():\n    return "</think>"'
-        self.assertEqual(strip_reasoning(code), code)
-        self.assertEqual(strip_reasoning("<think>x</think>" + code), code)
+        self.assertEqual(strip_reasoning(code), '"')
+        self.assertEqual(strip_reasoning("<think>x</think>" + code), '"')
         # Templates that pre-fill the opener: the backend restores it.
         self.assertEqual(prefilled_reasoning_prefix("<|im_start|>assistant\n<think>\n"), "<think>\n")
         self.assertEqual(prefilled_reasoning_prefix("<|im_start|>assistant\n"), "")

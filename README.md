@@ -535,11 +535,11 @@ It is applied locally while rendering the chat template, is shown by `--inspect`
 and is saved in each task's `run_config.json` so `--eval-only` inherits the mode
 used by `--generate-only`.
 
-Before scoring or judging, the runner removes the reasoning block: graders see only
-the text after the last `</think>`, and an opened but unterminated `<think>` (budget
-exhausted while thinking) is scored as an empty answer. `predictions.jsonl` keeps the
-raw generation. This mirrors Arena-Hard (`end_think_token`), Creative Writing,
-IFBench and the HealthBench reasoning samplers, which all grade the final answer only.
+Before scoring or judging, graders see the text after the last `</think>`, regardless
+of whether `<think>` is present. Without a closing tag, the response is preserved;
+an empty suffix after a closing tag remains empty. This text-level rule also treats
+literal closing tags in generated code as boundaries. `predictions.jsonl` keeps the
+raw generation.
 
 This switch does not automatically change temperature, top-p, output length, or
 any task-specific generation defaults. Set those separately only when the target
