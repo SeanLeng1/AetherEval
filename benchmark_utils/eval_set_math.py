@@ -81,11 +81,17 @@ def prepare_eval_set_math_dataset(subset: str, task_dir: Path) -> None:
     print(f"wrote {out_path} rows={len(rows)}")
 
 
-def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
+def score_generation(
+    sample: Sample,
+    generation: str,
+    *,
+    keep_units_fallback: bool = False,
+) -> dict[str, Any]:
     score, pred_values, gold_values, warning = score_with_math_verify(
         str(sample.gold),
         generation,
         boxed_gold=False,
+        keep_units_fallback=keep_units_fallback,
     )
 
     parsed = {

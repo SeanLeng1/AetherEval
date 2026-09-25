@@ -1368,6 +1368,36 @@ class MetricsTests(unittest.TestCase):
             with self.subTest(generation=generation):
                 self.assertEqual(metrics_module.score_generation(sample, generation)["score"], 0.0)
 
+    def test_humaneval_plus_skips_non_python_fences(self) -> None:
+        metrics_module = load_task("humaneval_plus").metrics_module
+        sample = Sample(
+            id="HumanEval/test_fences",
+            gold=None,
+            meta={"entry_point": "add"},
+            data={
+                "task_id": "HumanEval/test_fences",
+                "prompt": 'def add(a, b):\n    """Return sum of two numbers."""\n',
+                "entry_point": "add",
+                "canonical_solution": "    return a + b\n",
+                "base_input": [[1, 2], [3, 4]],
+                "plus_input": [[-1, 1], [10, -3]],
+                "atol": 0.0,
+            },
+        )
+        full = "def add(a, b):\n    return a + b\n"
+        cases = {
+            "text, then python": f"```text\nplan: add\n```\n```python\n{full}```",
+            "bash, then python": f"```bash\npip install nothing\n```\n```python\n{full}```",
+            "text, then bare": f"```text\nplan: add\n```\n```\n{full}```",
+            "py tag": f"```py\n{full}```",
+        }
+        for name, generation in cases.items():
+            with self.subTest(name):
+                self.assertEqual(metrics_module.score_generation(sample, generation)["score"], 1.0)
+
+        wrong = "```text\nplan: add\n```\n```python\ndef add(a, b):\n    return 0\n```"
+        self.assertEqual(metrics_module.score_generation(sample, wrong)["score"], 0.0)
+
     def test_humaneval_plus_aggregate(self) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module
@@ -1508,6 +1538,23 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(
             score_with_math_verify(tiny, "\\boxed{5.76 \\times 10^{-19}}")[0], 0.0
         )
+
+    def test_minerva_keeps_trailing_variables_in_predictions(self) -> None:
+        from benchmark_utils.eval_set_math import score_generation as score_shared
+
+        score_minerva = load_task("minerva").metrics_module.score_generation
+        cases = [
+            ("so $\\boxed{\\frac{37 m}{4}}$.", "\\boxed{\\frac{37}{4} m}", "\\boxed{\\frac{37}{4}}"),
+            ("so $\\boxed{\\frac{t}{4} \\sin (2 t)}$.", "\\boxed{\\frac{t}{4}\\sin 2t}", "\\boxed{\\frac{t}{2}\\sin 2t}"),
+            ("so $\\boxed{\\frac{c}{\\sqrt{2}}}$.", "\\boxed{\\frac{\\sqrt{2}}{2}c}", "\\boxed{\\frac{c}{2}}"),
+        ]
+        for gold, right, wrong in cases:
+            sample = Sample(id="minervamath_test", gold=gold, data={})
+            with self.subTest(gold=gold):
+                self.assertEqual(score_minerva(sample, right)["score"], 1.0)
+                self.assertEqual(score_minerva(sample, wrong)["score"], 0.0)
+                # The fallback is Minerva-only; other eval-set tasks keep stock math-verify.
+                self.assertEqual(score_shared(sample, right)["score"], 0.0)
 
     def test_bbh_extraction_edge_cases(self) -> None:
         extract = load_task("bbh").metrics_module._extract_answer

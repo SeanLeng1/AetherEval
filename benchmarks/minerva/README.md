@@ -32,6 +32,10 @@ directly as the gold answer for `math-verify`.
 
 - Primary metric: `accuracy`
 - Scored with shared `math-verify` logic from `benchmark_utils/`
+- A prediction that does not match is parsed again with unit stripping disabled, as
+  Qwen2.5-Math's `skip_unit` does for Minerva. Otherwise trailing variables are dropped
+  as units (`\frac{37}{4} m` becomes `37/4`, `\frac{t}{4}\sin 2t` loses its last `t`).
+  Other math tasks keep stock `math-verify`.
 - Reports `accuracy@n`, `pass@k`, and parsed-rate metrics when multiple generations are used
 
 ### Rows that `math-verify` cannot grade symbolically

@@ -1,5 +1,6 @@
 import math
 import re
+from dataclasses import replace
 from functools import lru_cache
 from typing import Any
 
@@ -67,16 +68,33 @@ def _math_verify_tools() -> tuple[
     return TimeoutException, parse, verify, latex_target, expr_target, pred_target
 
 
+@lru_cache(maxsize=1)
+def _keep_units_pred_target() -> tuple[Any, ...]:
+    # math-verify strips trailing unit words, including single letters such as
+    # t, m and c, so "\frac{37}{4} m" parses as 37/4. Qwen2.5-Math likewise skips
+    # unit removal for Minerva; every other normalization stays at its default.
+    from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
+
+    normalization = replace(LatexExtractionConfig().normalization_config, units=False)
+    return (
+        ExprExtractionConfig(),
+        LatexExtractionConfig(normalization_config=normalization),
+    )
+
+
 def score_with_math_verify(
     gold: str,
     prediction: str,
     *,
     boxed_gold: bool = False,
+    keep_units_fallback: bool = False,
 ) -> tuple[float, list[str], list[str], str | None]:
     """Score a generated math answer using math-verify.
 
     `boxed_gold=True` preserves AIME-style datasets where `gold` is just the final
     answer. Eval-set math tasks pass full `solution` text directly.
+    `keep_units_fallback=True` re-parses an unmatched prediction without unit
+    stripping, so symbolic answers ending in a variable can still match.
     """
     # Normalize dataset gold notation during preparation, not arbitrary model text.
     gold_text = str(gold).strip()
@@ -119,5 +137,25 @@ def score_with_math_verify(
             gold_strings,
             f"verify error: {type(exc).__name__}: {exc}",
         )
+
+    if not matched and keep_units_fallback:
+        try:
+            unit_predictions = parse(prediction, _keep_units_pred_target())
+            matched = any(
+                _verify_pair(verify, g, p)
+                for g in extracted_golds
+                for p in unit_predictions
+            )
+        except timeout_error:
+            return 0.0, pred_strings, gold_strings, "unit fallback timeout"
+        except Exception as exc:  # noqa: BLE001
+            return (
+                0.0,
+                pred_strings,
+                gold_strings,
+                f"unit fallback error: {type(exc).__name__}: {exc}",
+            )
+        if matched:
+            pred_strings = [str(x) for x in unit_predictions]
 
     return (1.0 if matched else 0.0), pred_strings, gold_strings, None

@@ -19,7 +19,10 @@ from aethereval.core.types import GenerationRecord, Sample
 PRIMARY_METRIC = "pass@1"
 SCORING_PROTOCOL = "evalplus-26d6d00"
 
-_CODE_BLOCK_RE = re.compile(r"```(?:python)?[ \t]*\n(.*?)```", re.IGNORECASE | re.DOTALL)
+# Match fences with any info string so a ```text or ```bash block is consumed whole;
+# otherwise its closing fence would open the next block and misalign every later pair.
+_CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+_PYTHON_FENCE_TAGS = {"", "python", "py", "python3"}
 
 
 def _empty_aggregate_result() -> dict[str, float]:
@@ -56,7 +59,11 @@ def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
     prompt = str(sample.data["prompt"])
     entry_point = str(sample.data["entry_point"])
     joiner = "" if prompt.endswith("\n") else "\n"
-    blocks = _CODE_BLOCK_RE.findall(generation)
+    blocks = [
+        body
+        for tag, body in _CODE_BLOCK_RE.findall(generation)
+        if tag.strip().lower() in _PYTHON_FENCE_TAGS
+    ]
 
     # Assemble declarations across blocks before the official sanitizer resolves
     # dependencies. Top-level usage examples are not part of the implementation.
