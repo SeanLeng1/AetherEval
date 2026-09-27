@@ -881,6 +881,26 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             self.assertIn("final answer", prompt)
             self.assertNotIn("secret plan", prompt)
 
+    def test_researchqa_reports_answer_words_without_reasoning_or_citations(self) -> None:
+        research = load_task("researchqa", BENCHMARKS)
+        generations = [
+            "<think>\nplan the answer\n</think>\n\nParis is the capital [1].\n\n[1] Paper A (2020)",
+            "One two three four\n\nfive six",
+            "Judge failed but was answered.",
+        ]
+        records = [
+            {"generation": text, "score": 0.5, "meta": {"judge_failed": index == 2}}
+            for index, text in enumerate(generations)
+        ]
+        metrics = research.metrics_module.aggregate(
+            [{"meta": {"general_domain": "d", "field": "f"}, "records": records}],
+            {"bootstrap_resamples": 10},
+        )
+        # 5, 6 and 5 words; the failed record still has an answer length.
+        self.assertAlmostEqual(metrics["answer_words"], 16 / 3)
+        self.assertEqual(metrics["answer_words_median"], 5.0)
+        self.assertEqual(metrics["scored_samples"], 2.0)
+
     def test_researchqa_keeps_failed_constrained_request_error_as_raw(self) -> None:
         research = load_task("researchqa", BENCHMARKS)
         sample = next(

@@ -166,6 +166,7 @@ canonical metric set is:
 | `multi_turn_format` | ToolRL format rate for Multi-Turn outputs |
 | `overall_acc` | official V3 `Overall Acc` |
 | `overall_format` | unweighted mean of the three section format rates |
+| `avg_output_tokens` | mean generated tokens per entry, summed over every model call of a multi-turn entry (BFCL `output_token_count`) |
 
 Official V3 defines `Overall Acc` as the unweighted mean of Live Overall, Non-Live
 Overall, and Multi-Turn Overall accuracy. The exposed `non_live_acc` is the paper-style

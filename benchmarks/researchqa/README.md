@@ -24,6 +24,9 @@ Native implementation of rubric coverage on the 3,750-item ResearchQA test set.
 - `max_new_tokens=8192` is a local output ceiling; the submission instructions fix the word range but no API max-token value.
 - Judge: `gpt-4.1-mini`, temperature `0`, rubric batches of 8, three format attempts.
 - Primary metric: normalized rubric `coverage` on a 0–100 scale.
+- `answer_words` / `answer_words_median`: words in each answer after any reasoning and
+  before the `[1] Title (Year)` bibliography, i.e. the text the 240-260 word
+  instruction refers to. Coverage is recall-based, so report length next to it.
 
 The candidate prompt is the one in the official "Leaderboard Submission" document
 linked from the upstream README. It carries no date-cutoff sentence. An item whose

@@ -1,10 +1,13 @@
 import math
 import random
+import re
+import statistics
 from collections import defaultdict
 from typing import Any
 
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
+from aethereval.metrics.common import strip_reasoning
 from benchmark_utils.llm_judge import (
     chat_completion,
     judge_generations,
@@ -19,6 +22,7 @@ PRESERVE_EXISTING_SCORES_ON_RESUME = True
 DEFAULT_JUDGE_MODEL = str(
     resolve_task_default_metrics("researchqa").get("judge_model", "gpt-4.1-mini")
 )
+_CITATION_LIST = re.compile(r"\n\s*\n(?=\s*\[1\])")
 LABELS = {
     "Not at all": 1,
     "Barely": 2,
@@ -129,9 +133,13 @@ def aggregate(
     values: list[float] = []
     domains: dict[str, list[float]] = defaultdict(list)
     fields: dict[str, list[float]] = defaultdict(list)
+    # Coverage is recall-based, so answer length is reported next to it.
+    answer_words: list[int] = []
     judge_failures = 0
     for sample in sample_results:
         for record in sample.get("records", []):
+            if "generation" in record:
+                answer_words.append(_answer_words(str(record["generation"])))
             if record.get("meta", {}).get("judge_failed"):
                 judge_failures += 1
                 continue
@@ -150,6 +158,8 @@ def aggregate(
         * 100.0,
         "scored_samples": float(len(values)),
         "judge_failures": float(judge_failures),
+        "answer_words": _mean([float(n) for n in answer_words]),
+        "answer_words_median": float(statistics.median(answer_words)) if answer_words else 0.0,
     }
     for name, scores in sorted(domains.items()):
         metrics[f"domain/{name}"] = _mean(scores) * 100.0
@@ -191,6 +201,13 @@ def _build_judge_prompt(response: str, questions: list[str]) -> str:
         f"Response: {response}\n"
         "Questions:\n" + "\n".join(questions) + "\n\nOutput:"
     )
+
+
+def _answer_words(generation: str) -> int:
+    # Words the prompt's 240-260 target refers to: the answer after any reasoning,
+    # without the "[1] Title (Year)" bibliography that follows a blank line.
+    answer = _CITATION_LIST.split(strip_reasoning(generation), maxsplit=1)[0]
+    return len(answer.split())
 
 
 def _mean(values: list[float]) -> float:

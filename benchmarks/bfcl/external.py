@@ -429,6 +429,32 @@ def _model_result_files(
     ]
 
 
+def _sum_nested(value: Any) -> float:
+    if isinstance(value, (list, tuple)):
+        return sum(_sum_nested(item) for item in value)
+    return float(value)
+
+
+def output_token_metrics(
+    result_dir: Path,
+    model: str,
+    categories: set[str] | None = None,
+) -> dict[str, float]:
+    """Mean generated tokens per BFCL entry, summed over every model call it made.
+
+    BFCL records output_token_count as a number for single-turn entries and as
+    per-turn, per-step lists for multi-turn entries.
+    """
+    totals: list[float] = []
+    for path in _model_result_files(result_dir, model, categories):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                count = json.loads(line).get("output_token_count")
+                if count is not None:
+                    totals.append(_sum_nested(count))
+    return {"avg_output_tokens": sum(totals) / len(totals)} if totals else {}
+
+
 def _replace_file_bytes(path: Path, data: bytes) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_bytes(data)
@@ -569,6 +595,8 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
             raise RuntimeError(
                 f"BFCL evaluation repeat {run_index + 1} produced no metrics."
             )
+        if spec.run_evaluation:
+            metrics.update(output_token_metrics(result_dir, spec.model, categories))
         repeat_metrics.append(metrics)
         stats = write_predictions_jsonl(
             out=out,

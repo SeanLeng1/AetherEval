@@ -425,5 +425,28 @@ class BfclHandlerTests(unittest.TestCase):
         self.assertEqual(session.post.call_count, 2)
 
 
+class BFCLOutputTokenTests(unittest.TestCase):
+    def test_output_tokens_sum_every_model_call_of_an_entry(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from benchmarks.bfcl.external import output_token_metrics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "org_model" / "non_live"
+            model_dir.mkdir(parents=True)
+            rows = [
+                {"id": "simple_0", "output_token_count": 10},
+                {"id": "multi_turn_base_0", "output_token_count": [[3, 4], [5]]},
+                {"id": "irrelevance_0"},
+            ]
+            (model_dir / "BFCL_v3_simple_result.json").write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                output_token_metrics(Path(tmp), "org/model"), {"avg_output_tokens": 11.0}
+            )
+            self.assertEqual(output_token_metrics(Path(tmp), "other/model"), {})
+
 if __name__ == "__main__":
     unittest.main()
