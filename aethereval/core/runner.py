@@ -49,6 +49,7 @@ from aethereval.backends import (
     count_text_tokens,
     create_backend,
     load_chat_tokenizer,
+    normalize_backend_name,
     render_prompt_with_chat_template,
 )
 from benchmark_utils.local_judge import OfflineJudgeClient
@@ -1458,6 +1459,34 @@ class _LazyJudgeClient:
                 client.close()
 
 
+class _LazyBackend:
+    """Generation backend that starts its inference servers on first use.
+
+    A phase whose tasks are all generated already (a resumed or repeated run) never
+    loads the candidate model. Private attributes such as _tokenizer do not start it.
+    """
+
+    def __init__(self, backend_name: str, **kwargs: Any) -> None:
+        self.name = normalize_backend_name(backend_name)
+        self._kwargs = dict(backend_name=backend_name, **kwargs)
+        self._backend: GenerationBackend | None = None
+
+    def __getattr__(self, attr: str) -> Any:
+        if attr.startswith("_"):
+            backend = self.__dict__.get("_backend")
+            if backend is None:
+                raise AttributeError(attr)
+            return getattr(backend, attr)
+        if self._backend is None:
+            self._backend = create_backend(**self._kwargs)
+        return getattr(self._backend, attr)
+
+    def close(self) -> None:
+        backend, self._backend = self._backend, None
+        if backend is not None:
+            backend.close()
+
+
 def run_evaluation(
     *,
     model: str,
@@ -1617,8 +1646,8 @@ def _run_phase(
 
     created_backend = False
     if backend is None and not eval_only:
-        backend = create_backend(
-            backend_name=backend_name,
+        backend = _LazyBackend(
+            backend_name,
             model=model,
             dp_size=dp_size,
             tensor_parallel_size=tensor_parallel_size,

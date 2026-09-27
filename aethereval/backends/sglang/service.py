@@ -6,6 +6,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -145,6 +146,19 @@ def _port_is_available(port: int) -> bool:
     return True
 
 
+def _stop_after_failed_start(
+    process: subprocess.Popen[Any], ports: tuple[int, ...]
+) -> bool:
+    """Stop a server that did not start; True if another process holds one of its ports.
+
+    The process group is stopped before the ports are probed, so ports still held by
+    the server's own children are not mistaken for a collision.
+    """
+    exited = process.poll() is not None
+    _stop_process(process)
+    return exited and not all(_port_is_available(port) for port in ports)
+
+
 def _guarded_command(command: list[str]) -> list[str]:
     return [
         sys.executable,
@@ -236,7 +250,8 @@ def _wait_until_ready(
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
             raise RuntimeError(
-                f"SGLang process exited during startup with code {process.returncode}"
+                f"SGLang process exited during startup with code {process.returncode}; "
+                "see its log above"
             )
         try:
             _check_url(f"{base_url}{endpoint}", timeout=2.0)
@@ -266,7 +281,8 @@ def _wait_for_port(
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
             raise RuntimeError(
-                f"SGLang process exited during startup with code {process.returncode}"
+                f"SGLang process exited during startup with code {process.returncode}; "
+                "see its log above"
             )
         try:
             with socket.create_connection((host, port), timeout=2.0):
@@ -327,14 +343,28 @@ def _stop_process(process: subprocess.Popen[Any] | None) -> None:
 
 
 class _SGLangServerActor:
+    """One SGLang server. start() and close() run on separate actor threads, so
+    close() can stop a server that is still loading (for example on Ctrl-C)."""
+
     def __init__(
         self,
         model: str,
         tensor_parallel_size: int,
         model_kwargs: dict[str, Any],
     ) -> None:
+        self._model = model
+        self._tensor_parallel_size = tensor_parallel_size
+        self._model_kwargs = model_kwargs
+        self._process: subprocess.Popen[Any] | None = None
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def start(self) -> str:
         import ray
 
+        model = self._model
+        tensor_parallel_size = self._tensor_parallel_size
+        model_kwargs = self._model_kwargs
         _check_stack_versions()
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
@@ -355,7 +385,6 @@ class _SGLangServerActor:
             config = AutoConfig.from_pretrained(model, trust_remote_code=model_kwargs.get("trust_remote_code", False))
             env.update(reward_model_environment(config.architectures))
         node_ip = ray.util.get_node_ip_address()
-        self._process: subprocess.Popen[Any] | None = None
 
         for attempt in range(_PORT_START_ATTEMPTS):
             # In SMG gRPC mode SGLang derives grpc_port = port + 10000 and
@@ -386,37 +415,41 @@ class _SGLangServerActor:
                     *_server_cli_args(model_kwargs),
                 ]
             )
-            process = subprocess.Popen(
-                command,
-                env=env,
-                start_new_session=True,
-            )
-            self._process = process
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("SGLang worker was closed during startup")
+                process = subprocess.Popen(
+                    command,
+                    env=env,
+                    start_new_session=True,
+                )
+                self._process = process
             try:
                 _wait_for_port("127.0.0.1", port, process)
             except BaseException:
-                port_collision = process.poll() is not None and (
-                    not _port_is_available(port) or not _port_is_available(nccl_port)
-                )
-                _stop_process(process)
-                self._process = None
-                if port_collision and attempt + 1 < _PORT_START_ATTEMPTS:
+                with self._lock:
+                    self._process = None
+                port_collision = _stop_after_failed_start(process, (port, nccl_port))
+                if (
+                    port_collision
+                    and not self._closed
+                    and attempt + 1 < _PORT_START_ATTEMPTS
+                ):
                     print(
-                        "[aethereval] SGLang worker startup port collision; "
-                        f"retrying with a new port ({attempt + 2}/"
+                        f"[aethereval] SGLang worker port {port} or {nccl_port} is held "
+                        f"by another process; retrying with new ports ({attempt + 2}/"
                         f"{_PORT_START_ATTEMPTS})"
                     )
                     continue
                 raise
-            self._url = f"{'http' if embedding else 'grpc'}://{node_ip}:{port}"
-            break
-
-    def url(self) -> str:
-        return self._url
+            return f"{'http' if embedding else 'grpc'}://{node_ip}:{port}"
+        raise AssertionError("unreachable")
 
     def close(self) -> None:
-        _stop_process(self._process)
-        self._process = None
+        with self._lock:
+            self._closed = True
+            process, self._process = self._process, None
+        _stop_process(process)
 
 
 class SGLangService:
@@ -484,9 +517,11 @@ class SGLangService:
         self._router: subprocess.Popen[Any] | None = None
         self._closed = False
 
+        # A second actor thread lets close() stop a server whose start() is still loading.
         actor_cls = ray.remote(
             num_cpus=1,
             num_gpus=int(tensor_parallel_size),
+            max_concurrency=2,
         )(_SGLangServerActor)
         try:
             self._workers = [
@@ -497,7 +532,7 @@ class SGLangService:
                 )
                 for _ in range(self.dp_size)
             ]
-            worker_urls = [str(url) for url in ray.get([worker.url.remote() for worker in self._workers])]
+            worker_urls = [str(url) for url in ray.get([worker.start.remote() for worker in self._workers])]
             if self.model_kwargs.get("is_embedding"):
                 self._endpoints = worker_urls
             else:
@@ -554,17 +589,15 @@ class SGLangService:
                     tokenizer_model=self.model,
                 )
             except BaseException:
-                port_collision = process.poll() is not None and (
-                    not _port_is_available(port)
-                    or not _port_is_available(prometheus_port)
+                port_collision = _stop_after_failed_start(
+                    process, (port, prometheus_port)
                 )
-                _stop_process(process)
                 self._router = None
                 if port_collision and attempt + 1 < _PORT_START_ATTEMPTS:
                     print(
-                        "[aethereval] SMG router startup port collision; "
-                        f"retrying with new ports ({attempt + 2}/"
-                        f"{_PORT_START_ATTEMPTS})"
+                        f"[aethereval] SMG router port {port} or {prometheus_port} is "
+                        "held by another process; retrying with new ports "
+                        f"({attempt + 2}/{_PORT_START_ATTEMPTS})"
                     )
                     continue
                 raise

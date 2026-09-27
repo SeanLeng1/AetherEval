@@ -137,11 +137,11 @@ class SGLangBackendTests(unittest.TestCase):
             ),
             mock.patch.object(sglang_service, "_check_stack_versions") as check_versions,
         ):
-            actor = sglang_service._SGLangServerActor(
+            url = sglang_service._SGLangServerActor(
                 "test/model",
                 1,
                 {},
-            )
+            ).start()
 
         command = popen.call_args.args[0]
         env = popen.call_args.kwargs["env"]
@@ -176,7 +176,7 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(env["TORCH_CPP_LOG_LEVEL"], "ERROR")
         self.assertEqual(env["TQDM_DISABLE"], "1")
         self.assertNotIn("SGLANG_EXTERNAL_MODEL_PACKAGE", env)
-        self.assertEqual(actor.url(), "grpc://10.0.0.1:55000")
+        self.assertEqual(url, "grpc://10.0.0.1:55000")
         wait_for_port.assert_called_once_with(
             "127.0.0.1",
             55000,
@@ -184,6 +184,10 @@ class SGLangBackendTests(unittest.TestCase):
         )
 
     def test_reward_adapter_is_selected_by_architecture_not_context_length(self) -> None:
+        # Import before patch.dict(sys.modules), which would unload transformers and
+        # numpy after the first subtest; numpy cannot be imported twice per process.
+        import transformers  # noqa: F401
+
         for architecture in ("GPT2ForSequenceClassification", "GPT2LMHeadModel", "Qwen2ForSequenceClassification"):
             with (
                 self.subTest(architecture=architecture),
@@ -194,12 +198,12 @@ class SGLangBackendTests(unittest.TestCase):
                 mock.patch("transformers.AutoConfig.from_pretrained", return_value=SimpleNamespace(architectures=[architecture])),
                 mock.patch.object(sglang_service, "_check_stack_versions"),
             ):
-                actor = sglang_service._SGLangServerActor("local-model", 1, {"is_embedding": True, "context_length": 1025})
+                url = sglang_service._SGLangServerActor("local-model", 1, {"is_embedding": True, "context_length": 1025}).start()
                 env = popen.call_args.kwargs["env"]
                 command = popen.call_args.args[0]
                 self.assertNotIn("--smg-grpc-mode", command)
                 self.assertNotIn("--grpc-mode", command)
-                self.assertEqual(actor.url(), "http://127.0.0.1:50000")
+                self.assertEqual(url, "http://127.0.0.1:50000")
                 self.assertEqual("SGLANG_EXTERNAL_MODEL_PACKAGE" in env, architecture == "GPT2ForSequenceClassification")
 
     def test_server_actor_retries_startup_port_collision(self) -> None:
@@ -234,15 +238,91 @@ class SGLangBackendTests(unittest.TestCase):
             mock.patch.object(sglang_service, "_stop_process") as stop_process,
             mock.patch.object(sglang_service, "_check_stack_versions"),
         ):
-            actor = sglang_service._SGLangServerActor(
+            url = sglang_service._SGLangServerActor(
                 "test/model",
                 1,
                 {},
-            )
+            ).start()
 
         self.assertEqual(popen.call_count, 2)
         stop_process.assert_called_once_with(first_process)
-        self.assertEqual(actor.url(), "grpc://10.0.0.1:45302")
+        self.assertEqual(url, "grpc://10.0.0.1:45302")
+
+    def test_server_actor_close_stops_a_server_that_is_still_starting(self) -> None:
+        process = mock.Mock()
+        stopped = threading.Event()
+        process.poll.side_effect = lambda: -15 if stopped.is_set() else None
+
+        def wait_for_port(host, port, proc):  # noqa: ANN001
+            # Like _wait_for_port: poll until the process exits.
+            deadline = time.monotonic() + 5
+            while proc.poll() is None:
+                if time.monotonic() > deadline:
+                    raise AssertionError("close() did not stop the starting server")
+                time.sleep(0.01)
+            raise RuntimeError("SGLang process exited during startup")
+
+        fake_ray = SimpleNamespace(util=SimpleNamespace(get_node_ip_address=lambda: "10.0.0.1"))
+        with (
+            mock.patch.dict(sys.modules, {"ray": fake_ray}),
+            mock.patch.object(sglang_service.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(sglang_service, "_wait_for_port", side_effect=wait_for_port),
+            mock.patch.object(sglang_service, "_free_port", side_effect=[55000, 56000]),
+            mock.patch.object(sglang_service, "_port_is_available", return_value=False),
+            mock.patch.object(
+                sglang_service, "_stop_process", side_effect=lambda proc: proc and stopped.set()
+            ) as stop_process,
+            mock.patch.object(sglang_service, "_check_stack_versions"),
+        ):
+            actor = sglang_service._SGLangServerActor("test/model", 1, {})
+            errors = []
+
+            def start():
+                try:
+                    actor.start()
+                except RuntimeError as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=start)
+            thread.start()
+            while not popen.called:
+                time.sleep(0.01)
+            actor.close()
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        # Closed during startup: no retry, even though the ports look taken.
+        self.assertEqual(popen.call_count, 1)
+        stop_process.assert_any_call(process)
+
+    def test_failed_start_stops_the_server_before_probing_ports(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = 1
+        calls = []
+        with (
+            mock.patch.object(
+                sglang_service, "_stop_process", side_effect=lambda proc: calls.append("stop")
+            ),
+            mock.patch.object(
+                sglang_service,
+                "_port_is_available",
+                side_effect=lambda port: calls.append(port) or True,
+            ),
+        ):
+            collision = sglang_service._stop_after_failed_start(process, (45301, 39089))
+        # Ports freed once the server's own process group is gone: not a collision,
+        # so a worker that died for another reason (e.g. missing weights) is not retried.
+        self.assertFalse(collision)
+        self.assertEqual(calls, ["stop", 45301, 39089])
+
+        process.poll.return_value = None
+        with (
+            mock.patch.object(sglang_service, "_stop_process"),
+            mock.patch.object(sglang_service, "_port_is_available", return_value=False),
+        ):
+            # A server stopped by a timeout or Ctrl-C did not exit on its own.
+            self.assertFalse(sglang_service._stop_after_failed_start(process, (45301,)))
 
     def test_grpc_worker_disables_http_sidecar_hook(self) -> None:
         calls = []

@@ -1695,5 +1695,38 @@ class RunnerTests(unittest.TestCase):
             )
 
 
+    def test_generation_backend_starts_only_when_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            kwargs = dict(
+                model="fake-model",
+                tasks="toy",
+                output_dir=Path(tmp) / "outputs",
+                run_id="lazy",
+                benchmarks_dir=root,
+            )
+            backend = FakeBackend()
+            backend.close = mock.Mock()
+            with mock.patch(
+                "aethereval.core.runner.create_backend", return_value=backend
+            ) as create_backend:
+                first = run_evaluation(**kwargs)
+            create_backend.assert_called_once()
+            self.assertEqual(backend.calls, 1)
+            backend.close.assert_called_once()
+
+            # Nothing is pending on a rerun, so the candidate model is never loaded.
+            with mock.patch(
+                "aethereval.core.runner.create_backend",
+                side_effect=AssertionError("nothing to generate"),
+            ) as create_backend:
+                rerun = run_evaluation(**kwargs)
+            create_backend.assert_not_called()
+            self.assertEqual(rerun["backend"], first["backend"])
+            self.assertEqual(
+                rerun["results"]["toy"]["metrics"], first["results"]["toy"]["metrics"]
+            )
+
 if __name__ == "__main__":
     unittest.main()

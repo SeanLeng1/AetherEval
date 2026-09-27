@@ -201,7 +201,9 @@ Outputs are grouped by model. Without `--run-id`, results are written to
 `<output-dir>/<model-name-or-model-suffix>/<run-id>/`.
 
 If you rerun with the same `run_id`, AetherEval resumes by default from existing `predictions.jsonl`.
-Use `--overwrite` to discard old predictions and rerun from scratch.
+The candidate backend starts only when a task has generations left, so a rerun of a
+finished run never loads the model. Use `--overwrite` to discard old predictions and
+rerun from scratch.
 
 A normal native-task run uses the same two phases automatically: it completes
 generation for every selected native task, unloads the candidate backend, and

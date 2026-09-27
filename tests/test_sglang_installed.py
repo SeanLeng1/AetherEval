@@ -30,7 +30,7 @@ def _worker_argv(model_kwargs):  # noqa: ANN001
         mock.patch.object(sglang_service, "_free_port", side_effect=[45000, 46000]),
         mock.patch("transformers.AutoConfig.from_pretrained", return_value=config),
     ):
-        sglang_service._SGLangServerActor("test/model", 2, model_kwargs)
+        sglang_service._SGLangServerActor("test/model", 2, model_kwargs).start()
     command = popen.call_args.args[0]
     return command[command.index("serve") + 1 :]
 
