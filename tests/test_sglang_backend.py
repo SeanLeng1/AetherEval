@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
-import struct
+import importlib.metadata as importlib_metadata
+import inspect
 import sys
 import tempfile
 import threading
@@ -134,6 +135,7 @@ class SGLangBackendTests(unittest.TestCase):
                 "_free_port",
                 side_effect=[55000, 56000],
             ),
+            mock.patch.object(sglang_service, "_check_stack_versions") as check_versions,
         ):
             actor = sglang_service._SGLangServerActor(
                 "test/model",
@@ -163,12 +165,14 @@ class SGLangBackendTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--port") + 1], "55000")
         self.assertEqual(command[command.index("--nccl-port") + 1], "56000")
-        self.assertIn("--grpc-mode", command)
+        self.assertIn("--smg-grpc-mode", command)
+        self.assertNotIn("--grpc-mode", command)
         self.assertNotIn("--grpc-http-sidecar-port", command)
         self.assertEqual(command[command.index("--log-level") + 1], "error")
         self.assertNotIn("--log-level-http", command)
         self.assertNotIn("SGLANG_GRPC_PORT", env)
-        self.assertEqual(env["SGLANG_GRPC_TOKEN_ID_ARRAY"], "1")
+        self.assertNotIn("SGLANG_GRPC_TOKEN_ID_ARRAY", env)
+        check_versions.assert_called_once_with()
         self.assertEqual(env["TORCH_CPP_LOG_LEVEL"], "ERROR")
         self.assertEqual(env["TQDM_DISABLE"], "1")
         self.assertNotIn("SGLANG_EXTERNAL_MODEL_PACKAGE", env)
@@ -188,9 +192,14 @@ class SGLangBackendTests(unittest.TestCase):
                 mock.patch.object(sglang_service, "_wait_for_port"),
                 mock.patch.object(sglang_service, "_free_port", side_effect=[50000, 51000]),
                 mock.patch("transformers.AutoConfig.from_pretrained", return_value=SimpleNamespace(architectures=[architecture])),
+                mock.patch.object(sglang_service, "_check_stack_versions"),
             ):
-                sglang_service._SGLangServerActor("local-model", 1, {"is_embedding": True, "context_length": 1025})
+                actor = sglang_service._SGLangServerActor("local-model", 1, {"is_embedding": True, "context_length": 1025})
                 env = popen.call_args.kwargs["env"]
+                command = popen.call_args.args[0]
+                self.assertNotIn("--smg-grpc-mode", command)
+                self.assertNotIn("--grpc-mode", command)
+                self.assertEqual(actor.url(), "http://127.0.0.1:50000")
                 self.assertEqual("SGLANG_EXTERNAL_MODEL_PACKAGE" in env, architecture == "GPT2ForSequenceClassification")
 
     def test_server_actor_retries_startup_port_collision(self) -> None:
@@ -223,6 +232,7 @@ class SGLangBackendTests(unittest.TestCase):
                 side_effect=[True, False],
             ),
             mock.patch.object(sglang_service, "_stop_process") as stop_process,
+            mock.patch.object(sglang_service, "_check_stack_versions"),
         ):
             actor = sglang_service._SGLangServerActor(
                 "test/model",
@@ -234,136 +244,86 @@ class SGLangBackendTests(unittest.TestCase):
         stop_process.assert_called_once_with(first_process)
         self.assertEqual(actor.url(), "grpc://10.0.0.1:45302")
 
-    def test_grpc_worker_adds_new_optional_request_fields(self) -> None:
-        class Request:
-            def __init__(
-                self,
-                *,
-                rid=None,  # noqa: ANN001
-                input_embeds,  # noqa: ANN001
-                token_type_ids,  # noqa: ANN001
-            ) -> None:
-                self.rid = rid
-                self.input_embeds = input_embeds
-                self.token_type_ids = token_type_ids
-
-        servicer = SimpleNamespace(TokenizedGenerateReqInput=Request)
-
-        fields = grpc_worker.patch_smg_request_type(servicer)
-        request = servicer.TokenizedGenerateReqInput(rid="request-1")
-
-        self.assertEqual(fields, ("input_embeds", "token_type_ids"))
-        self.assertEqual(request.rid, "request-1")
-        self.assertIsNone(request.input_embeds)
-        self.assertIsNone(request.token_type_ids)
-
-    def test_grpc_worker_maps_legacy_embedding_image_field(self) -> None:
-        class Request:
-            def __init__(self, *, rid=None, mm_inputs) -> None:  # noqa: ANN001
-                self.rid = rid
-                self.mm_inputs = mm_inputs
-
-        servicer = SimpleNamespace(TokenizedEmbeddingReqInput=Request)
-
-        patched = grpc_worker.patch_smg_embedding_request_type(servicer)
-        request = servicer.TokenizedEmbeddingReqInput(
-            rid="request-1",
-            image_inputs="wrapped-images",
-        )
-
-        self.assertTrue(patched)
-        self.assertEqual(request.rid, "request-1")
-        self.assertEqual(request.mm_inputs, "wrapped-images")
-
-    def test_grpc_worker_wraps_scalar_classifier_output(self) -> None:
-        class Manager:
-            async def _handle_embedding_output(self, batch_out):  # noqa: ANN001
-                self.embeddings = batch_out.embeddings
-
-        request_manager = SimpleNamespace(GrpcRequestManager=Manager)
-        grpc_worker.patch_smg_scalar_embedding_output(request_manager)
-        manager = Manager()
-        batch_out = SimpleNamespace(embeddings=[-1.25, [0.5, 0.75]])
-
-        asyncio.run(manager._handle_embedding_output(batch_out))
-
-        self.assertEqual(manager.embeddings, [[-1.25], [0.5, 0.75]])
-
-    def test_grpc_worker_serializes_router_embedding_schema(self) -> None:
-        response = SimpleNamespace(
-            embedding=[-1.25],
-            prompt_tokens=7,
-            embedding_dim=1,
-        )
-
-        encoded = grpc_worker._serialize_router_embed_response(response)
-
-        complete = b"\x0a\x04" + struct.pack("<f", -1.25)
-        complete += b"\x10\x07\x20\x01"
-        self.assertEqual(encoded, b"\x12\x0a" + complete)
-
-    def test_grpc_worker_patches_generated_embedding_serializer(self) -> None:
-        calls = {}
-
-        def method_factory(
-            behavior,  # noqa: ANN001
-            request_deserializer=None,  # noqa: ANN001
-            response_serializer=None,  # noqa: ANN001
-        ):
-            calls["serializer"] = response_serializer
-            return behavior
-
-        grpc_module = SimpleNamespace(unary_unary_rpc_method_handler=method_factory)
-
-        class Servicer:
-            def Embed(self):  # noqa: N802
-                return None
-
-        pb2_grpc = SimpleNamespace(
-            sglang__scheduler__pb2=SimpleNamespace(
-                EmbedResponse=SimpleNamespace(
-                    DESCRIPTOR=SimpleNamespace(fields=[SimpleNamespace(number=4)])
-                )
-            ),
-            grpc=grpc_module,
-        )
-
-        def add_servicer(servicer, server):  # noqa: ANN001
-            del server
-            pb2_grpc.grpc.unary_unary_rpc_method_handler(
-                servicer.Embed,
-                response_serializer=lambda response: response,
-            )
-
-        pb2_grpc.add_SglangSchedulerServicer_to_server = add_servicer
-
-        patched = grpc_worker.patch_smg_embedding_response_wire(pb2_grpc)
-        pb2_grpc.add_SglangSchedulerServicer_to_server(Servicer(), object())
-
-        self.assertTrue(patched)
-        self.assertIs(
-            calls["serializer"],
-            grpc_worker._serialize_router_embed_response,
-        )
-        self.assertIs(
-            grpc_module.unary_unary_rpc_method_handler,
-            method_factory,
-        )
-
     def test_grpc_worker_disables_http_sidecar_hook(self) -> None:
         calls = []
 
-        async def serve_grpc(server_args, model_info=None, **kwargs):  # noqa: ANN001
+        async def serve_grpc(server_args, model_info=None, on_request_manager_ready=None, **kwargs):  # noqa: ANN001
             calls.append((server_args, model_info, kwargs))
             return "done"
 
         server = SimpleNamespace(serve_grpc=serve_grpc)
         grpc_worker.disable_smg_http_sidecar(server)
 
+        # SGLang starts the HTTP sidecar only if this hook is in the signature.
+        self.assertEqual(
+            list(inspect.signature(server.serve_grpc).parameters),
+            ["server_args", "model_info"],
+        )
+
         result = asyncio.run(server.serve_grpc("args", "model-info"))
 
         self.assertEqual(result, "done")
         self.assertEqual(calls, [("args", "model-info", {})])
+
+    def test_gpt2_worker_info_rewrites_limits_and_rejects_changed_layout(self) -> None:
+        from aethereval.backends.sglang.models import gpt2_context
+
+        def worker(architecture):  # noqa: ANN001
+            config = SimpleNamespace(
+                hf_config=SimpleNamespace(architectures=[architecture]),
+                is_generation=False,
+                context_len=1024,
+            )
+            runner = SimpleNamespace(
+                req_to_token_pool=SimpleNamespace(max_context_len=4096),
+                effective_max_total_num_tokens=100000,
+            )
+            return SimpleNamespace(model_config=config, model_runner=runner, ps=SimpleNamespace(attn_dcp_size=1))
+
+        layout = (1, 2, 3, 4, 1023, 1018, 7, 8, 9, 10, 11, 12)
+        get_info = gpt2_context._worker_info(lambda self: layout)
+        self.assertEqual(get_info(worker("GPT2ForSequenceClassification")), (1, 2, 3, 4, 1024, 1024, 7, 8, 9, 10, 11, 12))
+        self.assertEqual(get_info(worker("Qwen2ForSequenceClassification")), layout)
+        for changed in (layout[:11], (*layout[:5], 1023, *layout[6:]), (*layout[:4], "1023", *layout[5:])):
+            with self.subTest(changed=changed), self.assertRaisesRegex(RuntimeError, "get_worker_info layout changed"):
+                gpt2_context._worker_info(lambda self, info=changed: info)(worker("GPT2ForSequenceClassification"))
+
+    def test_stack_version_floor(self) -> None:
+        def versions(installed):  # noqa: ANN001
+            def version(package):  # noqa: ANN001
+                if package not in installed:
+                    raise importlib_metadata.PackageNotFoundError(package)
+                return installed[package]
+
+            return mock.patch.object(importlib_metadata, "version", side_effect=version)
+
+        accepted = [
+            {"sglang": "0.5.20", "smg-grpc-servicer": "0.9.1"},
+            {"sglang": "0.5.18", "smg-grpc-servicer": "0.8.0"},
+            {"sglang": "0.5.18rc1", "smg-grpc-servicer": "0.13.0"},
+            {"sglang": "0.6.0+cu130", "smg-grpc-servicer": "1.0.0.dev3"},
+        ]
+        for installed in accepted:
+            with self.subTest(installed=installed), versions(installed):
+                self.assertEqual(sglang_service._check_stack_versions(), installed)
+
+        rejected = [
+            ({"sglang": "0.5.15", "smg-grpc-servicer": "0.9.1"}, ["sglang 0.5.15 is older than 0.5.18"]),
+            ({"sglang": "0.5.20", "smg-grpc-servicer": "0.7.0"}, ["smg-grpc-servicer 0.7.0 is older than 0.8.0"]),
+            (
+                {"sglang": "0.5"},
+                ["sglang 0.5 is older than 0.5.18", "smg-grpc-servicer is not installed"],
+            ),
+            ({"sglang": "main", "smg-grpc-servicer": "0.9.1"}, ["sglang has an unrecognized version 'main'"]),
+        ]
+        for installed, problems in rejected:
+            with self.subTest(installed=installed), versions(installed):
+                with self.assertRaises(RuntimeError) as caught:
+                    sglang_service._check_stack_versions()
+                message = str(caught.exception)
+                for problem in problems:
+                    self.assertIn(problem, message)
+                self.assertIn("sglang>=0.5.18 and smg-grpc-servicer>=0.8.0", message)
 
     def test_router_uses_requested_policy_and_log_level(self) -> None:
         service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
@@ -785,6 +745,7 @@ class SGLangBackendTests(unittest.TestCase):
                 "log_level": "info",
                 "router_log_level": "info",
                 "grpc_mode": False,
+                "smg_grpc_mode": True,
                 "nccl_port": 12345,
             }
         )

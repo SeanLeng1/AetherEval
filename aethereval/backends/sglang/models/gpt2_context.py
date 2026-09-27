@@ -43,6 +43,9 @@ def _worker_info(original):
         info = original(self)
         if not _is_gpt2(self.model_config):
             return info
+        # SGLang 0.5.18-0.5.20 return a 12-tuple with (max_req_len, max_req_len - 5) at 4-5.
+        if len(info) != 12 or not isinstance(info[4], int) or info[5] != info[4] - 5:
+            raise RuntimeError("SGLang get_worker_info layout changed; review the GPT-2 classification patch")
         runner = self.model_runner
         limit = min(
             self.model_config.context_len,

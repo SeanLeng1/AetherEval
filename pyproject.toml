@@ -29,9 +29,10 @@ dependencies = [
 
 [project.optional-dependencies]
 vllm = ["vllm"]
-sglang = ["sglang"]
-reward-model = ["sglang", "transformers"]
-all-backends = ["vllm", "sglang"]
+# Floors enforced at worker startup by aethereval.backends.sglang.service.
+sglang = ["sglang>=0.5.18", "smg-grpc-servicer>=0.8.0"]
+reward-model = ["sglang>=0.5.18", "smg-grpc-servicer>=0.8.0", "transformers"]
+all-backends = ["vllm", "sglang>=0.5.18", "smg-grpc-servicer>=0.8.0"]
 dynamic = ["datasets", "pyarrow", "huggingface_hub"]
 test = ["pytest>=8", "ruff"]
 

@@ -26,7 +26,12 @@ python -m pip install --no-deps -e .
 ```
 
 Outside that image, install the core dependencies with `python -m pip install -e .`
-and provision the chosen inference backend separately. HumanEval+ and MBPP+ also
+and provision the chosen inference backend separately. The SGLang backend (candidate
+generation, local judges and reward models) needs SGLang >= 0.5.18 and
+smg-grpc-servicer >= 0.8.0, plus sglang-router for the SMG router; the AetherRL
+sglang0.5.20 image ships SGLang 0.5.20, smg-grpc-servicer 0.9.1 and sglang-router
+0.3.2. Each worker checks the floor at startup and names any package that is
+missing or too old. HumanEval+ and MBPP+ also
 require the scoring-only EvalPlus installation (already included in AetherRL Docker):
 
 ```bash
@@ -756,6 +761,9 @@ python -m pytest -q        # or: python -m unittest discover -s tests
   skipped with a reason when it is missing. Set `AETHEREVAL_REQUIRE_ALL_TEST_DEPS=1`
   in the runtime image to make them fail instead.
 - Data tests read the benchmark files, so fetch the Git LFS data first.
+- `tests/test_sglang_installed.py` runs only where SGLang and smg-grpc-servicer are
+  installed. It needs no GPU and checks the SGLang/SMG internals the worker patches
+  and launch flags rely on, so run it in the image after every SGLang or SMG upgrade.
 - `tests/test_benchmark_fingerprints.py` pins each native task's row count and the
   hashes of its rendered prompts and of its golds and scoring metadata, and checks
   that math, MCQ and BBH golds pass their own scorers. After a deliberate data or

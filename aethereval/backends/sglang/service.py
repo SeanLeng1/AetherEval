@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -40,8 +41,19 @@ _CONTROLLED_SERVER_ARGS = {
     "nccl_port",
     "port",
     "router_log_level",
+    "smg_grpc_mode",
     "tensor_parallel_size",
     "tp_size",
+}
+# Floors of the SGLang stack the worker path is written against. No upper bounds,
+# so upgrades are not blocked. SGLang 0.5.18 added --smg-grpc-mode and the
+# get_worker_info layout that models/gpt2_context.py patches. smg-grpc-servicer
+# 0.8.0 is the first release that builds complete SGLang request objects and
+# always sends array("q") token ids; older releases need request shims that
+# AetherEval no longer carries.
+_MIN_STACK_VERSIONS = {
+    "sglang": "0.5.18",
+    "smg-grpc-servicer": "0.8.0",
 }
 _ROUTER_MODEL_ARGS = {
     "chat_template": "--chat-template",
@@ -78,6 +90,41 @@ def _resolve_harmony_encoding_dir() -> Path:
             f"expected {_HARMONY_ENCODING_SHA256}."
         )
     return encoding_dir.resolve()
+
+
+def _release(version: str) -> tuple[int, ...] | None:
+    # Compare release numbers only, so rc/dev/post/local builds of a supported
+    # release (e.g. 0.5.18rc1 or 0.5.20+cu130) are accepted.
+    match = re.match(r"\d+(?:\.\d+)*", version.strip())
+    return tuple(int(part) for part in match.group().split(".")) if match else None
+
+
+def _check_stack_versions() -> dict[str, str]:
+    """Fail at startup, listing every problem, on an SGLang stack below the floor."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    installed: dict[str, str] = {}
+    problems: list[str] = []
+    for package, minimum in _MIN_STACK_VERSIONS.items():
+        try:
+            installed[package] = version(package)
+        except PackageNotFoundError:
+            problems.append(f"{package} is not installed")
+            continue
+        release = _release(installed[package])
+        if release is None:
+            problems.append(f"{package} has an unrecognized version {installed[package]!r}")
+        elif release < _release(minimum):
+            problems.append(f"{package} {installed[package]} is older than {minimum}")
+    if problems:
+        floor = " and ".join(f"{package}>={minimum}" for package, minimum in _MIN_STACK_VERSIONS.items())
+        raise RuntimeError(
+            "Unsupported SGLang stack for the AetherEval SGLang backend: "
+            + "; ".join(problems)
+            + f". Install {floor} in the environment that runs the SGLang workers "
+            "(the AetherRL sglang0.5.20 image satisfies this)."
+        )
+    return installed
 
 
 def _free_port(max_port: int = 65535) -> int:
@@ -288,6 +335,7 @@ class _SGLangServerActor:
     ) -> None:
         import ray
 
+        _check_stack_versions()
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         warning_filters = env.get("PYTHONWARNINGS", "")
@@ -297,10 +345,6 @@ class _SGLangServerActor:
         )
         env["TORCH_CPP_LOG_LEVEL"] = "ERROR"
         env["TQDM_DISABLE"] = "1"
-        # smg-grpc-servicer defaults to the legacy list[int] scheduler
-        # contract. SGLang 0.5.15 uses array("q") for generated token IDs, so
-        # request IDs must use the same container type.
-        env["SGLANG_GRPC_TOKEN_ID_ARRAY"] = "1"
         # Embedding replicas serve HTTP: SMG's gRPC embedding pipeline takes text, scoring sends ids.
         embedding = bool(model_kwargs.get("is_embedding"))
         if embedding:
@@ -314,6 +358,8 @@ class _SGLangServerActor:
         self._process: subprocess.Popen[Any] | None = None
 
         for attempt in range(_PORT_START_ATTEMPTS):
+            # In SMG gRPC mode SGLang derives grpc_port = port + 10000 and
+            # rejects values above 65535, even though SMG serves on port.
             port = _free_port(max_port=55535)
             nccl_port = _free_port()
             while nccl_port == port:
@@ -334,7 +380,7 @@ class _SGLangServerActor:
                     str(port),
                     "--nccl-port",
                     str(nccl_port),
-                    *(() if embedding else ("--grpc-mode",)),
+                    *(() if embedding else ("--smg-grpc-mode",)),
                     "--log-level",
                     "error",
                     *_server_cli_args(model_kwargs),
