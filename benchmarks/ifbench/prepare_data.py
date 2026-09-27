@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from benchmark_utils.data import read_text
+from benchmark_utils.data import read_text, write_text
 
 
 SOURCE_DATA = (
@@ -13,7 +13,6 @@ SOURCE_DATA = (
 def main() -> None:
     task_dir = Path(__file__).resolve().parent
     out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: list[str] = []
     for line in read_text(SOURCE_DATA).split("\n"):
@@ -23,9 +22,7 @@ def main() -> None:
         json.loads(line)
         lines.append(line)
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for line in lines:
-            f.write(line + "\n")
+    write_text(out_path, "".join(line + "\n" for line in lines))
 
     print(f"wrote {out_path} rows={len(lines)}")
 

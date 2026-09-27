@@ -7,10 +7,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
-    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
-    local_constraint_body,
-    parallel_map,
+    judge_generations,
+    judge_with_format_retries,
     resolve_judge_settings,
 )
 
@@ -61,90 +60,62 @@ def score_generations_batch(
     options = metric_options or {}
     settings = resolve_judge_settings(options, default_model=DEFAULT_JUDGE_MODEL)
     repeats = int(options.get("judge_repeats", 3))
-    jobs: list[tuple[int, int, int, str]] = []
-    layouts: list[int] = []
-    for sample_idx, (sample, output) in enumerate(
-        zip(samples, generation_outputs, strict=True)
-    ):
-        if sample.id != output.sample_id:
-            raise ValueError("LLMEval-Med sample/output mismatch")
-        prompt = _judge_prompt(sample, "")
-        for gen_idx, generation in enumerate(output.generations):
-            rendered = prompt.replace("<<Response>>", generation)
-            for repeat_idx in range(repeats):
-                jobs.append((sample_idx, gen_idx, repeat_idx, rendered))
-        layouts.append(len(output.generations))
 
-    def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
-        _, _, _, prompt = job
-        last = ""
-        messages = [
-            {"role": "system", "content": SYSTEM_MESSAGE},
-            {"role": "user", "content": prompt},
-        ]
-        for attempt in range(NORMAL_FORMAT_ATTEMPTS):
-            last = chat_completion(
-                settings,
-                messages,
-            )
-            match = re.search(r"\[(\d+)\]", last)
-            if match and 0 <= int(match.group(1)) <= 5:
-                return {
-                    "score": int(match.group(1)),
-                    "raw": last,
-                    "format_attempts": attempt + 1,
-                }
+    def make_jobs(
+        sample: Sample, output: GenerationOutput, generation: str
+    ) -> list[str]:
+        del output
+        return [_judge_prompt(sample, "").replace("<<Response>>", generation)] * repeats
 
-        constraint = local_constraint_body(settings, json_schema=GRADE_SCHEMA)
-        if constraint is not None:
-            try:
-                last = chat_completion(
-                    settings,
-                    messages,
-                    extra_body=constraint,
-                )
-                match = re.search(r"\[(\d+)\]", last)
-                if match and 0 <= int(match.group(1)) <= 5:
-                    return {
-                        "score": int(match.group(1)),
-                        "raw": last,
-                        "format_attempts": NORMAL_FORMAT_ATTEMPTS + 1,
-                    }
-            except (RuntimeError, ValueError):
-                pass
+    def judge(prompt: str) -> dict[str, Any]:
+        score, last, attempts = judge_with_format_retries(
+            settings,
+            [
+                {"role": "system", "content": SYSTEM_MESSAGE},
+                {"role": "user", "content": prompt},
+            ],
+            _parse_score,
+            json_schema=GRADE_SCHEMA,
+            complete=chat_completion,
+        )
+        if score is not None:
+            return {"score": score, "raw": last, "format_attempts": attempts}
 
         # The released evaluator records -1 when no bracketed score is found.
         return {
             "score": -1,
             "raw": last,
-            "format_attempts": NORMAL_FORMAT_ATTEMPTS + int(constraint is not None),
+            "format_attempts": attempts,
             "error": "judge returned no [0-5] score",
         }
 
-    grades = parallel_map(
-        judge, jobs, workers=settings.workers, desc="LLMEval-Med judge"
+    def combine(
+        sample: Sample,
+        output: GenerationOutput,
+        gen_idx: int,
+        repeat_grades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del sample, output, gen_idx
+        # Upstream Aggregate.py averages only the runs with a valid 0-5 score; a
+        # question with no valid run stays in the denominator as not usable.
+        valid = [float(item["score"]) for item in repeat_grades if item["score"] >= 0]
+        score = sum(valid) / len(valid) if valid else -1.0
+        return {
+            "score": score,
+            "is_pass": score >= THRESHOLD,
+            "parsed": repeat_grades,
+            "meta": {"judge_scores": [item["score"] for item in repeat_grades]},
+        }
+
+    return judge_generations(
+        samples,
+        generation_outputs,
+        label="LLMEval-Med",
+        make_jobs=make_jobs,
+        run_job=judge,
+        combine=combine,
+        workers=settings.workers,
     )
-    results: list[list[dict[str, Any]]] = []
-    offset = 0
-    for generation_count in layouts:
-        per_sample: list[dict[str, Any]] = []
-        for _ in range(generation_count):
-            repeat_grades = grades[offset : offset + repeats]
-            offset += repeats
-            # Upstream Aggregate.py averages only the runs with a valid 0-5 score; a
-            # question with no valid run stays in the denominator as not usable.
-            valid = [float(item["score"]) for item in repeat_grades if item["score"] >= 0]
-            score = sum(valid) / len(valid) if valid else -1.0
-            per_sample.append(
-                {
-                    "score": score,
-                    "is_pass": score >= THRESHOLD,
-                    "parsed": repeat_grades,
-                    "meta": {"judge_scores": [item["score"] for item in repeat_grades]},
-                }
-            )
-        results.append(per_sample)
-    return results
 
 
 def aggregate(
@@ -185,6 +156,13 @@ def aggregate(
         "approximation reported here."
     ]
     return metrics
+
+
+def _parse_score(text: str) -> int | None:
+    match = re.search(r"\[(\d+)\]", text)
+    if match and 0 <= int(match.group(1)) <= 5:
+        return int(match.group(1))
+    return None
 
 
 def _judge_prompt(sample: Sample, response: str) -> str:

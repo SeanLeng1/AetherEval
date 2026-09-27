@@ -29,7 +29,7 @@ class RewardModelTests(unittest.TestCase):
     def test_qwen_chat_scoring_keeps_token_ids_and_explicit_input_limit(self):
         tokenizer = mock.Mock()
         tokenizer.apply_chat_template.return_value = "rendered conversation"
-        tokenizer.return_value = {"input_ids": [11, 22, 33]}
+        tokenizer.return_value = {"input_ids": [[11, 22, 33]]}
         conversation = [
             {"role": "user", "content": "question"},
             {"role": "assistant", "content": "answer"},
@@ -48,7 +48,8 @@ class RewardModelTests(unittest.TestCase):
             conversation, tokenize=False, add_generation_prompt=False,
         )
         tokenizer.assert_called_once_with(
-            "rendered conversation", add_special_tokens=False, truncation=True, max_length=16384,
+            ["rendered conversation"], add_special_tokens=False, truncation=True,
+            max_length=16384, return_attention_mask=False,
         )
         self.assertEqual(tokenizer.truncation_side, "right")
         service = _FakeService.instances[0]
@@ -71,11 +72,9 @@ class RewardModelTests(unittest.TestCase):
             {"role": "user", "content": "question"},
             {"role": "assistant", "content": " answer "},
         ]
-        with mock.patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer):
-            inputs = reward_model._render_conversations(
-                "local-gpt2", [conversation],
-                trust_remote_code=False, reward_format="gpt2",
-            )
+        inputs = reward_model._render_conversations(
+            tokenizer, [conversation], reward_format="gpt2",
+        )
         self.assertEqual(inputs, [[11, 22, 33]])
         tokenizer.assert_called_once_with(
             "\n\nHuman: question \n\nAssistant:", "answer", truncation=True, max_length=1024
@@ -90,6 +89,8 @@ class RewardModelTests(unittest.TestCase):
         ]
         with (
             mock.patch.object(reward_model, "SGLangService", _FakeService),
+            mock.patch.object(reward_model, "_load_tokenizer"),
+            mock.patch.object(reward_model, "_tokenizer_fingerprint", return_value=None),
             mock.patch.object(
                 reward_model,
                 "_render_conversations",
@@ -138,6 +139,7 @@ class RewardModelTests(unittest.TestCase):
         _FakeService.instances = []
         with (
             mock.patch.object(reward_model, "SGLangService", _FakeService),
+            mock.patch.object(reward_model, "_load_tokenizer"),
             mock.patch.object(reward_model, "_render_conversations", return_value=[[1, 2, 3]]),
         ):
             backend = reward_model.SGLangRewardModelBackend(dp_size=8, tensor_parallel_size=1)
@@ -145,6 +147,47 @@ class RewardModelTests(unittest.TestCase):
         service = _FakeService.instances[0]
         self.assertNotIn("context_length", service.kwargs["model_kwargs"])
         self.assertEqual(service.calls[0][1][0]["input"], [1, 2, 3])
+
+    def test_identical_tokenizers_render_once_for_both_models(self) -> None:
+        _FakeService.instances = []
+        with (
+            mock.patch.object(reward_model, "SGLangService", _FakeService),
+            mock.patch.object(reward_model, "_load_tokenizer"),
+            mock.patch.object(reward_model, "_tokenizer_fingerprint", return_value="same"),
+            mock.patch.object(
+                reward_model, "_render_conversations", return_value=[[1, 2]]
+            ) as render,
+        ):
+            backend = reward_model.SGLangRewardModelBackend(dp_size=1, tensor_parallel_size=1)
+            backend.score_reward_models(
+                ["rm", "cm"], [[{"role": "user", "content": "q"}]], {"max_length": 8},
+            )
+        self.assertEqual(render.call_count, 1)
+        self.assertEqual(
+            [service.calls[0][1][0]["input"] for service in _FakeService.instances],
+            [[1, 2], [1, 2]],
+        )
+
+    def test_tokenizer_fingerprint_separates_different_chat_templates(self) -> None:
+        from transformers import PreTrainedTokenizerFast
+        from tokenizers import Tokenizer, models
+
+        def make(template: str):  # noqa: ANN202
+            tokenizer = PreTrainedTokenizerFast(
+                tokenizer_object=Tokenizer(models.WordLevel({"a": 0, "[UNK]": 1}, "[UNK]"))
+            )
+            tokenizer.chat_template = template
+            return tokenizer
+
+        self.assertEqual(
+            reward_model._tokenizer_fingerprint(make("{{ messages }}")),
+            reward_model._tokenizer_fingerprint(make("{{ messages }}")),
+        )
+        self.assertNotEqual(
+            reward_model._tokenizer_fingerprint(make("{{ messages }}")),
+            reward_model._tokenizer_fingerprint(make("{{ messages[0] }}")),
+        )
+        self.assertIsNone(reward_model._tokenizer_fingerprint(mock.Mock(spec=[])))
 
     def test_scalar_embedding_requires_one_raw_score(self) -> None:
         self.assertEqual(

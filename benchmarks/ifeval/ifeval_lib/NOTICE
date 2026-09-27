@@ -1,6 +1,10 @@
 Files in this folder are sourced from Google Research IFEval:
 https://github.com/google-research/google-research/tree/master/instruction_following_eval
 
+Pinned upstream commit: e6890f85757dd84e27ca6df2dd30651dafad28e0
+(code-identical to 5b09c22d73a9d35eb6c5d2a99b95677a45053466; e6890f85 only adds
+type-checker comments).
+
 Imported files:
 - evaluation_lib.py
 - instructions.py
@@ -12,4 +16,27 @@ Copyright 2026 The Google Research Authors.
 Licensed under the Apache License, Version 2.0.
 
 Local adaptations:
-- package import paths are rewritten to local relative imports.
+- code is reformatted (4-space black style); docstrings and comments are trimmed.
+- package import paths are rewritten to local relative imports; unused imports dropped.
+- instructions.py: the unused ConstrainedStartChecker, RephraseChecker,
+  KeySentenceChecker and RephraseParagraph checkers and _STARTER_OPTIONS are removed.
+- instructions_registry.py: _MULTITURN, INSTRUCTION_CONFLICTS and conflict_make are
+  removed.
+- evaluation_lib.py: the file IO and report helpers (read_prompt_list, write_outputs,
+  read_prompt_to_response_dict, print_report) are removed.
+- instructions_util.py: download_nltk_resources() is added and runs at import; it
+  downloads punkt/punkt_tab only when NLTK cannot find them. Upstream has no such
+  function.
+
+Checking or upgrading: because of the reformatting, a textual diff against upstream
+is thousands of lines of noise. tools/check_vendored.py compares code only
+(formatting, comments and docstrings ignored); at the pinned commit its output shows
+exactly the adaptations above. From the repository root:
+
+  U=https://raw.githubusercontent.com/google-research/google-research/e6890f85757dd84e27ca6df2dd30651dafad28e0/instruction_following_eval
+  for f in evaluation_lib instructions instructions_registry instructions_util; do
+    python tools/check_vendored.py "$U/$f.py" "benchmarks/ifeval/ifeval_lib/$f.py"
+  done
+
+To upgrade, run the same loop against the new commit, port the code changes it
+reports beyond the adaptations above, and update the pinned commit here.

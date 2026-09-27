@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from aethereval.backends.sglang.service import SGLangService
@@ -5,6 +6,10 @@ from aethereval.backends.sglang.service import SGLangService
 # GPT-2 classification admits the full native context without generation.
 GPT2_INPUT_LIMIT = 1024
 SAFERLHF_INPUT_LIMIT = 2048
+# Chat inputs are tokenized in batches of this many conversations: a batched
+# fast-tokenizer call returns the same ids as per-text calls, runs in Rust
+# threads, and the chunks bound the memory of the rendered texts.
+ENCODE_CHUNK_SIZE = 1024
 
 
 def gpt2_reward_input(conversation, tokenizer):
@@ -41,14 +46,7 @@ def saferlhf_reward_input(conversation, tokenizer):
     return text
 
 
-def _render_conversations(
-    model_path: str,
-    conversations: list[list[dict[str, str]]],
-    *,
-    trust_remote_code: bool,
-    reward_format: str = "chat",
-    max_length: int | None = None,
-) -> list[str | list[int]]:
+def _load_tokenizer(model_path: str, *, trust_remote_code: bool) -> Any:
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:
@@ -61,23 +59,60 @@ def _render_conversations(
         trust_remote_code=trust_remote_code,
     )
     tokenizer.truncation_side = "right"
+    return tokenizer
+
+
+def _tokenizer_fingerprint(tokenizer: Any) -> str | None:
+    """Everything that shapes rendered inputs; None never shares a render."""
+
+    cls = type(tokenizer)
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None or cls.__module__.startswith("transformers_modules"):
+        return None
+    return json.dumps(
+        [
+            cls.__module__,
+            cls.__qualname__,
+            backend.to_str(),
+            tokenizer.chat_template,
+            tokenizer.special_tokens_map,
+            getattr(tokenizer, "split_special_tokens", None),
+        ],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _render_conversations(
+    tokenizer: Any,
+    conversations: list[list[dict[str, str]]],
+    *,
+    reward_format: str = "chat",
+    max_length: int | None = None,
+) -> list[str | list[int]]:
+    if reward_format == "gpt2":
+        return [gpt2_reward_input(c, tokenizer) for c in conversations]
+    if reward_format != "chat":
+        raise ValueError(f"Unknown reward input format: {reward_format}")
+    if max_length is None:
+        return [saferlhf_reward_input(c, tokenizer) for c in conversations]
+
     rendered: list[str | list[int]] = []
-    for conversation in conversations:
-        if reward_format == "gpt2":
-            rendered.append(gpt2_reward_input(conversation, tokenizer))
-            continue
-        if reward_format != "chat":
-            raise ValueError(f"Unknown reward input format: {reward_format}")
-        if max_length is None:
-            rendered.append(saferlhf_reward_input(conversation, tokenizer))
-        else:
-            text = tokenizer.apply_chat_template(
+    for start in range(0, len(conversations), ENCODE_CHUNK_SIZE):
+        texts = [
+            tokenizer.apply_chat_template(
                 conversation, tokenize=False, add_generation_prompt=False,
             )
-            encoded = tokenizer(
-                text, add_special_tokens=False, truncation=True, max_length=max_length,
-            )
-            rendered.append(encoded["input_ids"])
+            for conversation in conversations[start : start + ENCODE_CHUNK_SIZE]
+        ]
+        encoded = tokenizer(
+            texts,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max_length,
+            return_attention_mask=False,
+        )
+        rendered.extend(encoded["input_ids"])
     return rendered
 
 
@@ -147,14 +182,23 @@ class SGLangRewardModelBackend:
             raise ValueError("RM sglang_args must be a mapping/object")
 
         results: dict[str, list[float]] = {}
+        # RM and CM checkpoints often share one tokenizer; render their inputs once.
+        rendered_by_tokenizer: dict[str, list[str | list[int]]] = {}
         for model_path in unique_paths:
-            rendered_inputs = _render_conversations(
-                model_path,
-                conversations,
-                trust_remote_code=trust_remote_code,
-                reward_format=options.get("reward_format", "chat"),
-                max_length=options.get("max_length"),
+            tokenizer = _load_tokenizer(model_path, trust_remote_code=trust_remote_code)
+            fingerprint = _tokenizer_fingerprint(tokenizer)
+            rendered_inputs = (
+                rendered_by_tokenizer.get(fingerprint) if fingerprint else None
             )
+            if rendered_inputs is None:
+                rendered_inputs = _render_conversations(
+                    tokenizer,
+                    conversations,
+                    reward_format=options.get("reward_format", "chat"),
+                    max_length=options.get("max_length"),
+                )
+                if fingerprint:
+                    rendered_by_tokenizer[fingerprint] = rendered_inputs
             model_kwargs = dict(extra_sglang_args)
             # Sequence-classification scoring is prefill-only. Capturing the
             # large default prefill CUDA-graph matrix adds minutes to every RM

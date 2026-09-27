@@ -243,21 +243,99 @@ def parallel_map(
     )
 
     results: list[R | None] = [None] * len(values)
+    executor = ThreadPoolExecutor(max_workers=workers)
     try:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(fn, value): idx for idx, value in enumerate(values)
-            }
-            for future in as_completed(futures):
-                idx = futures[future]
-                results[idx] = future.result()
-                progress.update(1)
+        futures = {executor.submit(fn, value): idx for idx, value in enumerate(values)}
+        for future in as_completed(futures):
+            idx = futures[future]
+            results[idx] = future.result()
+            progress.update(1)
     finally:
+        # On the first error or Ctrl-C, drop the queued judge calls and wait only
+        # for the at most `workers` calls already in flight.
+        executor.shutdown(wait=True, cancel_futures=True)
         progress.close()
 
     if any(result is None for result in results):
         raise RuntimeError("judge worker returned an incomplete result set")
     return [result for result in results if result is not None]
+
+
+def judge_with_format_retries(
+    settings: JudgeSettings,
+    messages: list[dict[str, str]],
+    parse: Callable[[str], R | None],
+    *,
+    json_schema: dict[str, Any] | None = None,
+    regex: str | None = None,
+    complete: Callable[..., str] | None = None,
+    error_as_text: bool = False,
+) -> tuple[R | None, str, int]:
+    """Three free-form attempts, then one constrained attempt on a local judge.
+
+    ``parse`` returns None for a malformed response. Returns the parsed value
+    (None when every attempt failed), the last response text and the number of
+    attempts made. ``error_as_text`` reports a failed constrained request's
+    error as the last response text.
+    """
+
+    complete = complete or chat_completion
+    last_text = ""
+    for attempt in range(NORMAL_FORMAT_ATTEMPTS):
+        last_text = complete(settings, messages)
+        parsed = parse(last_text)
+        if parsed is not None:
+            return parsed, last_text, attempt + 1
+
+    constraint = local_constraint_body(settings, json_schema=json_schema, regex=regex)
+    if constraint is None:
+        return None, last_text, NORMAL_FORMAT_ATTEMPTS
+    try:
+        last_text = complete(settings, messages, extra_body=constraint)
+        parsed = parse(last_text)
+    except (RuntimeError, ValueError) as exc:
+        parsed = None
+        if error_as_text:
+            last_text = str(exc)
+    return parsed, last_text, NORMAL_FORMAT_ATTEMPTS + 1
+
+
+def judge_generations(
+    samples: list[Any],
+    outputs: list[Any],
+    *,
+    label: str,
+    make_jobs: Callable[[Any, Any, str], list[T]],
+    run_job: Callable[[T], R],
+    combine: Callable[[Any, Any, int, list[R]], dict[str, Any]],
+    workers: int,
+) -> list[list[dict[str, Any]]]:
+    """Fan each generation out to judge jobs and fold their results back.
+
+    Jobs are submitted in sample, generation, job order. ``combine`` receives
+    the sample, its output, the generation index and that generation's results.
+    """
+
+    jobs: list[T] = []
+    spans: list[list[tuple[int, int]]] = []
+    for sample, output in zip(samples, outputs, strict=True):
+        if sample.id != output.sample_id:
+            raise ValueError(f"{label} sample/output mismatch")
+        per_sample: list[tuple[int, int]] = []
+        for generation in output.generations:
+            start = len(jobs)
+            jobs.extend(make_jobs(sample, output, generation))
+            per_sample.append((start, len(jobs)))
+        spans.append(per_sample)
+
+    results = parallel_map(run_job, jobs, workers=workers, desc=f"{label} judge")
+    return [
+        [
+            combine(sample, output, gen_idx, results[start:end])
+            for gen_idx, (start, end) in enumerate(per_sample)
+        ]
+        for sample, output, per_sample in zip(samples, outputs, spans, strict=True)
+    ]
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -308,6 +386,8 @@ __all__ = [
     "JudgeSettings",
     "NORMAL_FORMAT_ATTEMPTS",
     "chat_completion",
+    "judge_generations",
+    "judge_with_format_retries",
     "local_constraint_body",
     "parallel_map",
     "parse_json_object",

@@ -3,7 +3,7 @@ from typing import Any
 
 from aethereval.core.io import read_jsonl
 from aethereval.core.types import Sample
-from aethereval.metrics.common import aggregate_instruction_following_results
+from aethereval.metrics.common import mean, mean_stderr, to_records
 
 
 def load_instruction_following_samples(
@@ -21,6 +21,8 @@ def load_instruction_following_samples(
         kwargs = row["kwargs"]
         if not isinstance(instruction_id_list, list):
             raise ValueError(f"instruction_id_list must be list for sample {sample_id}")
+        if not instruction_id_list:
+            raise ValueError(f"instruction_id_list is empty for sample {sample_id}")
         if not isinstance(kwargs, list):
             raise ValueError(f"kwargs must be list for sample {sample_id}")
 
@@ -101,5 +103,35 @@ def aggregate_instruction_following(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float]:
+    """Prompt level: mean over samples of each sample's mean over generations.
+
+    Instruction level: micro average over instruction instances, each first
+    averaged over the sample's generations.
+    """
     del metric_options
-    return aggregate_instruction_following_results(sample_results)
+    # This order fixes the output key order.
+    values: dict[str, list[float]] = {
+        "prompt_level_strict_acc": [],
+        "inst_level_strict_acc": [],
+        "prompt_level_loose_acc": [],
+        "inst_level_loose_acc": [],
+    }
+    for item in sample_results:
+        parsed = [record.parsed for record in to_records(item["records"])]
+        if not parsed:
+            continue
+        for mode in ("strict", "loose"):
+            values[f"prompt_level_{mode}_acc"].append(
+                mean([float(p[f"prompt_level_{mode}_acc"]) for p in parsed])
+            )
+            inst_flags = [p[f"inst_level_{mode}_acc"] for p in parsed]
+            for flags in zip(*inst_flags, strict=True):
+                values[f"inst_level_{mode}_acc"].append(
+                    mean([float(bool(flag)) for flag in flags])
+                )
+
+    result: dict[str, float] = {}
+    for key, key_values in values.items():
+        result[key] = mean(key_values)
+        result[f"{key}_stderr"] = mean_stderr(key_values)
+    return result

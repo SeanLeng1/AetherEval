@@ -34,7 +34,7 @@ benchmarks/aime24/
 - Source dataset: `RLLab/eval-set`, config `aime24` (split: `train`)
 - Local offline file: `data/eval.jsonl`
 - Regeneration script: `prepare_data.py`
-- Run root `push.py --push` before rebuilding local data to publish the MathArena transcriptions.
+- The MathArena transcriptions were published to `RLLab/eval-set` by a one-off `push.py` (removed in 00efdab; see commit bf80a50).
 - All 30 exam questions, row order and gold strings are retained; transcription fixes change prompt text.
 - Asymptote/TikZ diagram code is removed during construction; prose, formulas and tables are retained. Use fresh generations after rebuilding.
 

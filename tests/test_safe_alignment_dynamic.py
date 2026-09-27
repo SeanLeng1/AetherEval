@@ -115,16 +115,12 @@ class DynamicAlignmentTests(unittest.TestCase):
     def test_discovery(self):
         bundle = load_task("safe_alignment_dynamic")
         self.assertEqual(bundle.metrics_module.PRIMARY_METRIC, "overall/utility")
-        self.assertEqual(bundle.task_module.DEFAULT_GEN["max_new_tokens"], 1024)
-        self.assertEqual(bundle.task_module.DEFAULT_GEN["temperature"], 0.7)
-        self.assertEqual(bundle.task_module.DEFAULT_GEN["n"], 4)
         from aethereval.core.task_defaults import resolve_task_default_metrics
 
         options = resolve_task_default_metrics("safe-alignment-dynamic")
-        self.assertEqual(options["rm_model_path"], "RLLab/qwen3-4b-safe-alignment-helpful")
-        self.assertEqual(options["cm_model_path"], "RLLab/qwen3-4b-safe-alignment-harmless")
-        self.assertEqual(options["rm_reward_format"], "chat")
-        self.assertEqual(options["rm_max_length"], 16384)
+        for key in ("rm_model_path", "cm_model_path", "rm_reward_format"):
+            self.assertIsInstance(options[key], str)
+        self.assertGreater(options["rm_max_length"], 0)
 
     def test_full_runner_generation_scoring_and_resume(self):
         from aethereval.core.runner import _run_single_task
@@ -173,7 +169,9 @@ class DynamicAlignmentTests(unittest.TestCase):
         self.assertFalse(generated["evaluation_complete"])
         kwargs.update(generate_only=False, eval_only=True)
         first = _run_single_task(**kwargs)
-        kwargs.update(eval_only=False)
+        kwargs.update(generate_only=True, eval_only=False)
+        self.assertEqual(_run_single_task(**kwargs), first)
+        kwargs.update(generate_only=False, eval_only=True)
         second = _run_single_task(**kwargs)
         self.assertEqual(backend.calls, 1)
         self.assertEqual(first["n"], 4)
@@ -191,8 +189,10 @@ class DynamicAlignmentTests(unittest.TestCase):
         changed = protocol()
         changed["weights"][1] = [0.4, 0.6]
         (self.root / "data/protocol.json").write_text(json.dumps(changed))
-        with self.assertRaisesRegex(ValueError, "Saved evaluation protocol differs"):
-            _run_single_task(**kwargs)
+        for generate_only in (True, False):
+            kwargs.update(generate_only=generate_only, eval_only=not generate_only)
+            with self.assertRaisesRegex(ValueError, "Saved evaluation protocol differs"):
+                _run_single_task(**kwargs)
 
     def test_sample_metadata_is_compact(self):
         for sample in self.samples:

@@ -1,17 +1,15 @@
 import io
-import json
 import os
 from pathlib import Path
 from typing import Any
 
-from benchmark_utils.data import read_bytes
+from benchmark_utils.data import read_bytes, write_task_jsonl
 
 
 DEFAULT_SOURCE_ROOT = (
     "https://raw.githubusercontent.com/Qwen-Applications/GD2PO/"
     "f1ad765bc9a330e6cf387f95e9c1e5a6c4bb2d02/safe-alignment/dataset"
 )
-DATA_FILE = "data/eval.jsonl"
 SOURCE_URL = (
     "https://github.com/Qwen-Applications/GD2PO/tree/main/safe-alignment/dataset"
 )
@@ -56,13 +54,7 @@ def prepare_safe_alignment_data(source_root: str | Path, task_dir: Path) -> None
                 }
             )
 
-    out_path = task_dir / DATA_FILE
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"wrote {out_path} rows={len(rows)}")
+    write_task_jsonl(task_dir, rows)
 
 
 def _normalize_messages(raw: Any, sample_id: str) -> list[dict[str, str]]:

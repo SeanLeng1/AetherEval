@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from benchmark_utils.aime import prepare_aime_dataset
+from benchmark_utils.eval_set_math import prepare_eval_set_math_dataset
 
 
 def main() -> None:
-    prepare_aime_dataset("aime25", Path(__file__).resolve().parent)
+    prepare_eval_set_math_dataset("aime25", Path(__file__).resolve().parent)
 
 
 if __name__ == "__main__":

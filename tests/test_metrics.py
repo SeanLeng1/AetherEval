@@ -3,6 +3,7 @@ import unittest
 
 from aethereval.core.task_register import load_task
 from aethereval.core.types import Sample
+from tests._deps import requires
 
 
 class MetricsTests(unittest.TestCase):
@@ -274,6 +275,27 @@ class MetricsTests(unittest.TestCase):
 
     def test_ifbench_instruction_level_metrics_use_micro_averaging(self) -> None:
         self._assert_instruction_following_micro_aggregation("ifbench")
+
+    def test_instruction_following_aggregate_rejects_ragged_flags(self) -> None:
+        metrics_module = load_task("ifeval").metrics_module
+        parsed = {
+            "prompt_level_strict_acc": 1.0,
+            "prompt_level_loose_acc": 1.0,
+            "inst_level_strict_acc": [True],
+            "inst_level_loose_acc": [True],
+        }
+        records = [
+            {"sample_id": "s1", "gen_idx": 0, "score": 1.0, "is_pass": True, "parsed": parsed},
+            {
+                "sample_id": "s1",
+                "gen_idx": 1,
+                "score": 1.0,
+                "is_pass": True,
+                "parsed": {**parsed, "inst_level_strict_acc": [True, False]},
+            },
+        ]
+        with self.assertRaises(ValueError):
+            self._aggregate(metrics_module, [{"sample_id": "s1", "records": records}], {})
 
     def test_gpqa_score_generation_parsing(self) -> None:
         bundle = load_task("gpqa_diamond")
@@ -1066,6 +1088,19 @@ class MetricsTests(unittest.TestCase):
         sample = Sample(id="normal", data={"inputs": [""], "outputs": ["42"]})
         self.assertEqual(metrics.score_generation(sample, "```python\nprint(42)\n```")["score"], 1.0)
 
+    def test_livecodebench_int_digit_limit_stays_in_candidate_process(self) -> None:
+        import sys
+
+        limit = sys.get_int_max_str_digits()
+        metrics = load_task("livecodebench").metrics_module
+        self.assertEqual(sys.get_int_max_str_digits(), limit)
+        # Candidates still convert integers of up to 50,000 digits, as in official LCB.
+        digits = "7" * 10000
+        sample = Sample(id="digits", data={"inputs": [digits], "outputs": [digits]})
+        scored = metrics.score_generation(sample, "```python\nprint(int(input()))\n```")
+        self.assertEqual(scored["score"], 1.0)
+        self.assertEqual(sys.get_int_max_str_digits(), limit)
+
     def test_livecodebench_score_generation_requires_fenced_code(self) -> None:
         bundle = load_task("livecodebench")
         metrics_module = bundle.metrics_module
@@ -1140,6 +1175,7 @@ class MetricsTests(unittest.TestCase):
         )
         self.assertIn("class Solution:", prompt_with_starter[1]["content"])
 
+    @requires("evalplus")
     def test_mbpp_plus_offline_scoring(self) -> None:
         import json
         from unittest.mock import patch
@@ -1187,6 +1223,7 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(summary["accuracy_base"], 1.0)
         self.assertEqual(summary["pass@1"], 0.0)
 
+    @requires("evalplus")
     def test_humaneval_plus_score_generation(self) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module
@@ -1289,6 +1326,7 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(scored_full["parsed"]["base_pass"])
         self.assertTrue(scored_full["parsed"]["plus_pass"])
 
+    @requires("evalplus")
     def test_humaneval_plus_score_generation_preserves_first_line_indentation(
         self,
     ) -> None:
@@ -1323,6 +1361,7 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(scored["parsed"]["base_pass"])
         self.assertTrue(scored["parsed"]["plus_pass"])
 
+    @requires("evalplus")
     def test_humaneval_plus_ignores_usage_example_blocks(self) -> None:
         metrics_module = load_task("humaneval_plus").metrics_module
         sample = Sample(
@@ -1368,6 +1407,7 @@ class MetricsTests(unittest.TestCase):
             with self.subTest(generation=generation):
                 self.assertEqual(metrics_module.score_generation(sample, generation)["score"], 0.0)
 
+    @requires("evalplus")
     def test_humaneval_plus_skips_non_python_fences(self) -> None:
         metrics_module = load_task("humaneval_plus").metrics_module
         sample = Sample(
@@ -1398,6 +1438,7 @@ class MetricsTests(unittest.TestCase):
         wrong = "```text\nplan: add\n```\n```python\ndef add(a, b):\n    return 0\n```"
         self.assertEqual(metrics_module.score_generation(sample, wrong)["score"], 0.0)
 
+    @requires("evalplus")
     def test_humaneval_plus_aggregate(self) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module
@@ -1450,6 +1491,7 @@ class MetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result["pass@1"], 0.25, places=6)
         self.assertAlmostEqual(result["pass@2"], 0.5, places=6)
 
+    @requires("evalplus")
     def test_humaneval_plus_score_generation_does_not_mutate_inputs(self) -> None:
         bundle = load_task("humaneval_plus")
         metrics_module = bundle.metrics_module
@@ -1511,7 +1553,7 @@ class MetricsTests(unittest.TestCase):
         )
 
     def test_mcq_extractor_ignores_article_a(self) -> None:
-        from aethereval.metrics.common import extract_choice
+        from benchmark_utils.mcq import extract_choice
 
         letters = ["A", "B", "C", "D"]
         for text in ("The answer depends on a catalyst.", "Answer: a catalyst."):
@@ -1521,6 +1563,29 @@ class MetricsTests(unittest.TestCase):
         for text in ("Answer: c", "c", "**c**", "The final answer is c.\nExplanation follows."):
             self.assertEqual(extract_choice(text, {}, letters)[0], "C")
         self.assertEqual(extract_choice("Answer: a", {}, letters)[0], "A")
+
+    def test_mcq_extractor_reads_parenthesised_option(self) -> None:
+        from benchmark_utils.mcq import extract_choice
+
+        letters = ["A", "B", "C", "D"]
+        for text, choice in (
+            ("Hence the correct choice is (D).", "D"),
+            ("The correct option is (B), since x>0.", "B"),
+            ("Option (C) is correct.", "C"),
+            ("Hence the correct choice is D.", "D"),
+        ):
+            self.assertEqual(extract_choice(text, {}, letters), (choice, "option_anchor"))
+
+    def test_mcq_extractor_handles_whitespace_tail_quickly(self) -> None:
+        import time
+
+        from benchmark_utils.mcq import extract_choice
+
+        letters = list("ABCDEFGHIJ")
+        started = time.perf_counter()
+        self.assertEqual(extract_choice("\n \n" * 333, {}, letters), (None, "none"))
+        self.assertLess(time.perf_counter() - started, 0.5)
+        self.assertEqual(extract_choice("x\n\n  \xa0**B**.", {}, letters)[0], "B")
 
     def test_math_scoring_preserves_text_and_compares_tiny_values(self) -> None:
         from benchmark_utils.math_scoring import score_with_math_verify

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+from aethereval.core.io import write_jsonl
+
 
 HF_ROOT = "https://huggingface.co/datasets/lmarena-ai/arena-hard-auto/resolve/main/data/arena-hard-v2.0"
 # Per-category baselines from upstream utils/judge_utils.py JUDGE_SETTINGS.
@@ -48,13 +50,14 @@ def main() -> None:
     }
     hard_uids = {row["uid"] for row in questions if row["category"] == "hard_prompt"}
 
-    with (output / "eval.jsonl").open("w", encoding="utf-8") as dst:
-        for question in questions:
-            base = baselines[question["category"]][question["uid"]]
-            payload = dict(question)
-            payload["baseline_answer"] = base["messages"][-1]["content"]["answer"]
-            payload["baseline_metadata"] = base["metadata"]
-            dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    rows: list[dict] = []
+    for question in questions:
+        base = baselines[question["category"]][question["uid"]]
+        payload = dict(question)
+        payload["baseline_answer"] = base["messages"][-1]["content"]["answer"]
+        payload["baseline_metadata"] = base["metadata"]
+        rows.append(payload)
+    write_jsonl(output / "eval.jsonl", rows)
     print(f"wrote {output / 'eval.jsonl'} rows={len(questions)}", flush=True)
 
     _prepare_style_cohort(output / "style_cohort.jsonl", Path(args.cohort_cache), hard_uids)
@@ -73,28 +76,28 @@ def _prepare_style_cohort(output: Path, cache: Path, hard_uids: set[str]) -> Non
     names = sorted((answer_names & judgment_names) - {f"{BASELINE_MODEL}.jsonl"})
 
     print(f"Style cohort: {len(names)} models; cache={cache}", flush=True)
-    count = 0
-    with output.open("w", encoding="utf-8") as dst:
-        for name in tqdm(names, desc="Arena-Hard style cohort", unit="model"):
-            answer_path = cache / f"answer-{name}"
-            judgment_path = cache / f"judgment-{name}"
-            _download(f"{HF_ROOT}/model_answer/{name}", answer_path)
-            _download(f"{HF_ROOT}/model_judgment/gpt-4.1/{name}", judgment_path)
-            answer_rows = {
-                row["uid"]: row for row in _read_jsonl(str(answer_path)) if row["uid"] in hard_uids
-            }
-            for judgment in _read_jsonl(str(judgment_path)):
-                uid = judgment["uid"]
-                if uid not in hard_uids or uid not in answer_rows:
-                    continue
-                games = judgment.get("games", [])
-                if len(games) != 2 or any(game is None or game.get("score") is None for game in games):
-                    continue
-                game0, game1 = games
-                battle_scores = LABEL_TO_SCORE[game1["score"]] + [
-                    1.0 - value for value in LABEL_TO_SCORE[game0["score"]]
-                ]
-                payload = {
+    rows: list[dict] = []
+    for name in tqdm(names, desc="Arena-Hard style cohort", unit="model"):
+        answer_path = cache / f"answer-{name}"
+        judgment_path = cache / f"judgment-{name}"
+        _download(f"{HF_ROOT}/model_answer/{name}", answer_path)
+        _download(f"{HF_ROOT}/model_judgment/gpt-4.1/{name}", judgment_path)
+        answer_rows = {
+            row["uid"]: row for row in _read_jsonl(str(answer_path)) if row["uid"] in hard_uids
+        }
+        for judgment in _read_jsonl(str(judgment_path)):
+            uid = judgment["uid"]
+            if uid not in hard_uids or uid not in answer_rows:
+                continue
+            games = judgment.get("games", [])
+            if len(games) != 2 or any(game is None or game.get("score") is None for game in games):
+                continue
+            game0, game1 = games
+            battle_scores = LABEL_TO_SCORE[game1["score"]] + [
+                1.0 - value for value in LABEL_TO_SCORE[game0["score"]]
+            ]
+            rows.append(
+                {
                     "uid": uid,
                     # Match upstream show_result.py, which collapses provider/path
                     # prefixes before fitting the style-control Bradley-Terry model.
@@ -102,9 +105,9 @@ def _prepare_style_cohort(output: Path, cache: Path, hard_uids: set[str]) -> Non
                     "battle_scores": battle_scores,
                     "model_metadata": answer_rows[uid]["metadata"],
                 }
-                dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                count += 1
-    print(f"wrote {output} rows={count}", flush=True)
+            )
+    write_jsonl(output, rows)
+    print(f"wrote {output} rows={len(rows)}", flush=True)
 
 
 def _read_jsonl(source: str) -> list[dict]:

@@ -6,10 +6,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
-    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
-    local_constraint_body,
-    parallel_map,
+    judge_generations,
+    judge_with_format_retries,
     resolve_judge_settings,
 )
 
@@ -39,59 +38,35 @@ def score_generations_batch(
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     settings = resolve_judge_settings(metric_options, default_model=DEFAULT_JUDGE_MODEL)
-    jobs: list[tuple[int, int, int, list[dict[str, Any]], str]] = []
-    layouts: list[list[int]] = []
     batch_size = 8
-    for sample_idx, (sample, output) in enumerate(
-        zip(samples, generation_outputs, strict=True)
-    ):
-        if sample.id != output.sample_id:
-            raise ValueError("ResearchQA sample/output mismatch")
-        per_generation: list[int] = []
-        for gen_idx, generation in enumerate(output.generations):
-            count = 0
-            rubrics = sample.data["rubric"]
-            for start in range(0, len(rubrics), batch_size):
-                batch = rubrics[start : start + batch_size]
-                prompt = _build_judge_prompt(
-                    generation, [str(item["rubric_item"]) for item in batch]
-                )
-                jobs.append((sample_idx, gen_idx, start, batch, prompt))
-                count += 1
-            per_generation.append(count)
-        layouts.append(per_generation)
+    label_pattern = "(" + "|".join(LABELS) + ")"
 
-    def judge(
-        job: tuple[int, int, int, list[dict[str, Any]], str],
-    ) -> list[dict[str, Any]]:
-        _, _, _, rubrics, prompt = job
-        last_output = ""
-        for _ in range(NORMAL_FORMAT_ATTEMPTS):
-            last_output = chat_completion(
-                settings,
-                [{"role": "user", "content": prompt}],
+    def make_jobs(
+        sample: Sample, output: GenerationOutput, generation: str
+    ) -> list[tuple[list[dict[str, Any]], str]]:
+        del output
+        rubrics = sample.data["rubric"]
+        jobs: list[tuple[list[dict[str, Any]], str]] = []
+        for start in range(0, len(rubrics), batch_size):
+            batch = rubrics[start : start + batch_size]
+            prompt = _build_judge_prompt(
+                generation, [str(item["rubric_item"]) for item in batch]
             )
-            parsed = _parse_batch(rubrics, last_output)
-            if parsed is not None:
-                return parsed
+            jobs.append((batch, prompt))
+        return jobs
 
-        label_pattern = "(" + "|".join(LABELS) + ")"
-        constraint = local_constraint_body(
+    def judge(job: tuple[list[dict[str, Any]], str]) -> list[dict[str, Any]]:
+        rubrics, prompt = job
+        parsed, last_output, _ = judge_with_format_retries(
             settings,
+            [{"role": "user", "content": prompt}],
+            lambda text: _parse_batch(rubrics, text),
             regex=r"\n".join(label_pattern for _ in rubrics),
+            complete=chat_completion,
+            error_as_text=True,
         )
-        if constraint is not None:
-            try:
-                last_output = chat_completion(
-                    settings,
-                    [{"role": "user", "content": prompt}],
-                    extra_body=constraint,
-                )
-                parsed = _parse_batch(rubrics, last_output)
-                if parsed is not None:
-                    return parsed
-            except (RuntimeError, ValueError) as exc:
-                last_output = str(exc)
+        if parsed is not None:
+            return parsed
 
         # The official ResearchQA evaluator skips the whole item when any
         # rubric batch still has the wrong shape after its retries.
@@ -107,43 +82,43 @@ def score_generations_batch(
             for rubric in rubrics
         ]
 
-    batches = parallel_map(
-        judge, jobs, workers=settings.workers, desc="ResearchQA judge"
+    def combine(
+        sample: Sample,
+        output: GenerationOutput,
+        gen_idx: int,
+        batches: list[list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        del sample, output, gen_idx
+        rubric_grades = [item for batch in batches for item in batch]
+        judge_failed = any("error" in item for item in rubric_grades)
+        score = (
+            0.0
+            if judge_failed
+            else sum(item["normalized_score"] for item in rubric_grades)
+            / len(rubric_grades)
+        )
+        return {
+            "score": score,
+            "is_pass": score >= 0.5,
+            "parsed": rubric_grades,
+            "meta": {
+                "rubric_grades": rubric_grades,
+                "judge_format_failures": sum("error" in item for item in rubric_grades),
+                # compute_coverage.py skips such an item and averages the
+                # rest; aggregate() does the same instead of aborting the run.
+                "judge_failed": judge_failed,
+            },
+        }
+
+    return judge_generations(
+        samples,
+        generation_outputs,
+        label="ResearchQA",
+        make_jobs=make_jobs,
+        run_job=judge,
+        combine=combine,
+        workers=settings.workers,
     )
-    results: list[list[dict[str, Any]]] = []
-    offset = 0
-    for per_generation in layouts:
-        per_sample: list[dict[str, Any]] = []
-        for batch_count in per_generation:
-            rubric_grades: list[dict[str, Any]] = []
-            for batch in batches[offset : offset + batch_count]:
-                rubric_grades.extend(batch)
-            offset += batch_count
-            judge_failed = any("error" in item for item in rubric_grades)
-            score = (
-                0.0
-                if judge_failed
-                else sum(item["normalized_score"] for item in rubric_grades)
-                / len(rubric_grades)
-            )
-            per_sample.append(
-                {
-                    "score": score,
-                    "is_pass": score >= 0.5,
-                    "parsed": rubric_grades,
-                    "meta": {
-                        "rubric_grades": rubric_grades,
-                        "judge_format_failures": sum(
-                            "error" in item for item in rubric_grades
-                        ),
-                        # compute_coverage.py skips such an item and averages the
-                        # rest; aggregate() does the same instead of aborting the run.
-                        "judge_failed": judge_failed,
-                    },
-                }
-            )
-        results.append(per_sample)
-    return results
 
 
 def aggregate(

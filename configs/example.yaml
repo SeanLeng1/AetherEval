@@ -1,3 +1,5 @@
+# Unknown or misplaced keys are rejected. CLI flags override these values, and
+# --generate-only/--eval-only replace run.generate_only/run.eval_only.
 run:
   model: "Qwen/Qwen3-0.6B-Base"
   tasks: ["ifeval"]

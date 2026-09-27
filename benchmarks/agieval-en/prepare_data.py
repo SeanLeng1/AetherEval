@@ -1,8 +1,9 @@
 import json
 import re
-import urllib.request
 from pathlib import Path
 from string import ascii_uppercase
+
+from benchmark_utils.data import read_text, write_task_jsonl
 
 # Official AGIEval release. HF mirrors such as dmayhem93/agieval-* lost option (D)
 # of three SAT-English questions, one of which is the gold answer.
@@ -60,15 +61,11 @@ def _official_zero_shot_query(row: dict) -> str:
 
 
 def _load_subset(subset: str) -> list[dict]:
-    with urllib.request.urlopen(SOURCE_URL.format(subset=subset)) as response:
-        return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
+    text = read_text(SOURCE_URL.format(subset=subset))
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def main() -> None:
-    task_dir = Path(__file__).resolve().parent
-    out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     rows: list[dict[str, object]] = []
     for subset in ENGLISH_SUBSETS:
         source = SOURCE_URL.format(subset=subset)
@@ -101,11 +98,7 @@ def main() -> None:
                 }
             )
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"wrote {out_path} rows={len(rows)} subsets={len(ENGLISH_SUBSETS)}")
+    write_task_jsonl(Path(__file__).resolve().parent, rows, f" subsets={len(ENGLISH_SUBSETS)}")
 
 
 if __name__ == "__main__":

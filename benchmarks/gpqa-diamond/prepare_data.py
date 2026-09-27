@@ -1,14 +1,15 @@
 import csv
 import io
-import json
 import random
 from pathlib import Path
-from urllib.request import urlopen
+
+from benchmark_utils.data import read_text, write_task_jsonl
 
 
 GPQA_DIAMOND_CSV_URL = (
     "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
 )
+GPQA_DIAMOND_CSV_SHA256 = "41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305"
 
 
 def _clean(value: object) -> str:
@@ -19,12 +20,7 @@ def _clean(value: object) -> str:
 
 
 def main() -> None:
-    task_dir = Path(__file__).resolve().parent
-    out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with urlopen(GPQA_DIAMOND_CSV_URL, timeout=60) as response:  # noqa: S310
-        csv_text = response.read().decode("utf-8")
+    csv_text = read_text(GPQA_DIAMOND_CSV_URL, sha256=GPQA_DIAMOND_CSV_SHA256)
 
     reader = csv.DictReader(io.StringIO(csv_text))
     rng = random.Random(0)
@@ -68,11 +64,7 @@ def main() -> None:
             }
         )
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"wrote {out_path} rows={len(rows)}")
+    write_task_jsonl(Path(__file__).resolve().parent, rows)
 
 
 if __name__ == "__main__":

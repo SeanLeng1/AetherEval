@@ -30,7 +30,7 @@ benchmarks/bbh/
 - Source dataset: `lukaemon/bbh` (all BBH subsets, split: `test`)
 - Local offline file: `data/eval.jsonl`
 - Regeneration script: `prepare_data.py`
-- First-time setup: run `python benchmarks/bbh/prepare_data.py`
+- First-time setup: run `python -m benchmarks.bbh.prepare_data` from the repo root
 
 Each row includes: `id`, `subset`, `input`, `target`, `answer`, `description`.
 
@@ -40,7 +40,7 @@ Each row includes: `id`, `subset`, `input`, `target`, `answer`, `description`.
 - Uses a zero-shot CoT query format:
   - `Question: <input>`
   - `Answer: Let's think step by step.`
-- Prepends subset description when available.
+- Prepends the subset description.
 - Uses zero-shot CoT without few-shot exemplars.
 
 ## Metrics
@@ -49,11 +49,15 @@ Each row includes: `id`, `subset`, `input`, `target`, `answer`, `description`.
 - Uses generation-text extraction only (no likelihood scoring)
 - Uses per-subset answer regex rules
 - Extraction never uses the gold answer as a search pattern. MC subsets extract
-  choice letters even for the three malformed rows with free-form gold labels.
+  choice letters even for the three malformed rows with free-form gold labels
+  (`movie_recommendation_00163`, `ruin_names_00099`, `ruin_names_00144`: upstream
+  split their options on commas), so no response can match them.
   These rows remain in the denominator; they are not silently repaired or removed.
 - Core metric is exact match with normalization:
   - `ignore_case=True`
-  - `ignore_punctuation=True` for all subsets except `dyck_languages`
+  - `ignore_punctuation=True` for all subsets except `dyck_languages`,
+    `multistep_arithmetic_two` and `object_counting` (the numeric subsets drop
+    commas and a trailing period instead, keeping the minus sign)
 
 Reported metrics include:
 - `exact_match`, `exact_match_stderr`

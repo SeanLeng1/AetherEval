@@ -6,10 +6,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
-    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
-    local_constraint_body,
-    parallel_map,
+    judge_generations,
+    judge_with_format_retries,
     parse_json_object,
     resolve_judge_settings,
 )
@@ -59,65 +58,36 @@ def score_generations_batch(
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     settings = resolve_judge_settings(metric_options, default_model=DEFAULT_JUDGE_MODEL)
-    jobs: list[tuple[int, int, str]] = []
-    layouts: list[int] = []
-    for sample_idx, (sample, output) in enumerate(
-        zip(samples, generation_outputs, strict=True)
-    ):
-        if sample.id != output.sample_id:
-            raise ValueError("creative_writing_v3 sample/output mismatch")
-        for gen_idx, generation in enumerate(output.generations):
-            if (
-                output.meta.get("creative_generation_failed")
-                or len(generation.strip()) < 500
-            ):
-                jobs.append((sample_idx, gen_idx, ""))
-                continue
-            prompt = JUDGE_PROMPT.format(
+
+    def make_jobs(
+        sample: Sample, output: GenerationOutput, generation: str
+    ) -> list[str]:
+        if (
+            output.meta.get("creative_generation_failed")
+            or len(generation.strip()) < 500
+        ):
+            return [""]
+        return [
+            JUDGE_PROMPT.format(
                 writing_prompt=sample.data["base_prompt"],
                 test_model_response=generation,
                 creative_writing_criteria="\n".join(f"- {item}" for item in CRITERIA),
                 lower_is_better_criteria=", ".join(NEGATIVE_CRITERIA),
             )
-            jobs.append((sample_idx, gen_idx, prompt))
-        layouts.append(len(output.generations))
+        ]
 
-    def judge(job: tuple[int, int, str]) -> dict[str, Any]:
-        _, _, prompt = job
+    def judge(prompt: str) -> dict[str, Any]:
         if not prompt:
             return {"scores": {}, "raw": "", "generation_failed": True}
-        last_text = ""
-        messages = [{"role": "user", "content": prompt}]
-        for _ in range(NORMAL_FORMAT_ATTEMPTS):
-            last_text = chat_completion(
-                settings,
-                messages,
-            )
-            scores = _parse_scores(last_text)
-            if scores:
-                return {
-                    "scores": scores,
-                    "raw": last_text,
-                    "generation_failed": False,
-                }
-
-        constraint = local_constraint_body(settings, json_schema=SCORE_SCHEMA)
-        if constraint is not None:
-            try:
-                last_text = chat_completion(
-                    settings,
-                    messages,
-                    extra_body=constraint,
-                )
-                scores = _parse_scores(last_text)
-                if scores:
-                    return {
-                        "scores": scores,
-                        "raw": last_text,
-                        "generation_failed": False,
-                    }
-            except (RuntimeError, ValueError):
-                pass
+        scores, last_text, _ = judge_with_format_retries(
+            settings,
+            [{"role": "user", "content": prompt}],
+            lambda text: _parse_scores(text) or None,
+            json_schema=SCORE_SCHEMA,
+            complete=chat_completion,
+        )
+        if scores is not None:
+            return {"scores": scores, "raw": last_text, "generation_failed": False}
 
         # Upstream leaves the task unjudged and excludes it from aggregation.
         return {
@@ -127,37 +97,42 @@ def score_generations_batch(
             "error": "judge returned no parseable scores",
         }
 
-    judged = parallel_map(
-        judge, jobs, workers=settings.workers, desc="Creative Writing V3 judge"
+    def combine(
+        sample: Sample,
+        output: GenerationOutput,
+        gen_idx: int,
+        judged: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del sample, output, gen_idx
+        (item,) = judged
+        scores = item["scores"]
+        adjusted = [
+            20.0 - value if name in NEGATIVE_CRITERIA_SET else value
+            for name, value in scores.items()
+            if isinstance(value, (int, float)) and 0.0 <= value <= 20.0
+        ]
+        piece_score = sum(adjusted) / len(adjusted) if adjusted else 0.0
+        return {
+            "score": piece_score,
+            "is_pass": bool(adjusted) and piece_score >= 10.0,
+            "parsed": item,
+            "meta": {
+                "generation_failed": bool(item["generation_failed"]),
+                "judge_failed": "error" in item,
+                "_aethereval_unscored": "error" in item,
+                "judge_scores": scores,
+            },
+        }
+
+    return judge_generations(
+        samples,
+        generation_outputs,
+        label="Creative Writing V3",
+        make_jobs=make_jobs,
+        run_job=judge,
+        combine=combine,
+        workers=settings.workers,
     )
-    results: list[list[dict[str, Any]]] = []
-    offset = 0
-    for count in layouts:
-        per_sample: list[dict[str, Any]] = []
-        for item in judged[offset : offset + count]:
-            offset += 1
-            scores = item["scores"]
-            adjusted = [
-                20.0 - value if name in NEGATIVE_CRITERIA_SET else value
-                for name, value in scores.items()
-                if isinstance(value, (int, float)) and 0.0 <= value <= 20.0
-            ]
-            piece_score = sum(adjusted) / len(adjusted) if adjusted else 0.0
-            per_sample.append(
-                {
-                    "score": piece_score,
-                    "is_pass": bool(adjusted) and piece_score >= 10.0,
-                    "parsed": item,
-                    "meta": {
-                        "generation_failed": bool(item["generation_failed"]),
-                        "judge_failed": "error" in item,
-                        "_aethereval_unscored": "error" in item,
-                        "judge_scores": scores,
-                    },
-                }
-            )
-        results.append(per_sample)
-    return results
 
 
 def aggregate(

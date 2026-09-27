@@ -8,10 +8,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
-    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
-    local_constraint_body,
-    parallel_map,
+    judge_generations,
+    judge_with_format_retries,
     resolve_judge_settings,
 )
 
@@ -23,6 +22,7 @@ DEFAULT_JUDGE_MODEL = str(
     resolve_task_default_metrics("healthbench").get("judge_model", "gpt-4.1-2025-04-14")
 )
 SYSTEM_MESSAGE = "You are a helpful assistant."
+MAX_EXTRA_FORMAT_ATTEMPTS = 50
 GRADE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -94,142 +94,127 @@ def score_generations_batch(
     generation_outputs: list[GenerationOutput],
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    options = metric_options or {}
-    settings = resolve_judge_settings(options, default_model=DEFAULT_JUDGE_MODEL)
-    jobs: list[tuple[int, int, int, str]] = []
-    layouts: list[list[int]] = []
+    settings = resolve_judge_settings(metric_options, default_model=DEFAULT_JUDGE_MODEL)
 
-    for sample_idx, (sample, output) in enumerate(
-        zip(samples, generation_outputs, strict=True)
-    ):
-        if sample.id != output.sample_id:
-            raise ValueError("HealthBench sample/output mismatch")
-        per_generation: list[int] = []
-        for gen_idx, generation in enumerate(output.generations):
-            if isinstance(output.prompt, str):
-                candidate_prompt = [{"role": "user", "content": output.prompt}]
-            elif isinstance(output.prompt, list):
-                candidate_prompt = [
-                    {
-                        "role": str(message["role"]),
-                        "content": str(message["content"]),
-                    }
-                    for message in output.prompt
-                ]
-            else:
-                raise TypeError(
-                    "HealthBench generation prompt must be a string or message list"
-                )
-            # simple-evals grades the actual messages sent to the candidate,
-            # including its system message, rather than the raw dataset prompt.
-            conversation = candidate_prompt + [
-                {"role": "assistant", "content": generation}
+    def make_jobs(
+        sample: Sample, output: GenerationOutput, generation: str
+    ) -> list[tuple[str, str]]:
+        if isinstance(output.prompt, str):
+            candidate_prompt = [{"role": "user", "content": output.prompt}]
+        elif isinstance(output.prompt, list):
+            candidate_prompt = [
+                {
+                    "role": str(message["role"]),
+                    "content": str(message["content"]),
+                }
+                for message in output.prompt
             ]
-            convo_str = "\n\n".join(
-                f"{message['role']}: {message['content']}" for message in conversation
+        else:
+            raise TypeError(
+                "HealthBench generation prompt must be a string or message list"
             )
-            count = 0
-            for rubric_idx, rubric in enumerate(sample.data["rubrics"]):
-                rubric_text = f"[{rubric['points']}] {rubric['criterion']}"
-                prompt = GRADER_TEMPLATE.replace("<<conversation>>", convo_str).replace(
-                    "<<rubric_item>>", rubric_text
-                )
-                jobs.append((sample_idx, gen_idx, rubric_idx, prompt))
-                count += 1
-            per_generation.append(count)
-        layouts.append(per_generation)
+        # simple-evals grades the actual messages sent to the candidate,
+        # including its system message, rather than the raw dataset prompt.
+        conversation = candidate_prompt + [{"role": "assistant", "content": generation}]
+        convo_str = "\n\n".join(
+            f"{message['role']}: {message['content']}" for message in conversation
+        )
+        return [
+            (
+                sample.id,
+                GRADER_TEMPLATE.replace("<<conversation>>", convo_str).replace(
+                    "<<rubric_item>>", f"[{rubric['points']}] {rubric['criterion']}"
+                ),
+            )
+            for rubric in sample.data["rubrics"]
+        ]
 
-    def judge(job: tuple[int, int, int, str]) -> dict[str, Any]:
-        _, _, _, prompt = job
-        last_text = ""
+    def judge(job: tuple[str, str]) -> dict[str, Any]:
+        sample_id, prompt = job
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": prompt},
         ]
-        for _ in range(NORMAL_FORMAT_ATTEMPTS):
-            last_text = chat_completion(
-                settings,
-                messages,
-            )
-            grade = _parse_grade(last_text)
-            if grade is not None:
-                return grade
+        grade, last_text, _ = judge_with_format_retries(
+            settings,
+            messages,
+            _parse_grade,
+            json_schema=GRADE_SCHEMA,
+            complete=chat_completion,
+        )
+        if grade is not None:
+            return grade
 
-        constraint = local_constraint_body(settings, json_schema=GRADE_SCHEMA)
-        if constraint is not None:
-            try:
-                last_text = chat_completion(
-                    settings,
-                    messages,
-                    extra_body=constraint,
-                )
-                grade = _parse_grade(last_text)
-                if grade is not None:
-                    return grade
-            except (RuntimeError, ValueError):
-                pass
-
-        # simple-evals retries malformed HealthBench grades until one parses.
-        while True:
+        # simple-evals retries malformed HealthBench grades until one parses; the
+        # cap only stops a judge that never returns a parseable grade.
+        for _ in range(MAX_EXTRA_FORMAT_ATTEMPTS):
             last_text = chat_completion(settings, messages)
             grade = _parse_grade(last_text)
             if grade is not None:
                 return grade
+        raise ValueError(
+            "HealthBench judge returned no parseable grade after "
+            f"{MAX_EXTRA_FORMAT_ATTEMPTS} extra attempts for sample "
+            f"{sample_id!r}; last response={last_text[-1000:]!r}"
+        )
 
-    grades = parallel_map(
-        judge, jobs, workers=settings.workers, desc="HealthBench judge"
-    )
-    results: list[list[dict[str, Any]]] = []
-    offset = 0
-    for sample, per_generation in zip(samples, layouts, strict=True):
-        sample_results: list[dict[str, Any]] = []
-        for rubric_count in per_generation:
-            rubric_grades = grades[offset : offset + rubric_count]
-            offset += rubric_count
-            rubrics = sample.data["rubrics"]
-            positive_total = sum(
-                float(r["points"]) for r in rubrics if float(r["points"]) > 0
-            )
-            achieved = sum(
+    def combine(
+        sample: Sample,
+        output: GenerationOutput,
+        gen_idx: int,
+        rubric_grades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del output, gen_idx
+        rubrics = sample.data["rubrics"]
+        positive_total = sum(
+            float(r["points"]) for r in rubrics if float(r["points"]) > 0
+        )
+        achieved = sum(
+            float(rubric["points"])
+            for rubric, grade in zip(rubrics, rubric_grades, strict=True)
+            if grade["criteria_met"]
+        )
+        score = achieved / positive_total
+        tag_values: dict[str, float] = {
+            str(tag): score for tag in sample.data["example_tags"]
+        }
+        tagged: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(
+            list
+        )
+        for rubric, grade in zip(rubrics, rubric_grades, strict=True):
+            for tag in rubric.get("tags", []):
+                tagged[str(tag)].append((rubric, grade))
+        for tag, pairs in tagged.items():
+            denom = sum(
                 float(rubric["points"])
-                for rubric, grade in zip(rubrics, rubric_grades, strict=True)
-                if grade["criteria_met"]
+                for rubric, _ in pairs
+                if float(rubric["points"]) > 0
             )
-            score = achieved / positive_total
-            tag_values: dict[str, float] = {
-                str(tag): score for tag in sample.data["example_tags"]
-            }
-            tagged: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = (
-                defaultdict(list)
-            )
-            for rubric, grade in zip(rubrics, rubric_grades, strict=True):
-                for tag in rubric.get("tags", []):
-                    tagged[str(tag)].append((rubric, grade))
-            for tag, pairs in tagged.items():
-                denom = sum(
-                    float(rubric["points"])
-                    for rubric, _ in pairs
-                    if float(rubric["points"]) > 0
-                )
-                if denom:
-                    tag_values[tag] = (
-                        sum(
-                            float(rubric["points"])
-                            for rubric, grade in pairs
-                            if grade["criteria_met"]
-                        )
-                        / denom
+            if denom:
+                tag_values[tag] = (
+                    sum(
+                        float(rubric["points"])
+                        for rubric, grade in pairs
+                        if grade["criteria_met"]
                     )
-            sample_results.append(
-                {
-                    "score": score,
-                    "is_pass": score >= 0.5,
-                    "parsed": rubric_grades,
-                    "meta": {"tag_scores": tag_values},
-                }
-            )
-        results.append(sample_results)
-    return results
+                    / denom
+                )
+        return {
+            "score": score,
+            "is_pass": score >= 0.5,
+            "parsed": rubric_grades,
+            "meta": {"tag_scores": tag_values},
+        }
+
+    return judge_generations(
+        samples,
+        generation_outputs,
+        label="HealthBench",
+        make_jobs=make_jobs,
+        run_job=judge,
+        combine=combine,
+        workers=settings.workers,
+    )
 
 
 def aggregate(

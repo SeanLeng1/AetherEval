@@ -84,14 +84,12 @@ class _SystemDroppingTokenizer:
 
 
 class OfflineJudgeTests(unittest.TestCase):
-    def test_concurrent_requests_are_submitted_as_one_offline_batch(self) -> None:
+    def test_concurrent_requests_are_sent_as_independent_backend_calls(self) -> None:
         backend = _FakeBackend()
         client = OfflineJudgeClient(
             model="local/judge",
             dp_size=1,
             tensor_parallel_size=1,
-            batch_size=8,
-            batch_wait_seconds=0.05,
             backend=backend,
         )
         try:
@@ -109,13 +107,39 @@ class OfflineJudgeTests(unittest.TestCase):
         finally:
             client.close()
 
-        self.assertEqual(len(backend.calls), 1)
-        self.assertCountEqual(outputs, [f"judged:prompt-{index}" for index in range(4)])
-        self.assertEqual(backend.calls[0][1]["temperature"], 0.5)
-        self.assertEqual(backend.calls[0][1]["max_new_tokens"], 128)
-        self.assertIs(backend.calls[0][1]["enable_thinking"], False)
-        self.assertIs(backend.calls[0][1]["_show_progress"], False)
+        self.assertEqual(outputs, [f"judged:prompt-{index}" for index in range(4)])
+        self.assertEqual(len(backend.calls), 4)
+        for inputs, gen_cfg in backend.calls:
+            self.assertEqual(len(inputs), 1)
+            self.assertEqual(gen_cfg["temperature"], 0.5)
+            self.assertEqual(gen_cfg["max_new_tokens"], 128)
+            self.assertIs(gen_cfg["enable_thinking"], False)
+            self.assertIs(gen_cfg["_show_progress"], False)
         self.assertTrue(backend.closed)
+
+    def test_backend_error_fails_only_its_own_request(self) -> None:
+        class _FailingBackend(_FakeBackend):
+            def generate(self, inputs, gen_cfg):  # noqa: ANN001
+                if inputs[0].prompt[-1]["content"] == "bad":
+                    raise ConnectionError("judge server unavailable")
+                return super().generate(inputs, gen_cfg)
+
+        client = OfflineJudgeClient(
+            model="local/judge",
+            dp_size=1,
+            tensor_parallel_size=1,
+            backend=_FailingBackend(),
+        )
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError, "offline judge request 0 failed: judge server unavailable"
+            ):
+                client.complete([{"role": "user", "content": "bad"}])
+            self.assertEqual(
+                client.complete([{"role": "user", "content": "good"}]), "judged:good"
+            )
+        finally:
+            client.close()
 
     def test_system_role_is_preflighted_before_offline_generation(self) -> None:
         backend = _FakeBackend()

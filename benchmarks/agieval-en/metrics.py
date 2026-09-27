@@ -3,7 +3,7 @@ from collections import defaultdict
 from typing import Any
 
 from aethereval.core.types import Sample
-from aethereval.metrics.common import aggregate_mcq_results, mean, to_records
+from aethereval.metrics.common import aggregate_binary_results, mean, to_records
 
 
 PRIMARY_METRIC = "macro_accuracy"
@@ -127,7 +127,7 @@ def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    result = aggregate_mcq_results(sample_results, metric_options, group_key="subset")
+    result = aggregate_binary_results(sample_results, metric_options, group_key="subset")
     # OLMES agi_eval_english reports the macro average over its subsets; `accuracy`
     # stays the micro average over questions.
     by_subset: dict[str, list[float]] = defaultdict(list)

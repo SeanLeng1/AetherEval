@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from urllib.request import urlopen
 
+from benchmark_utils.data import write_text
+
 
 VERSION = "v0.2.0"
 URL = (
@@ -20,9 +22,8 @@ def main() -> None:
     if len(rows) != 378 or len({row["task_id"] for row in rows}) != 378:
         raise ValueError("Expected the complete 378-task MBPP+ v0.2.0 release")
     output = Path(__file__).resolve().parent / "data" / "eval.jsonl"
-    output.parent.mkdir(parents=True, exist_ok=True)
     # Preserve raw serialized inputs; official deserialization happens during scoring.
-    output.write_text(text, encoding="utf-8")
+    write_text(output, text)
     print(f"Wrote {len(rows)} tasks to {output} (MBPP+ {VERSION})")
 
 

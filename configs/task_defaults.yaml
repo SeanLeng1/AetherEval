@@ -1,3 +1,6 @@
+# Native task keys other than `metrics` and `num_repeats` must be generation keys
+# (aethereval/core/task_defaults.py GENERATION_KEYS); a typo fails when the task loads.
+
 agieval-en:
   # Official chat evaluation is greedy; 4096 is our local output ceiling.
   n: 1
@@ -157,8 +160,8 @@ minerva:
   top_p: 0.95
 
 mmlu-pro:
-  # Official local runner settings; AetherEval still uses a zero-shot prompt, so the
-  # runner's few-shot stop "Question:" is deliberately not carried over.
+  # Official local runner sampling with a larger local token ceiling than its 2048; the
+  # prompt is zero-shot, so the runner's few-shot stop "Question:" is not carried over.
   n: 1
   max_new_tokens: 8192
   temperature: 0.0
@@ -228,7 +231,7 @@ writingbench:
     judge_max_new_tokens: 2048
 
 zebralogic:
-  # ZeroEval README profile; its current generic CLI uses a different token ceiling.
+  # ZeroEval README profile sampling with a larger local token ceiling than its 4096.
   n: 1
   max_new_tokens: 8192
   temperature: 0.0

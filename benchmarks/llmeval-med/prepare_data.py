@@ -4,7 +4,8 @@ import ast
 import json
 from pathlib import Path
 
-from benchmark_utils.data import read_text
+from aethereval.core.io import write_jsonl
+from benchmark_utils.data import read_text, write_text
 
 
 def main() -> None:
@@ -23,18 +24,17 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
 
     dataset = json.loads(read_text(f"{source}/dataset/dataset.json"))
-    with (output / "eval.jsonl").open("w", encoding="utf-8") as dst:
-        for category, rows in dataset.items():
-            for row in rows:
-                payload = dict(row)
-                payload["id"] = f"{category}-{row['groupCode']}-{row['round']}"
-                payload["category"] = category
-                dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    rows: list[dict] = []
+    for category, category_rows in dataset.items():
+        for row in category_rows:
+            payload = dict(row)
+            payload["id"] = f"{category}-{row['groupCode']}-{row['round']}"
+            payload["category"] = category
+            rows.append(payload)
+    write_jsonl(output / "eval.jsonl", rows)
 
     prompts = _extract_prompts(f"{source}/evaluate/Evaluate.py")
-    (output / "judge_prompts.json").write_text(
-        json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_text(output / "judge_prompts.json", json.dumps(prompts, ensure_ascii=False, indent=2))
 
 
 def _extract_prompts(path: str | Path) -> dict[str, str]:

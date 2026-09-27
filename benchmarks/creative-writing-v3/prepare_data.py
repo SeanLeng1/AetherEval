@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 
+from aethereval.core.io import write_jsonl
 from benchmark_utils.data import read_text
 
 
@@ -21,11 +22,12 @@ def main() -> None:
     prompts = json.loads(read_text(args.source))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8") as dst:
-        for prompt_id, item in prompts.items():
-            seeds = item["seed_modifiers"]
-            for iteration in range(1, args.iterations + 1):
-                payload = {
+    rows: list[dict] = []
+    for prompt_id, item in prompts.items():
+        seeds = item["seed_modifiers"]
+        for iteration in range(1, args.iterations + 1):
+            rows.append(
+                {
                     "id": f"{prompt_id}-{iteration}",
                     "prompt_id": str(prompt_id),
                     "iteration": iteration,
@@ -34,7 +36,8 @@ def main() -> None:
                     "base_prompt": item["writing_prompt"],
                     "seed_modifier": seeds[(iteration - 1) % len(seeds)],
                 }
-                dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            )
+    write_jsonl(output, rows)
 
 
 if __name__ == "__main__":

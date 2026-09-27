@@ -23,13 +23,24 @@ _REQUIRED_MODULES = (
 )
 
 
+class _LaxType(type):
+    """Dummy type whose missing attributes are dummy types too (cached)."""
+
+    def __getattr__(cls, name: str):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        dummy = _LaxType(name, (), {})
+        setattr(cls, name, dummy)
+        return dummy
+
+
 class _LaxModule(types.ModuleType):
     """Module whose missing attributes resolve to fresh dummy types (cached)."""
 
     def __getattr__(self, name: str):
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
-        dummy = type(name, (), {})
+        dummy = _LaxType(name, (), {})
         setattr(self, name, dummy)
         return dummy
 
@@ -41,6 +52,18 @@ def _ensure_lax_module(name: str) -> types.ModuleType:
     lax = _LaxModule(name)
     sys.modules[name] = lax
     return lax
+
+
+def _patch_missing_attr(mod_name: str, attr: str, exc: BaseException) -> None:
+    if mod_name.split(".", 1)[0] in sys.stdlib_module_names:
+        raise RuntimeError(
+            f"Refusing to stub standard-library attribute {mod_name}.{attr} "
+            "while importing BFCL."
+        ) from exc
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        mod = _ensure_lax_module(mod_name)
+    setattr(mod, attr, _LaxType(attr, (), {}))
 
 
 def _set_bfcl_project_root(project_root: str | Path | None) -> None:
@@ -88,26 +111,13 @@ def ensure_bfcl_importable(
             msg = str(exc)
             if "has no attribute" in msg and "'" in msg:
                 parts = msg.split("'")
-                mod_name, attr = parts[1], parts[3]
-                mod = sys.modules.get(mod_name)
-                if mod is None:
-                    mod = _ensure_lax_module(mod_name)
-                setattr(mod, attr, type(attr, (), {}))
+                _patch_missing_attr(parts[1], parts[3], exc)
             elif msg.startswith("No ") and " module name -> " in msg:
                 attr = msg.split("No ", 1)[1].split(" found ", 1)[0]
-                mod_name = msg.rsplit(" -> ", 1)[1]
-                mod = sys.modules.get(mod_name)
-                if mod is None:
-                    mod = _ensure_lax_module(mod_name)
-                setattr(mod, attr, type(attr, (), {}))
+                _patch_missing_attr(msg.rsplit(" -> ", 1)[1], attr, exc)
             elif msg.startswith("cannot import name") and "'" in msg:
                 parts = msg.split("'")
-                attr = parts[1]
-                mod_name = parts[3]
-                mod = sys.modules.get(mod_name)
-                if mod is None:
-                    mod = _ensure_lax_module(mod_name)
-                setattr(mod, attr, type(attr, (), {}))
+                _patch_missing_attr(parts[3], parts[1], exc)
             else:
                 raise
     raise ImportError(f"could not make {target} importable after {max_iters} patches")

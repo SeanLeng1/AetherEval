@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from typing import Any
 
@@ -6,15 +5,22 @@ from aethereval.core.io import read_jsonl
 from aethereval.core.types import GenerationRecord, Sample
 from aethereval.metrics.common import aggregate_binary_results
 
+from .data import load_hf, write_task_jsonl
 from .math_scoring import score_with_math_verify
 
 
 DATASET_NAME = "RLLab/eval-set"
+DATASET_REVISION = "39f531062c1974c38e136ee3b9445683fa4d576b"
 DATA_FILE = "data/eval.jsonl"
+MATH_PROMPT_SUFFIX = (
+    "\n\nPlease think step by step, and put your final answer within \\boxed{}."
+)
+# AIME rows store the bare answer and the problem without MATH_PROMPT_SUFFIX.
+AIME_YEARS = {"aime24": 2024, "aime25": 2025}
 
 
 def load_eval_set_math_samples(
-    task_dir: Path, data_file: str = DATA_FILE
+    task_dir: Path, data_file: str = DATA_FILE, *, gold_field: str = "solution"
 ) -> list[Sample]:
     rows = read_jsonl(task_dir / data_file)
     samples: list[Sample] = []
@@ -24,73 +30,77 @@ def load_eval_set_math_samples(
 
         sample_id = str(row["id"])
         problem = str(row["problem"]).strip()
-        solution = str(row["solution"]).strip()
+        gold = str(row[gold_field]).strip()
         if not problem:
             raise ValueError(f"Empty problem for sample {sample_id}")
-        if not solution:
-            raise ValueError(f"Empty solution for sample {sample_id}")
+        if not gold:
+            raise ValueError(f"Empty {gold_field} for sample {sample_id}")
 
         samples.append(
             Sample(
                 id=sample_id,
-                gold=solution,
+                gold=gold,
                 meta={
                     "source": row["source"],
                     "subset": row["subset"],
                 },
                 data={
                     "problem": problem,
-                    "solution": solution,
+                    "solution": gold,
                 },
             )
         )
     return samples
 
 
-def build_eval_set_math_prompt(sample: Sample) -> str:
-    return str(sample.data["problem"]).strip()
+def build_eval_set_math_prompt(sample: Sample, *, add_suffix: bool = False) -> str:
+    problem = str(sample.data["problem"]).strip()
+    return problem + MATH_PROMPT_SUFFIX if add_suffix else problem
 
 
 def prepare_eval_set_math_dataset(subset: str, task_dir: Path) -> None:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "datasets is required for prepare_data.py. Install with `pip install datasets`."
-        ) from exc
-
-    out_path = task_dir / DATA_FILE
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     rows: list[dict[str, object]] = []
-    for idx, row in enumerate(load_dataset(DATASET_NAME, subset, split="train")):
-        rows.append(
-            {
-                "id": f"{subset}_{idx}",
-                "problem": str(row["problem"]),
-                "solution": str(row["solution"]),
-                "source": DATASET_NAME,
-                "subset": subset,
-            }
-        )
+    for idx, row in enumerate(load_hf(DATASET_NAME, subset, "train", DATASET_REVISION)):
+        if subset in AIME_YEARS:
+            problem = str(row["problem"]).strip()
+            if not problem.endswith(MATH_PROMPT_SUFFIX):
+                raise ValueError(f"{subset} row {idx}: missing eval-set math prompt suffix")
+            rows.append(
+                {
+                    "id": f"{subset}_{idx}",
+                    # build_eval_set_math_prompt(add_suffix=True) adds it back exactly once.
+                    "problem": problem[: -len(MATH_PROMPT_SUFFIX)],
+                    "answer": str(row["solution"]),
+                    "year": AIME_YEARS[subset],
+                    "source": DATASET_NAME,
+                    "subset": subset,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "id": f"{subset}_{idx}",
+                    "problem": str(row["problem"]),
+                    "solution": str(row["solution"]),
+                    "source": DATASET_NAME,
+                    "subset": subset,
+                }
+            )
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"wrote {out_path} rows={len(rows)}")
+    write_task_jsonl(task_dir, rows)
 
 
 def score_generation(
     sample: Sample,
     generation: str,
     *,
+    boxed_gold: bool = False,
     keep_units_fallback: bool = False,
 ) -> dict[str, Any]:
     score, pred_values, gold_values, warning = score_with_math_verify(
         str(sample.gold),
         generation,
-        boxed_gold=False,
+        boxed_gold=boxed_gold,
         keep_units_fallback=keep_units_fallback,
     )
 
@@ -122,8 +132,22 @@ def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float | list[str]]:
-    return aggregate_binary_results(
+    metrics = aggregate_binary_results(
         sample_results,
         metric_options,
         parsed_flag_fn=_parsed_prediction_extracted,
     )
+    # A gold that math-verify cannot extract scores every response 0; surface it
+    # in summary.json instead of only in each record's meta.
+    sample_ids_by_warning: dict[str, list[str]] = {}
+    for item in sample_results:
+        warnings = {record["meta"].get("warning") for record in item["records"]}
+        for warning in sorted(filter(None, warnings)):
+            sample_ids_by_warning.setdefault(warning, []).append(str(item["sample_id"]))
+    if sample_ids_by_warning:
+        metrics["__warnings__"] = [
+            f"{len(ids)} samples scored 0 with warning '{warning}' "
+            f"(e.g. {', '.join(ids[:5])})"
+            for warning, ids in sample_ids_by_warning.items()
+        ]
+    return metrics

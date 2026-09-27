@@ -8,10 +8,9 @@ import tiktoken
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
-    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
-    local_constraint_body,
-    parallel_map,
+    judge_generations,
+    judge_with_format_retries,
     parse_json_object,
     resolve_judge_settings,
 )
@@ -105,75 +104,46 @@ def score_generations_batch(
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     settings = resolve_judge_settings(metric_options, default_model=DEFAULT_JUDGE_MODEL)
-    jobs: list[tuple[int, int, int, str, str]] = []
-    candidate_metadata: list[list[dict[str, Any]]] = []
-    for sample_idx, (sample, output) in enumerate(
-        zip(samples, generation_outputs, strict=True)
-    ):
-        if sample.id != output.sample_id:
-            raise ValueError("Arena-Hard-v2 sample/output mismatch")
-        per_sample_metadata: list[dict[str, Any]] = []
-        for gen_idx, generation in enumerate(output.generations):
-            per_sample_metadata.append(_style_metadata(generation))
-            baseline = sample.data["baseline_answer"]
-            category = str(sample.meta["category"])
-            jobs.append(
-                (
-                    sample_idx,
-                    gen_idx,
-                    0,
-                    PROMPT_TEMPLATE.format(
-                        question=sample.data["prompt"],
-                        answer_a=baseline,
-                        answer_b=generation,
-                    ),
-                    category,
-                )
-            )
-            jobs.append(
-                (
-                    sample_idx,
-                    gen_idx,
-                    1,
-                    PROMPT_TEMPLATE.format(
-                        question=sample.data["prompt"],
-                        answer_a=generation,
-                        answer_b=baseline,
-                    ),
-                    category,
-                )
-            )
-        candidate_metadata.append(per_sample_metadata)
-
-    def judge(job: tuple[int, int, int, str, str]) -> dict[str, Any]:
-        _, _, _, prompt, category = job
-        last_text = ""
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPTS[category]},
-            {"role": "user", "content": prompt},
+    # Computed before judging so a tokenizer failure costs no judge calls.
+    candidate_metadata = {
+        output.sample_id: [
+            _style_metadata(generation) for generation in output.generations
         ]
-        for _ in range(NORMAL_FORMAT_ATTEMPTS):
-            last_text = chat_completion(
-                settings,
-                messages,
-            )
-            label = _parse_label(last_text)
-            if label is not None:
-                return {"score": label, "judgment": last_text}
+        for output in generation_outputs
+    }
 
-        constraint = local_constraint_body(settings, json_schema=VERDICT_SCHEMA)
-        if constraint is not None:
-            try:
-                last_text = chat_completion(
-                    settings,
-                    messages,
-                    extra_body=constraint,
-                )
-                label = _parse_label(last_text)
-                if label is not None:
-                    return {"score": label, "judgment": last_text}
-            except (RuntimeError, ValueError):
-                pass
+    def make_jobs(
+        sample: Sample, output: GenerationOutput, generation: str
+    ) -> list[tuple[str, str]]:
+        del output
+        baseline = sample.data["baseline_answer"]
+        category = str(sample.meta["category"])
+        return [
+            (
+                PROMPT_TEMPLATE.format(
+                    question=sample.data["prompt"],
+                    answer_a=answer_a,
+                    answer_b=answer_b,
+                ),
+                category,
+            )
+            for answer_a, answer_b in ((baseline, generation), (generation, baseline))
+        ]
+
+    def judge(job: tuple[str, str]) -> dict[str, Any]:
+        prompt, category = job
+        label, last_text, _ = judge_with_format_retries(
+            settings,
+            [
+                {"role": "system", "content": SYSTEM_PROMPTS[category]},
+                {"role": "user", "content": prompt},
+            ],
+            _parse_label,
+            json_schema=VERDICT_SCHEMA,
+            complete=chat_completion,
+        )
+        if label is not None:
+            return {"score": label, "judgment": last_text}
 
         # Official Arena-Hard stores null and filters the whole judgment row.
         return {
@@ -182,37 +152,41 @@ def score_generations_batch(
             "error": "judge returned no parseable verdict",
         }
 
-    games = parallel_map(
-        judge, jobs, workers=settings.workers, desc="Arena-Hard-v2 judge"
+    def combine(
+        sample: Sample,
+        output: GenerationOutput,
+        gen_idx: int,
+        games: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del sample
+        game0, game1 = games
+        judge_failed = game0["score"] is None or game1["score"] is None
+        battle_scores: list[float] = []
+        if not judge_failed:
+            battle_scores = LABEL_TO_SCORE[game1["score"]] + [
+                1.0 - value for value in LABEL_TO_SCORE[game0["score"]]
+            ]
+        score = sum(battle_scores) / len(battle_scores) if battle_scores else 0.0
+        return {
+            "score": score,
+            "is_pass": score > 0.5,
+            "parsed": [game0, game1],
+            "meta": {
+                "battle_scores": battle_scores,
+                "judge_failed": judge_failed,
+                "candidate_metadata": candidate_metadata[output.sample_id][gen_idx],
+            },
+        }
+
+    return judge_generations(
+        samples,
+        generation_outputs,
+        label="Arena-Hard-v2",
+        make_jobs=make_jobs,
+        run_job=judge,
+        combine=combine,
+        workers=settings.workers,
     )
-    results: list[list[dict[str, Any]]] = []
-    offset = 0
-    for sample_idx, output in enumerate(generation_outputs):
-        per_sample: list[dict[str, Any]] = []
-        for gen_idx in range(len(output.generations)):
-            game0, game1 = games[offset : offset + 2]
-            offset += 2
-            judge_failed = game0["score"] is None or game1["score"] is None
-            battle_scores: list[float] = []
-            if not judge_failed:
-                battle_scores = LABEL_TO_SCORE[game1["score"]] + [
-                    1.0 - value for value in LABEL_TO_SCORE[game0["score"]]
-                ]
-            score = sum(battle_scores) / len(battle_scores) if battle_scores else 0.0
-            per_sample.append(
-                {
-                    "score": score,
-                    "is_pass": score > 0.5,
-                    "parsed": [game0, game1],
-                    "meta": {
-                        "battle_scores": battle_scores,
-                        "judge_failed": judge_failed,
-                        "candidate_metadata": candidate_metadata[sample_idx][gen_idx],
-                    },
-                }
-            )
-        results.append(per_sample)
-    return results
 
 
 def aggregate(

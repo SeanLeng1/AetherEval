@@ -23,6 +23,8 @@ benchmarks/ifeval/
   data/eval.jsonl
   task.py
   metrics.py
+  prepare_data.py
+  prepare_nltk.py
   ifeval_lib/
 ```
 

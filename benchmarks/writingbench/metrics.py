@@ -4,10 +4,9 @@ from typing import Any
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
 from benchmark_utils.llm_judge import (
-    NORMAL_FORMAT_ATTEMPTS,
     chat_completion,
-    local_constraint_body,
-    parallel_map,
+    judge_generations,
+    judge_with_format_retries,
     parse_json_object,
     resolve_judge_settings,
 )
@@ -97,90 +96,93 @@ def score_generations_batch(
     metric_options: dict[str, Any] | None = None,
 ) -> list[list[dict[str, Any]]]:
     settings = resolve_judge_settings(metric_options, default_model=DEFAULT_JUDGE_MODEL)
-    jobs: list[tuple[int, int, int, str, str]] = []
-    layouts: list[list[int]] = []
-    for sample_idx, (sample, output) in enumerate(
-        zip(samples, generation_outputs, strict=True)
-    ):
-        if sample.id != output.sample_id:
-            raise ValueError("WritingBench sample/output mismatch")
-        per_generation: list[int] = []
-        for gen_idx, generation in enumerate(output.generations):
-            response = _strip_thinking(generation)
-            for criterion_idx, criterion in enumerate(sample.data["checklist"]):
-                prompt = EVALUATE_PROMPT.format(
+
+    def make_jobs(
+        sample: Sample, output: GenerationOutput, generation: str
+    ) -> list[tuple[str, str]]:
+        del output
+        response = _strip_thinking(generation)
+        return [
+            (
+                str(criterion["name"]),
+                EVALUATE_PROMPT.format(
                     query=sample.data["query"],
                     response=response,
                     criteria=criterion,
-                )
-                jobs.append(
-                    (sample_idx, gen_idx, criterion_idx, str(criterion["name"]), prompt)
-                )
-            per_generation.append(len(sample.data["checklist"]))
-        layouts.append(per_generation)
-
-    def judge(job: tuple[int, int, int, str, str]) -> dict[str, Any]:
-        _, _, _, name, prompt = job
-        last_error: BaseException | None = None
-        last_text = ""
-        messages = [
-            {"role": "system", "content": EVALUATE_SYSTEM},
-            {"role": "user", "content": prompt},
-        ]
-        for _ in range(NORMAL_FORMAT_ATTEMPTS):
-            last_text = chat_completion(
-                settings,
-                messages,
+                ),
             )
+            for criterion in sample.data["checklist"]
+        ]
+
+    def judge(job: tuple[str, str]) -> dict[str, Any]:
+        name, prompt = job
+        # The abort message names the last parse or request error, as before.
+        last_error: BaseException | None = None
+
+        def complete(*args: Any, **kwargs: Any) -> str:
+            nonlocal last_error
             try:
-                return _parse_grade(name, last_text)
+                return chat_completion(*args, **kwargs)
+            except (RuntimeError, ValueError) as exc:
+                last_error = exc
+                raise
+
+        def parse(text: str) -> dict[str, Any] | None:
+            nonlocal last_error
+            try:
+                return _parse_grade(name, text)
             except (ValueError, TypeError) as exc:
                 last_error = exc
+                return None
 
-        constraint = local_constraint_body(settings, json_schema=GRADE_SCHEMA)
-        if constraint is not None:
-            try:
-                last_text = chat_completion(
-                    settings,
-                    messages,
-                    extra_body=constraint,
-                )
-                return _parse_grade(name, last_text)
-            except (RuntimeError, ValueError, TypeError) as exc:
-                last_error = exc
-
-        # The official evaluator aborts when its format retries are exhausted.
-        raise ValueError(
-            f"WritingBench judge failed to generate a score: {last_error}; "
-            f"last response={last_text!r}"
+        grade, last_text, _ = judge_with_format_retries(
+            settings,
+            [
+                {"role": "system", "content": EVALUATE_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            parse,
+            json_schema=GRADE_SCHEMA,
+            complete=complete,
         )
-
-    grades = parallel_map(
-        judge, jobs, workers=settings.workers, desc="WritingBench judge"
-    )
-    results: list[list[dict[str, Any]]] = []
-    offset = 0
-    for per_generation in layouts:
-        per_sample: list[dict[str, Any]] = []
-        for count in per_generation:
-            criterion_grades = grades[offset : offset + count]
-            offset += count
-            score = sum(float(item["score"]) for item in criterion_grades) / count
-            per_sample.append(
-                {
-                    "score": score,
-                    "is_pass": score >= 5.0,
-                    "parsed": criterion_grades,
-                    "meta": {
-                        "criterion_scores": {
-                            item["name"]: float(item["score"])
-                            for item in criterion_grades
-                        }
-                    },
-                }
+        if grade is None:
+            # The official evaluator aborts when its format retries are exhausted.
+            raise ValueError(
+                f"WritingBench judge failed to generate a score: {last_error}; "
+                f"last response={last_text!r}"
             )
-        results.append(per_sample)
-    return results
+        return grade
+
+    def combine(
+        sample: Sample,
+        output: GenerationOutput,
+        gen_idx: int,
+        criterion_grades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del sample, output, gen_idx
+        score = sum(float(item["score"]) for item in criterion_grades) / len(
+            criterion_grades
+        )
+        return {
+            "score": score,
+            "is_pass": score >= 5.0,
+            "parsed": criterion_grades,
+            "meta": {
+                "criterion_scores": {
+                    item["name"]: float(item["score"]) for item in criterion_grades
+                }
+            },
+        }
+
+    return judge_generations(
+        samples,
+        generation_outputs,
+        label="WritingBench",
+        make_jobs=make_jobs,
+        run_job=judge,
+        combine=combine,
+        workers=settings.workers,
+    )
 
 
 def aggregate(

@@ -3,6 +3,7 @@ from typing import Any
 
 from aethereval.core.io import read_jsonl
 from aethereval.core.types import Sample
+from benchmark_utils.evalplus import build_prompt
 
 
 TASK_NAME = "humaneval-plus"
@@ -19,20 +20,6 @@ _REQUIRED_KEYS = {
     "plus_input",
     "atol",
 }
-
-
-_SYSTEM_PROMPT = (
-    "You are an expert Python programmer. "
-    "You will be given a function specification and must return a correct completed "
-    "Python function that passes all tests."
-)
-_FORMAT_INSTRUCTION = (
-    "Provide a SHORT reasoning on how to solve the task, then return the completed "
-    "function enclosed in a Python code block as:\n"
-    "```python\n"
-    "# YOUR CODE HERE\n"
-    "```"
-)
 
 
 def _ensure_list(value: Any, key: str, sample_id: str) -> list[Any]:
@@ -91,15 +78,4 @@ def load_samples(task_dir: Path) -> list[Sample]:
     return samples
 
 
-def build_prompt(sample: Sample) -> list[dict[str, str]]:
-    prompt = str(sample.data["prompt"])
-    user_prompt = (
-        f"### Question:\n{prompt}\n\n"
-        "### Format:\n"
-        f"{_FORMAT_INSTRUCTION}\n\n"
-        "### Answer: (use the provided format with backticks)\n\n"
-    )
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
+__all__ = ["TASK_NAME", "DATA_FILE", "load_samples", "build_prompt"]

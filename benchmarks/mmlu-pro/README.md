@@ -8,12 +8,11 @@ Official repository: [TIGER-AI-Lab/MMLU-Pro](https://github.com/TIGER-AI-Lab/MML
 Checked [evaluate_from_local.py](https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/f418b116db00b065c2aea046518d8fcf74d39872/evaluate_from_local.py)
 and [evaluate_from_api.py](https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/f418b116db00b065c2aea046518d8fcf74d39872/evaluate_from_api.py).
 
-Defaults follow the original local runner:
-`n=1, temperature=0, top_p=1, max_new_tokens=2048`. The runner's
+Defaults `n=1, temperature=0, top_p=1, max_new_tokens=8192` keep the original
+local runner's greedy sampling but raise its 2048-token limit to a local 8192-token
+ceiling (upstream API branches also use other limits, including 4000). The runner's
 `stop=["Question:"]` only ends few-shot continuation and is not used with this
 zero-shot chat prompt. Unparseable answers score 0 (upstream guesses randomly).
-Upstream API branches use different limits (including 4000), so 2048 names a
-specific reference profile rather than every official model configuration.
 
 **Prompt mismatch remains:** the official local runner defaults to five
 validation-set CoT exemplars; this task currently uses zero-shot CoT. Sampling

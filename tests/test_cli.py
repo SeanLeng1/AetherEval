@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import os
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,14 +17,20 @@ from aethereval.cli import (
 from aethereval.config import resolve_run_arguments
 from aethereval.core.io import run_output_dir
 from aethereval.core.task_defaults import (
+    resolve_phase_num_repeats,
     resolve_task_default_gen,
     resolve_task_num_repeats,
 )
-from benchmarks.bfcl._compat import _set_bfcl_project_root
+from benchmarks.bfcl._compat import (
+    _LaxModule,
+    _patch_missing_attr,
+    _set_bfcl_project_root,
+)
 from benchmarks.bfcl.cli import build_bfcl_spec
 from benchmarks.bfcl.external import (
     ExternalRunSpec,
-    _cap_bfcl_thread_pool,
+    _size_bfcl_thread_pool,
+    _clear_results,
     _filter_bfcl_prints,
     _evaluation_run_paths,
     _gen_args,
@@ -33,7 +40,9 @@ from benchmarks.bfcl.external import (
     _run_generation,
     _run_generations,
     _repeat_seed,
+    _requested_categories,
     _server_command_for_spec,
+    _sort_result_files,
     add_comparison_metrics,
     average_repeat_metrics,
     compute_format_rates,
@@ -42,16 +51,19 @@ from benchmarks.bfcl.external import (
     write_predictions_jsonl,
 )
 from benchmarks.bfcl.register import prepare_bfcl_model
+from tests._deps import BFCL_MODULES, requires
 
 
 class ExternalCliTests(unittest.TestCase):
-    def test_bfcl_v3_thread_pool_cap_is_applied_and_restored(self) -> None:
+    @requires(*BFCL_MODULES)
+    def test_bfcl_v3_thread_pool_size_is_applied_and_restored(self) -> None:
         from bfcl_eval.model_handler.local_inference import base_oss_handler
 
         original = base_oss_handler.ThreadPoolExecutor
-        with _cap_bfcl_thread_pool(17):
-            with base_oss_handler.ThreadPoolExecutor(max_workers=100) as executor:
-                self.assertEqual(executor._max_workers, 17)
+        for size in (17, 512):
+            with _size_bfcl_thread_pool(size):
+                with base_oss_handler.ThreadPoolExecutor(max_workers=100) as executor:
+                    self.assertEqual(executor._max_workers, size)
         self.assertIs(base_oss_handler.ThreadPoolExecutor, original)
 
     def test_bfcl_resume_repairs_only_an_interrupted_final_jsonl_record(
@@ -105,68 +117,197 @@ class ExternalCliTests(unittest.TestCase):
 
             self.assertEqual(list(model_dir.glob("*.corrupt-tail*")), [])
 
-    def test_local_judge_automatically_splits_generation_and_evaluation(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "--model",
-                "candidate/model",
-                "--tasks",
-                "healthbench",
-                "--judge-backend",
-                "local",
-                "--judge-model",
-                "local/judge",
-                "--overwrite",
-            ]
+    def test_bfcl_resume_drops_failed_records_but_keeps_context_overflows(
+        self,
+    ) -> None:
+        overflow = (
+            "Error during inference: BFCL prompt exceeds max context length: "
+            "input_tokens=9000, max_context_length=8192."
         )
-        resolved = resolve_run_arguments(args, {})
-        result = {"results": {"healthbench": {"metrics": {"score": 0.5}}}}
+        records = [
+            {"id": "live_relevance_3-3-0", "result": "ok"},
+            {"id": "live_relevance_3-3-0", "result": "Error during inference: 503"},
+            {
+                "id": "live_relevance_4-4-0",
+                "result": [["ok"], ["Error during inference: timeout"]],
+            },
+            {"id": "live_relevance_5-5-0", "result": overflow},
+            {"id": "live_relevance_6-6-0", "result": "ok"},
+        ]
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model"
+            model_dir.mkdir(parents=True)
+            result_file = model_dir / "BFCL_v3_live_relevance_result.json"
+            original = "".join(json.dumps(record) + "\n" for record in records)
+            result_file.write_text(original, encoding="utf-8")
 
-        with mock.patch(
-            "aethereval.cli.run_evaluation",
-            side_effect=[result, result],
-        ) as run_evaluation:
-            actual = run_selected_tasks(args, resolved)
+            # Eval-only never drops records; the errors still fail the run.
+            _prepare_existing_results([result_dir], "dry-model", repair_tail=False)
+            self.assertEqual(result_file.read_text(encoding="utf-8"), original)
+            with self.assertRaisesRegex(RuntimeError, "count=2"):
+                _raise_on_inference_errors(result_dir, "dry-model")
 
-        self.assertIs(actual, result)
-        self.assertEqual(run_evaluation.call_count, 2)
-        generate_call = run_evaluation.call_args_list[0].kwargs
-        evaluate_call = run_evaluation.call_args_list[1].kwargs
+            # Generation drops every copy of a failed id so upstream regenerates
+            # all of them; context-length failures stay as zero-score records.
+            _prepare_existing_results([result_dir], "dry-model", repair_tail=True)
+            self.assertEqual(
+                result_file.read_text(encoding="utf-8"),
+                "".join(json.dumps(record) + "\n" for record in records[3:]),
+            )
+            self.assertEqual(list(model_dir.glob("*.tmp")), [])
+
+    @requires("bfcl_eval")
+    def test_bfcl_resume_restores_upstream_result_order(self) -> None:
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "dry-model"
+            model_dir.mkdir(parents=True)
+            result_file = model_dir / "BFCL_v3_simple_result.json"
+            lines = [
+                json.dumps({"id": f"simple_{index}", "result": "ok"}) + "\n"
+                for index in (0, 2, 10, 1)
+            ]
+            result_file.write_text("".join(lines), encoding="utf-8")
+
+            _sort_result_files([result_dir], "dry-model", {"simple"})
+
+            self.assertEqual(
+                result_file.read_text(encoding="utf-8"),
+                "".join(lines[i] for i in (0, 3, 1, 2)),
+            )
+
+    def test_bfcl_overwrite_never_uses_upstream_update_mode(self) -> None:
+        spec = ExternalRunSpec(model="m", output_dir=Path("o"), allow_overwrite=True)
+
+        self.assertFalse(_gen_args(spec, Path("o/result")).allow_overwrite)
+
+    def test_bfcl_overwrite_clears_only_selected_category_results(self) -> None:
+        with TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            model_dir = result_dir / "org_model"
+            model_dir.mkdir(parents=True)
+            for category in ("simple", "live_simple", "multi_turn_base"):
+                (model_dir / f"BFCL_v3_{category}_result.json").write_text("{}\n")
+
+            _clear_results(
+                [result_dir], "org/model", {"live_simple", "multi_turn_base"}
+            )
+
+            self.assertEqual(
+                sorted(path.name for path in model_dir.iterdir()),
+                ["BFCL_v3_simple_result.json"],
+            )
+
+    @requires("bfcl_eval")
+    def test_bfcl_reports_only_requested_categories(self) -> None:
+        categories = _requested_categories(["non_live"])
+        self.assertIn("simple", categories)
+        self.assertNotIn("multi_turn_base", categories)
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "bfcl"
+            result_dir = out / "result"
+            model_dir = result_dir / "dry-model"
+            model_dir.mkdir(parents=True)
+            (model_dir / "BFCL_v3_simple_result.json").write_text(
+                json.dumps({"id": "simple_0", "result": "<think>x</think>"}) + "\n"
+            )
+            # A stale category from an earlier run in the same output dir.
+            (model_dir / "BFCL_v3_multi_turn_base_result.json").write_text(
+                json.dumps(
+                    {"id": "multi_turn_base_0", "result": "Error during inference: x"}
+                )
+                + "\n"
+            )
+
+            _raise_on_inference_errors(result_dir, "dry-model", categories)
+            rates = compute_format_rates(result_dir, "dry-model", categories)
+            stats = write_predictions_jsonl(
+                out=out,
+                result_dir=result_dir,
+                score_dir=out / "score",
+                model="dry-model",
+                handler="toolrl",
+                categories=categories,
+            )
+
+        self.assertEqual(set(rates), {"non_live"})
+        self.assertEqual(stats["prediction_records"], 1)
+
+    def test_local_judge_automatically_splits_generation_and_evaluation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            args = build_parser().parse_args(
+                [
+                    "--model",
+                    "candidate/model",
+                    "--tasks",
+                    "healthbench",
+                    "--judge-backend",
+                    "local",
+                    "--judge-model",
+                    "local/judge",
+                    "--overwrite",
+                    "--output-dir",
+                    tmp,
+                ]
+            )
+            resolved = resolve_run_arguments(args, {})
+            result = {
+                "results": {"healthbench": {"metrics": {"score": 0.5}}},
+                "backend": "vllm",
+            }
+
+            with mock.patch(
+                "aethereval.core.runner._run_phase",
+                side_effect=[result, result],
+            ) as run_phase:
+                actual = run_selected_tasks(args, resolved)
+
+        self.assertEqual(actual["results"], result["results"])
+        self.assertEqual(run_phase.call_count, 2)
+        generate_call = run_phase.call_args_list[0].kwargs
+        evaluate_call = run_phase.call_args_list[1].kwargs
         self.assertTrue(generate_call["generate_only"])
         self.assertFalse(generate_call["eval_only"])
         self.assertTrue(generate_call["overwrite"])
         self.assertFalse(evaluate_call["generate_only"])
         self.assertTrue(evaluate_call["eval_only"])
         self.assertFalse(evaluate_call["overwrite"])
+        self.assertFalse(evaluate_call["rescore_existing"])
+        self.assertIsNone(evaluate_call["backend"])
 
     def test_api_judge_automatically_splits_generation_and_evaluation(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "--model",
-                "candidate/model",
-                "--tasks",
-                "healthbench,llmeval_med",
-                "--overwrite",
-            ]
-        )
-        resolved = resolve_run_arguments(args, {})
-        result = {
-            "results": {
-                "healthbench": {"metrics": {"score": 0.5}},
-                "llmeval_med": {"metrics": {"OP": 30.0}},
+        with TemporaryDirectory() as tmp:
+            args = build_parser().parse_args(
+                [
+                    "--model",
+                    "candidate/model",
+                    "--tasks",
+                    "healthbench,llmeval_med",
+                    "--overwrite",
+                    "--output-dir",
+                    tmp,
+                ]
+            )
+            resolved = resolve_run_arguments(args, {})
+            result = {
+                "results": {
+                    "healthbench": {"metrics": {"score": 0.5}},
+                    "llmeval_med": {"metrics": {"OP": 30.0}},
+                },
+                "backend": "vllm",
             }
-        }
 
-        with mock.patch(
-            "aethereval.cli.run_evaluation",
-            side_effect=[result, result],
-        ) as run_evaluation:
-            actual = run_selected_tasks(args, resolved)
+            with mock.patch(
+                "aethereval.core.runner._run_phase",
+                side_effect=[result, result],
+            ) as run_phase:
+                actual = run_selected_tasks(args, resolved)
 
-        self.assertIs(actual, result)
-        self.assertEqual(run_evaluation.call_count, 2)
-        generate_call = run_evaluation.call_args_list[0].kwargs
-        evaluate_call = run_evaluation.call_args_list[1].kwargs
+        self.assertEqual(actual["results"], result["results"])
+        self.assertEqual(run_phase.call_count, 2)
+        generate_call = run_phase.call_args_list[0].kwargs
+        evaluate_call = run_phase.call_args_list[1].kwargs
         self.assertEqual(generate_call["tasks"], "healthbench,llmeval-med")
         self.assertTrue(generate_call["generate_only"])
         self.assertFalse(generate_call["eval_only"])
@@ -175,6 +316,43 @@ class ExternalCliTests(unittest.TestCase):
         self.assertFalse(evaluate_call["generate_only"])
         self.assertTrue(evaluate_call["eval_only"])
         self.assertFalse(evaluate_call["overwrite"])
+        self.assertFalse(evaluate_call["rescore_existing"])
+        self.assertIsNone(evaluate_call["backend"])
+
+    def test_run_summary_lists_every_task_whatever_the_invocation_order(
+        self,
+    ) -> None:
+        ifeval = {"metrics": {"acc": 1.0}, "primary_score": 1.0}
+        bfcl = {"metrics": {"overall_acc": 50.0}, "primary_score": 50.0}
+
+        def run_native(**kwargs):  # noqa: ANN003
+            run_root = run_output_dir(kwargs["output_dir"], "m", None, None)
+            task_dir = run_root / "ifeval"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "summary.json").write_text(json.dumps(ifeval))
+            return {"results": {"ifeval": ifeval}, "backend": "vllm"}
+
+        def run_bfcl(args, resolved, output_dir):  # noqa: ANN001
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "summary.json").write_text(json.dumps(bfcl))
+            return {**bfcl, "task": "bfcl"}
+
+        for order in (("bfcl", "ifeval"), ("ifeval", "bfcl")):
+            with (
+                self.subTest(order=order),
+                TemporaryDirectory() as tmp,
+                mock.patch("aethereval.cli.run_evaluation", side_effect=run_native),
+                mock.patch("benchmarks.bfcl.cli.run_external", side_effect=run_bfcl),
+            ):
+                for tasks in order:
+                    args = build_parser().parse_args(
+                        ["--model", "m", "--tasks", tasks, "--output-dir", tmp]
+                    )
+                    summary = run_selected_tasks(args, resolve_run_arguments(args, {}))
+
+                self.assertEqual(summary["tasks"], ["bfcl", "ifeval"])
+                self.assertEqual(summary["phase"], "generate_and_eval")
+                self.assertEqual(summary["primary_score_aggregate"], 25.5)
 
     def test_thinking_mode_flags_are_tri_state(self) -> None:
         parser = build_parser()
@@ -268,29 +446,20 @@ class ExternalCliTests(unittest.TestCase):
             ["--tasks", "bfcl", "--model", "rlla-gdpo", "--backend", "sglang"]
         )
         resolved = resolve_run_arguments(args, {})
+        configured = resolve_task_default_gen("bfcl")
 
-        with mock.patch(
-            "benchmarks.bfcl.cli.resolve_task_default_gen",
-            return_value={
-                "n": 1,
-                "handler": "official",
-                "max_new_tokens": 1234,
-                "temperature": 0.25,
-                "top_p": 0.8,
-                "top_k": 17,
-            },
-        ):
-            spec = build_bfcl_spec(args, resolved, Path("outputs"))
+        spec = build_bfcl_spec(args, resolved, Path("outputs"))
 
-        self.assertEqual(spec.max_tokens, 1234)
-        self.assertEqual(spec.handler, "official")
-        self.assertEqual(spec.temperature, 0.25)
-        self.assertEqual(spec.top_p, 0.8)
-        self.assertEqual(spec.top_k, 17)
-        self.assertEqual(spec.num_repeats, 1)
+        self.assertEqual(spec.max_tokens, configured["max_new_tokens"])
+        self.assertEqual(spec.handler, configured["handler"])
+        self.assertEqual(spec.temperature, configured["temperature"])
+        self.assertEqual(spec.top_p, configured["top_p"])
+        self.assertEqual(spec.top_k, configured["top_k"])
+        self.assertEqual(spec.categories, configured["categories"])
+        self.assertEqual(spec.num_repeats, resolve_task_num_repeats("bfcl"))
 
     def test_bfcl_python_spec_defaults_match_task_config(self) -> None:
-        configured = resolve_task_default_gen("bfcl", {})
+        configured = resolve_task_default_gen("bfcl")
         spec = ExternalRunSpec(model="model", output_dir=Path("output"))
 
         self.assertEqual(spec.max_tokens, configured["max_new_tokens"])
@@ -300,6 +469,26 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(spec.num_repeats, resolve_task_num_repeats("bfcl"))
         self.assertEqual(spec.categories, ["live", "non_live", "multi_turn"])
         self.assertEqual(spec.handler, "toolrl")
+
+    def test_eval_only_reuses_the_saved_num_repeats(self) -> None:
+        with TemporaryDirectory() as tmp:
+            saved = Path(tmp) / "summary.json"
+            saved.write_text(json.dumps({"num_repeats": 3}), encoding="utf-8")
+
+            def resolve(path: Path, override: int | None, eval_only: bool) -> int:
+                return resolve_phase_num_repeats(
+                    "bfcl", path, runtime_override=override, eval_only=eval_only
+                )
+
+            self.assertEqual(resolve(saved, None, True), 3)
+            self.assertEqual(resolve(saved, 3, True), 3)
+            self.assertEqual(resolve(saved, 2, False), 2)
+            self.assertEqual(
+                resolve(Path(tmp) / "missing.json", None, True),
+                resolve_task_num_repeats("bfcl"),
+            )
+            with self.assertRaisesRegex(ValueError, "saved run config value 3"):
+                resolve(saved, 2, True)
 
     def test_bfcl_external_spec_supports_unified_phase_flags(self) -> None:
         generate_args = build_parser().parse_args(
@@ -361,6 +550,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertNotIn("log_level_http", spec.sglang_server_args)
         self.assertNotIn("router_log_level", spec.sglang_server_args)
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_generation_reuses_managed_sglang_service(self) -> None:
         spec = ExternalRunSpec(
             model="test/model",
@@ -429,6 +619,7 @@ class ExternalCliTests(unittest.TestCase):
             "http://127.0.0.1:18443/generate",
         )
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_repeated_generation_reuses_server_and_advances_seed(self) -> None:
         spec = ExternalRunSpec(
             model="test/model",
@@ -496,6 +687,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(averaged["overall_acc"], 56.33)
         self.assertEqual(averaged["overall_format"], 80.0)
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_run_writes_four_run_average_summary(self) -> None:
         per_run_metrics = [
             {
@@ -545,6 +737,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertEqual(summary["metrics"]["live_acc"], 73.0)
         self.assertEqual(summary["handler"], "toolrl")
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_official_handler_omits_toolrl_format_metrics(self) -> None:
         with (
             TemporaryDirectory() as tmp,
@@ -648,6 +841,7 @@ class ExternalCliTests(unittest.TestCase):
             self.assertEqual(generation_args.model, [model])
             self.assertIsNone(generation_args.local_model_path)
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_registry_handles_slashes_and_underscores(self) -> None:
         model = "/scratch/checkpoints/my_model_v2"
         with TemporaryDirectory() as tmp:
@@ -661,6 +855,7 @@ class ExternalCliTests(unittest.TestCase):
         self.assertIs(MODEL_CONFIG_MAPPING[model], MODEL_CONFIG_MAPPING[evaluator_key])
         self.assertEqual(MODEL_CONFIG_MAPPING[model].model_name, model)
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_official_profile_wraps_registered_prompt_handler(self) -> None:
         from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING
 
@@ -679,6 +874,7 @@ class ExternalCliTests(unittest.TestCase):
         finally:
             MODEL_CONFIG_MAPPING[model] = original
 
+    @requires(*BFCL_MODULES)
     def test_bfcl_official_profile_rejects_unregistered_checkpoint(self) -> None:
         with TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "exact prompt-mode model ID"):
@@ -985,7 +1181,7 @@ class ExternalCliTests(unittest.TestCase):
             self.assertEqual(spec.dp_size, 3)
             self.assertEqual(spec.tp_size, 1)
             self.assertEqual(spec.router_policy, "cache_aware")
-            self.assertEqual(spec.num_threads, 48)
+            self.assertEqual(spec.num_threads, 192)
             self.assertEqual(spec.temperature, 0.25)
             self.assertEqual(spec.max_tokens, 1234)
             self.assertEqual(spec.max_context_length, 9999)
@@ -1084,6 +1280,22 @@ class ExternalCliTests(unittest.TestCase):
                     os.environ["BFCL_PROJECT_ROOT"],
                     str(Path(tmp) / "bfcl"),
                 )
+
+    def test_bfcl_compat_stubs_nested_provider_attributes(self) -> None:
+        # bfcl_eval's cohere handler evaluates ``list[cohere.types.ToolV2]`` at
+        # import time; an absent provider SDK must resolve that without patching
+        # the stdlib ``types`` module.
+        provider = _LaxModule("aethereval_absent_provider")
+        annotation = list[provider.types.ToolV2]
+
+        self.assertIs(annotation.__args__[0], provider.types.ToolV2)
+        self.assertFalse(hasattr(types, "ToolV2"))
+
+    def test_bfcl_compat_refuses_to_stub_stdlib_modules(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "standard-library"):
+            _patch_missing_attr("types", "ToolV2", AttributeError("ToolV2"))
+
+        self.assertFalse(hasattr(types, "ToolV2"))
 
     def test_bfcl_vllm_server_command_receives_context_length(self) -> None:
         vllm_cmd = ["vllm", "serve", "model"]

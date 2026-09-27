@@ -2,6 +2,7 @@ from pathlib import Path
 
 from aethereval.core.io import read_jsonl
 from aethereval.core.types import Sample
+from benchmark_utils.evalplus import build_prompt
 
 
 TASK_NAME = "mbpp-plus"
@@ -34,26 +35,4 @@ def load_samples(task_dir: Path) -> list[Sample]:
     return samples
 
 
-def build_prompt(sample: Sample) -> list[dict[str, str]]:
-    # Match our HumanEval+ reasoning-and-code format; no assistant/code prefill.
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are an expert Python programmer. "
-                "You will be given a function specification and must return a correct completed "
-                "Python function that passes all tests."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"### Question:\n{sample.data['prompt']}\n\n"
-                "### Format:\n"
-                "Provide a SHORT reasoning on how to solve the task, then return the completed "
-                "function enclosed in a Python code block as:\n"
-                "```python\n# YOUR CODE HERE\n```\n\n"
-                "### Answer: (use the provided format with backticks)\n\n"
-            ),
-        },
-    ]
+__all__ = ["TASK_NAME", "DATA_FILE", "load_samples", "build_prompt"]

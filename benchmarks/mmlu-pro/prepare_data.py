@@ -1,21 +1,14 @@
-import json
 from pathlib import Path
 from string import ascii_uppercase
 
+from benchmark_utils.data import load_hf, write_task_jsonl
+
+
+REVISION = "b189ec765aa7ed75c8acfea42df31fdae71f97be"
+
 
 def main() -> None:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "datasets is required for prepare_data.py. Install with `pip install datasets`."
-        ) from exc
-
-    task_dir = Path(__file__).resolve().parent
-    out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    ds = load_dataset("TIGER-Lab/MMLU-Pro", "default", split="test")
+    ds = load_hf("TIGER-Lab/MMLU-Pro", "default", "test", REVISION)
 
     rows: list[dict[str, object]] = []
     for idx, row in enumerate(ds):
@@ -64,11 +57,7 @@ def main() -> None:
             }
         )
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"wrote {out_path} rows={len(rows)}")
+    write_task_jsonl(Path(__file__).resolve().parent, rows)
 
 
 if __name__ == "__main__":

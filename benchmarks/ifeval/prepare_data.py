@@ -1,25 +1,21 @@
 import json
 from pathlib import Path
 
-import requests
+from benchmark_utils.data import read_text, write_text
 
 
 INPUT_DATA_URL = (
     "https://raw.githubusercontent.com/google-research/google-research/"
-    "master/instruction_following_eval/data/input_data.jsonl"
+    "26d8ccdab6fec61b5c83ad6327ea8bda9e580288/instruction_following_eval/data/input_data.jsonl"
 )
 
 
 def main() -> None:
     task_dir = Path(__file__).resolve().parent
     out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    resp = requests.get(INPUT_DATA_URL, timeout=60)
-    resp.raise_for_status()
 
     kept_lines: list[str] = []
-    for line in resp.text.splitlines():
+    for line in read_text(INPUT_DATA_URL).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -27,9 +23,8 @@ def main() -> None:
         json.loads(line)
         kept_lines.append(line)
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for line in kept_lines:
-            f.write(line + "\n")
+    # Keep upstream bytes: a JSON round trip would rewrite escapes such as \u2019.
+    write_text(out_path, "".join(line + "\n" for line in kept_lines))
 
     print(f"wrote {out_path} rows={len(kept_lines)}")
 

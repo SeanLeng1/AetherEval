@@ -1,8 +1,13 @@
 import dataclasses
+import hashlib
+import importlib.metadata
 import json
 import multiprocessing
+import os
+import threading
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,9 +32,9 @@ from .task_register import (
     parse_task_names,
 )
 from .task_defaults import (
+    resolve_phase_num_repeats,
     resolve_task_default_gen,
     resolve_task_default_metrics,
-    resolve_task_num_repeats,
 )
 from .types import (
     GenerationInput,
@@ -49,6 +54,26 @@ from aethereval.backends import (
 from benchmark_utils.local_judge import OfflineJudgeClient
 
 _UNSCORED_META_KEY = "_aethereval_unscored"
+_JUDGE_META_KEY = "_aethereval_judge"
+# Judge options that change only throughput or credentials, not the judgments.
+_JUDGE_TRANSPORT_OPTIONS = {
+    "judge_workers",
+    "judge_timeout",
+    "judge_max_retries",
+    "judge_api_key_env",
+    "judge_dp_size",
+    "judge_tp_size",
+}
+# Scorer and backend packages whose versions can move scores; recorded per eval.
+_SCORING_PACKAGES = (
+    "math-verify",
+    "latex2sympy2_extended",
+    "evalplus",
+    "nltk",
+    "langdetect",
+    "sglang",
+    "vllm",
+)
 _SCORE_WORKER_METRICS: Any = None
 
 
@@ -62,12 +87,6 @@ def _metric_keys_preview(metrics: dict[str, Any], limit: int = 8) -> str:
         return ", ".join(keys)
     head = ", ".join(keys[:limit])
     return f"{head}, ... (+{len(keys) - limit})"
-
-
-def _make_progress_bar(total: int, desc: str) -> Any:
-    if total <= 0:
-        return None
-    return Progress(total=total, desc=desc)
 
 
 def _resolve_primary_metric(
@@ -208,8 +227,33 @@ def _record_is_unscored(record: GenerationRecord) -> bool:
     return record.meta.get(_UNSCORED_META_KEY) is True
 
 
-def _token_count_from_text(text: str, tokenizer_getter: Callable[[], Any]) -> int:
-    return count_text_tokens(text, tokenizer_getter())
+@lru_cache(maxsize=1)
+def _scoring_package_versions() -> dict[str, str | None]:
+    versions: dict[str, str | None] = {}
+    for package in _SCORING_PACKAGES:
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    return versions
+
+
+def _judge_fingerprint(metric_options: dict[str, Any]) -> str:
+    settings = {
+        key: value
+        for key, value in metric_options.items()
+        if key.startswith("judge_") and key not in _JUDGE_TRANSPORT_OPTIONS
+    }
+    settings.setdefault("judge_backend", "api")
+    payload = json.dumps(settings, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _judgment_is_current(record: GenerationRecord, fingerprint: str | None) -> bool:
+    return (
+        not _record_is_unscored(record)
+        and record.meta.get(_JUDGE_META_KEY) == fingerprint
+    )
 
 
 def _normalize_response_token_counts(
@@ -240,7 +284,7 @@ def _normalize_response_token_counts(
     normalized: list[int] = []
     for generation, count in zip(output.generations, counts, strict=True):
         if count is None:
-            count = _token_count_from_text(generation, tokenizer_getter)
+            count = count_text_tokens(generation, tokenizer_getter())
         normalized.append(count)
     return normalized
 
@@ -261,7 +305,7 @@ def _ensure_output_token_metadata(
             tokenizer_getter(),
             chat_template_kwargs,
         )
-        prompt_count = _token_count_from_text(rendered_prompt, tokenizer_getter)
+        prompt_count = count_text_tokens(rendered_prompt, tokenizer_getter())
     elif not _is_token_count(prompt_count):
         raise ValueError(
             f"Invalid prompt_token_count for sample {output.sample_id}: {prompt_count!r}"
@@ -279,19 +323,6 @@ def _ensure_output_token_metadata(
         or any(reason is not None and not isinstance(reason, str) for reason in reasons)
     ):
         raise ValueError(f"Invalid finish_reasons for sample {output.sample_id}")
-
-
-def _ensure_outputs_token_metadata(
-    outputs: list[GenerationOutput],
-    tokenizer_getter: Callable[[], Any],
-    chat_template_kwargs: dict[str, Any] | None = None,
-) -> None:
-    for output in outputs:
-        _ensure_output_token_metadata(
-            output=output,
-            tokenizer_getter=tokenizer_getter,
-            chat_template_kwargs=chat_template_kwargs,
-        )
 
 
 def _generation_token_meta(output: GenerationOutput, local_idx: int) -> dict[str, Any]:
@@ -413,28 +444,6 @@ def _build_sample_results(
     return sample_results
 
 
-def _call_task_aggregate(
-    aggregate_fn: Any,
-    sample_results: list[dict[str, Any]],
-    metric_options: dict[str, Any],
-) -> dict[str, Any]:
-    result = aggregate_fn(sample_results, metric_options)
-
-    if not isinstance(result, dict):
-        raise ValueError("aggregate must return a dict[str, float]")
-    return result
-
-
-def _score_generation(
-    *,
-    metrics_module: Any,
-    sample: Sample,
-    generation: str,
-) -> tuple[float, bool, Any, dict[str, Any]]:
-    scored = metrics_module.score_generation(sample, generation)
-    return _normalize_score_generation_result(scored)
-
-
 def _normalize_score_generation_result(
     scored: Any,
 ) -> tuple[float, bool, Any, dict[str, Any]]:
@@ -490,6 +499,11 @@ def _normalize_batch_score_results(
 
 def _init_score_worker(metrics_path: str) -> None:
     global _SCORE_WORKER_METRICS
+    # EvalPlus spawns its checker from here under a 4 GiB RLIMIT_AS; a per-core BLAS
+    # pool in that fresh numpy would take most of it. Set before metrics load numpy.
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(name, "1")
     # Benchmark modules are loaded by path and cannot be pickled into spawned workers.
     _SCORE_WORKER_METRICS = _load_module_from_path(
         "aethereval_worker_metrics", Path(metrics_path)
@@ -497,8 +511,8 @@ def _init_score_worker(metrics_path: str) -> None:
 
 
 def _score_in_worker(sample: Sample, generation: str):
-    return _score_generation(
-        metrics_module=_SCORE_WORKER_METRICS, sample=sample, generation=generation
+    return _normalize_score_generation_result(
+        _SCORE_WORKER_METRICS.score_generation(sample, generation)
     )
 
 
@@ -531,20 +545,25 @@ def _score_generation_outputs(
     num_proc = int(metric_options.get("num_proc", 1))
     if num_proc < 1:
         raise ValueError("num_proc must be >= 1")
-    score_bar = _make_progress_bar(total_records, progress_desc)
+    score_bar = (
+        Progress(total=total_records, desc=progress_desc) if total_records > 0 else None
+    )
     scored: dict[str, list[tuple[float, bool, Any, dict[str, Any]]]] = {}
     try:
-        if num_proc > 1 and total_records:
+        # SCORE_IN_SUBPROCESS: a checker forked from this process would inherit its memory.
+        in_pool = num_proc > 1 or getattr(metrics_module, "SCORE_IN_SUBPROCESS", False)
+        if in_pool and total_records:
             workers = min(num_proc, total_records)
             _info(f"{progress_desc}: {workers} CPU scoring processes")
             # Spawn avoids inheriting GPU state; executor workers are non-daemonic,
             # so EvalPlus/LiveCodeBench can still launch their test subprocesses.
-            with ProcessPoolExecutor(
+            executor = ProcessPoolExecutor(
                 max_workers=workers,
                 mp_context=multiprocessing.get_context("spawn"),
                 initializer=_init_score_worker,
                 initargs=(str(Path(metrics_module.__file__).resolve()),),
-            ) as executor:
+            )
+            try:
                 futures = {
                     executor.submit(
                         _score_in_worker, samples_by_id[output.sample_id], text
@@ -557,6 +576,10 @@ def _score_generation_outputs(
                     by_index[futures[future]] = future.result()
                     if score_bar is not None:
                         score_bar.update(1)
+            finally:
+                # On the first error or Ctrl-C, drop the queued records and wait only
+                # for the few already handed to a worker.
+                executor.shutdown(wait=True, cancel_futures=True)
             return {
                 output.sample_id: [
                     by_index[output.sample_id, index]
@@ -569,10 +592,8 @@ def _score_generation_outputs(
             scored[output.sample_id] = []
             for generation_text in output.generations:
                 scored[output.sample_id].append(
-                    _score_generation(
-                        metrics_module=metrics_module,
-                        sample=sample,
-                        generation=generation_text,
+                    _normalize_score_generation_result(
+                        metrics_module.score_generation(sample, generation_text)
                     )
                 )
                 if score_bar is not None:
@@ -618,6 +639,50 @@ def _records_to_generation_outputs(
     return outputs, gen_indices
 
 
+def _outputs_to_records(
+    *,
+    samples_by_id: dict[str, Sample],
+    outputs: list[GenerationOutput],
+    gen_indices: dict[str, list[int]],
+    prompts: dict[str, list[PromptType]] | None,
+    scores: dict[str, list[tuple[float, bool, Any, dict[str, Any]]]] | None,
+    judge_fingerprint: str | None,
+) -> list[GenerationRecord]:
+    # Rescored records pass their saved prompts; unscored records are placeholders.
+    records: list[GenerationRecord] = []
+    for output in outputs:
+        sample = samples_by_id[output.sample_id]
+        for local_idx, gen_idx in enumerate(gen_indices[output.sample_id]):
+            if scores is None:
+                score_value, is_pass, parsed = 0.0, False, None
+                record_meta = {_UNSCORED_META_KEY: True}
+            else:
+                score_value, is_pass, parsed, meta = scores[output.sample_id][local_idx]
+                record_meta = dict(meta)
+                if judge_fingerprint is not None:
+                    record_meta[_JUDGE_META_KEY] = judge_fingerprint
+            record_meta.update(_generation_token_meta(output, local_idx))
+            records.append(
+                GenerationRecord(
+                    sample_id=sample.id,
+                    gen_idx=gen_idx,
+                    prompt=(
+                        prompts[output.sample_id][local_idx]
+                        if prompts is not None
+                        else output.prompt
+                    ),
+                    generation=output.generations[local_idx],
+                    score=score_value,
+                    is_pass=is_pass,
+                    parsed=parsed,
+                    gold=sample.gold,
+                    error=None,
+                    meta=record_meta,
+                )
+            )
+    return records
+
+
 def _run_single_task(
     *,
     task_name: str,
@@ -633,7 +698,10 @@ def _run_single_task(
     tokenizer_getter: Callable[[], Any],
     generate_only: bool,
     eval_only: bool,
+    rescore_existing: bool = True,
 ) -> dict[str, Any]:
+    if generate_only == eval_only:
+        raise ValueError("exactly one of generate_only and eval_only must be set")
     phase = phase_name(generate_only=generate_only, eval_only=eval_only)
     metric_options = resolve_task_default_metrics(task_name, metric_options)
     _info(f"[{task_name}] loading task from {task_dir}")
@@ -690,10 +758,7 @@ def _run_single_task(
             )
     else:
         gen_cfg = _merge_generation_config(
-            resolve_task_default_gen(
-                task_name, getattr(task_module, "DEFAULT_GEN", {})
-            ),
-            gen_overrides,
+            resolve_task_default_gen(task_name), gen_overrides
         )
     chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
 
@@ -789,12 +854,7 @@ def _run_single_task(
             "same --model/--model-name, --output-dir, --run-id, tasks, and n."
         )
 
-    if not generate_only:
-        if getattr(metrics_module, "REQUIRES_BACKEND", False) and backend is None:
-            raise ValueError(
-                f"[{task_name}] eval-only is not supported because its metrics "
-                "require the candidate backend."
-            )
+    if eval_only:
         validate_metrics = getattr(metrics_module, "validate_metric_options", None)
         if callable(validate_metrics):
             validate_metrics({**metric_options, "n": n})
@@ -802,21 +862,27 @@ def _run_single_task(
     preserve_existing_scores = bool(
         getattr(metrics_module, "PRESERVE_EXISTING_SCORES_ON_RESUME", False)
     )
+    judge_fingerprint = (
+        _judge_fingerprint(metric_options) if preserve_existing_scores else None
+    )
     rescored_record_count = 0
-    if existing_records and not generate_only:
-        if eval_only:
+    if existing_records and eval_only:
+        if rescore_existing or not preserve_existing_scores:
             records_to_rescore = list(existing_records)
             preserved_records: list[GenerationRecord] = []
-        elif preserve_existing_scores:
+        else:
+            # Reuse judgments made with the same judge settings; explicit
+            # --eval-only re-judges everything.
             records_to_rescore = [
-                record for record in existing_records if _record_is_unscored(record)
+                record
+                for record in existing_records
+                if not _judgment_is_current(record, judge_fingerprint)
             ]
             preserved_records = [
-                record for record in existing_records if not _record_is_unscored(record)
+                record
+                for record in existing_records
+                if _judgment_is_current(record, judge_fingerprint)
             ]
-        else:
-            records_to_rescore = list(existing_records)
-            preserved_records = []
 
         if records_to_rescore:
             _info(
@@ -825,17 +891,21 @@ def _run_single_task(
             existing_outputs, existing_gen_indices = _records_to_generation_outputs(
                 records_to_rescore
             )
-            _ensure_outputs_token_metadata(
-                existing_outputs,
-                tokenizer_getter,
-                chat_template_kwargs,
-            )
+            for output in existing_outputs:
+                _ensure_output_token_metadata(
+                    output=output,
+                    tokenizer_getter=tokenizer_getter,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            judge_client = metric_options.get("_judge_client")
+            if isinstance(judge_client, _LazyJudgeClient):
+                # Start here, not in a judge worker thread: the judge's guarded
+                # subprocesses exit with the thread that started them.
+                judge_client.start()
             runtime_metric_options = {}
-            if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
-                runtime_metric_options["_tokenizer"] = tokenizer_getter()
             if getattr(metrics_module, "REQUIRES_BACKEND", False):
                 runtime_metric_options["_backend"] = backend
-            existing_scores = _score_generation_outputs(
+            scores = _score_generation_outputs(
                 metrics_module=metrics_module,
                 samples_by_id=samples_by_id,
                 outputs=existing_outputs,
@@ -844,33 +914,19 @@ def _run_single_task(
                 total_records=len(records_to_rescore),
                 progress_desc=f"[{task_name}] rescoring",
             )
-            rescored_existing: list[GenerationRecord] = []
-            existing_records_by_id = _group_records_by_sample(records_to_rescore)
-            for output in existing_outputs:
-                sample = samples_by_id[output.sample_id]
-                original_records = existing_records_by_id[output.sample_id]
-                scores = existing_scores[output.sample_id]
-                gen_indices = existing_gen_indices[output.sample_id]
-                for local_idx, (record, gen_idx, scored) in enumerate(
-                    zip(original_records, gen_indices, scores, strict=True)
-                ):
-                    score, is_pass, parsed, meta = scored
-                    record_meta = dict(meta)
-                    record_meta.update(_generation_token_meta(output, local_idx))
-                    rescored_existing.append(
-                        GenerationRecord(
-                            sample_id=record.sample_id,
-                            gen_idx=gen_idx,
-                            prompt=record.prompt,
-                            generation=record.generation,
-                            score=score,
-                            is_pass=is_pass,
-                            parsed=parsed,
-                            gold=sample.gold,
-                            error=record.error,
-                            meta=record_meta,
-                        )
-                    )
+            rescored_existing = _outputs_to_records(
+                samples_by_id=samples_by_id,
+                outputs=existing_outputs,
+                gen_indices=existing_gen_indices,
+                prompts={
+                    sample_id: [record.prompt for record in records]
+                    for sample_id, records in _group_records_by_sample(
+                        records_to_rescore
+                    ).items()
+                },
+                scores=scores,
+                judge_fingerprint=judge_fingerprint,
+            )
 
             sample_order = {sample.id: idx for idx, sample in enumerate(samples)}
             existing_records = sorted(
@@ -888,7 +944,7 @@ def _run_single_task(
                 f"[{task_name}] resume: preserving existing scores "
                 f"({len(existing_records)})"
             )
-    elif not existing_records and predictions_path.exists() and not eval_only:
+    elif not existing_records and predictions_path.exists() and generate_only:
         predictions_path.unlink()
 
     new_records: list[GenerationRecord] = []
@@ -940,63 +996,24 @@ def _run_single_task(
                     f"sample {output.sample_id}, expected {len(missing)}"
                 )
 
-        _ensure_outputs_token_metadata(
-            generated_outputs,
-            tokenizer_getter,
-            chat_template_kwargs,
-        )
-        generated_scores = None
-        if not generate_only:
-            runtime_metric_options = {}
-            if getattr(metrics_module, "REQUIRES_TOKENIZER", False):
-                runtime_metric_options["_tokenizer"] = tokenizer_getter()
-            if getattr(metrics_module, "REQUIRES_BACKEND", False):
-                runtime_metric_options["_backend"] = backend
-
-            generated_scores = _score_generation_outputs(
-                metrics_module=metrics_module,
-                samples_by_id=samples_by_id,
-                outputs=generated_outputs,
-                metric_options={**metric_options, "n": n},
-                runtime_metric_options=runtime_metric_options,
-                total_records=pending_record_count,
-                progress_desc=f"[{task_name}] scoring",
-            )
-
-        rows_to_write: list[dict[str, Any]] = []
         for output in generated_outputs:
-            sample = samples_by_id[output.sample_id]
-            missing = pending_indices[output.sample_id]
-            generations = list(output.generations)
-            for local_idx, gen_idx in enumerate(missing):
-                if generated_scores is None:
-                    score, is_pass, parsed = 0.0, False, None
-                    record_meta = {_UNSCORED_META_KEY: True}
-                else:
-                    score, is_pass, parsed, meta = generated_scores[output.sample_id][
-                        local_idx
-                    ]
-                    record_meta = dict(meta)
-                record_meta.update(_generation_token_meta(output, local_idx))
-                record = GenerationRecord(
-                    sample_id=sample.id,
-                    gen_idx=gen_idx,
-                    prompt=output.prompt,
-                    generation=generations[local_idx],
-                    score=score,
-                    is_pass=is_pass,
-                    parsed=parsed,
-                    gold=sample.gold,
-                    error=None,
-                    meta=record_meta,
-                )
-                new_records.append(record)
-                rows_to_write.append(_record_to_json(record))
-
-        append_jsonl(predictions_path, rows_to_write)
+            _ensure_output_token_metadata(
+                output=output,
+                tokenizer_getter=tokenizer_getter,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+        new_records = _outputs_to_records(
+            samples_by_id=samples_by_id,
+            outputs=generated_outputs,
+            gen_indices=pending_indices,
+            prompts=None,
+            scores=None,
+            judge_fingerprint=None,
+        )
+        append_jsonl(predictions_path, (_record_to_json(r) for r in new_records))
         _info(
             f"[{task_name}] generation finished: new_records={len(new_records)} "
-            f"scored={not generate_only}"
+            "scored=False"
         )
     else:
         _info(f"[{task_name}] no pending generations; skip inference")
@@ -1017,22 +1034,24 @@ def _run_single_task(
                 f"[{task_name}] internal error: evaluation reached aggregation with "
                 "incomplete generations"
             )
-        if unscored_record_count:
-            raise RuntimeError(
-                f"[{task_name}] internal error: {unscored_record_count} records "
-                "remain unscored"
-            )
-        aggregate_result = _call_task_aggregate(
-            metrics_module.aggregate,
-            sample_results,
-            {**metric_options, "n": n},
+        aggregate_result = metrics_module.aggregate(
+            sample_results, {**metric_options, "n": n}
         )
+        if not isinstance(aggregate_result, dict):
+            raise ValueError("aggregate must return a dict[str, float]")
         raw_warnings = aggregate_result.pop("__warnings__", [])
         warnings = (
             [str(item) for item in raw_warnings]
             if isinstance(raw_warnings, list)
             else [str(raw_warnings)]
         )
+        # Scoring replaces every generation placeholder, so a remaining flag was
+        # set by the metric (e.g. an unparseable judgment) and aggregate excludes it.
+        if unscored_record_count:
+            warnings.append(
+                f"{unscored_record_count} records were left unscored by the metric "
+                "and will be scored again on resume"
+            )
         metrics = aggregate_result
         primary_metric, primary_score = _resolve_primary_metric(metrics_module, metrics)
 
@@ -1096,23 +1115,42 @@ def _run_single_task(
             "phase": phase,
         }
     )
+    if eval_only:
+        task_run_config["scoring_packages"] = dict(_scoring_package_versions())
 
-    write_json(summary_path, summary)
     if protocol is not None:
         task_run_config["protocol"] = protocol
     write_json(run_config_path, task_run_config)
+    if generate_only and not new_records:
+        evaluated_summary = _evaluated_summary(summary_path, phase)
+        if evaluated_summary is not None:
+            _info(f"[{task_name}] nothing to generate; keeping evaluated summary")
+            return evaluated_summary
+    write_json(summary_path, summary)
+    return summary
+
+
+def _evaluated_summary(path: Path, phase: str) -> dict[str, Any] | None:
+    """Return a readable summary.json written by another phase, if any."""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(summary, dict) or summary.get("phase") == phase:
+        return None
     return summary
 
 
 def _repeat_generation_overrides(
-    task_module: Any,
+    task_name: str,
     gen_overrides: dict[str, Any],
     repeat_index: int,
 ) -> tuple[dict[str, Any], int]:
     overrides = dict(gen_overrides)
     requested_seed = overrides.get("seed")
     if requested_seed is None:
-        requested_seed = task_module.DEFAULT_GEN.get("seed")
+        requested_seed = resolve_task_default_gen(task_name).get("seed")
     base_seed = int(requested_seed) if requested_seed is not None else 0
     seed = base_seed + repeat_index
     overrides["seed"] = seed
@@ -1195,7 +1233,9 @@ def _run_repeated_task(
     tokenizer_getter: Callable[[], Any],
     generate_only: bool,
     eval_only: bool,
+    rescore_existing: bool = True,
 ) -> dict[str, Any]:
+    phase = phase_name(generate_only=generate_only, eval_only=eval_only)
     if num_repeats == 1:
         summary = _run_single_task(
             task_name=task_name,
@@ -1211,18 +1251,21 @@ def _run_repeated_task(
             tokenizer_getter=tokenizer_getter,
             generate_only=generate_only,
             eval_only=eval_only,
+            rescore_existing=rescore_existing,
         )
-        summary["num_repeats"] = 1
-        write_json(task_output_dir / "summary.json", summary)
+        if summary.get("phase") == phase:
+            summary["num_repeats"] = 1
+            write_json(task_output_dir / "summary.json", summary)
         return summary
 
     repeat_summaries: list[dict[str, Any]] = []
     repeat_metadata: list[dict[str, Any]] = []
+    kept_repeats = 0
     for repeat_index in range(num_repeats):
         repeat_number = repeat_index + 1
         repeat_dir = task_output_dir / f"run_{repeat_number:02d}"
         repeat_overrides, seed = _repeat_generation_overrides(
-            task_module,
+            task_name,
             gen_overrides,
             repeat_index,
         )
@@ -1245,7 +1288,21 @@ def _run_repeated_task(
             tokenizer_getter=tokenizer_getter,
             generate_only=generate_only,
             eval_only=eval_only,
+            rescore_existing=rescore_existing,
         )
+        if summary.get("phase") != phase:
+            # A kept evaluated summary contributes only its generation data.
+            kept_repeats += 1
+            summary = {
+                **summary,
+                "phase": phase,
+                "rescored_records": 0,
+                "evaluation_complete": False,
+                "metrics": {},
+                "primary_metric": None,
+                "primary_score": None,
+                "warnings": [],
+            }
         repeat_summaries.append(summary)
         repeat_metadata.append(
             {
@@ -1289,7 +1346,7 @@ def _run_repeated_task(
         ]
     summary = {
         "task": task_name,
-        "phase": phase_name(generate_only=generate_only, eval_only=eval_only),
+        "phase": phase,
         "num_samples": repeat_summaries[0]["num_samples"],
         "n": repeat_summaries[0]["n"],
         "num_repeats": num_repeats,
@@ -1322,7 +1379,20 @@ def _run_repeated_task(
         "repeats": repeat_metadata,
     }
     ensure_dir(task_output_dir)
-    write_json(task_output_dir / "summary.json", summary)
+    summary_path = task_output_dir / "summary.json"
+    evaluated_summary = (
+        _evaluated_summary(summary_path, phase)
+        if kept_repeats == num_repeats
+        else None
+    )
+    if (
+        evaluated_summary is not None
+        and evaluated_summary.get("num_repeats") == num_repeats
+    ):
+        # Every repeat kept its evaluated summary, so keep their average too.
+        summary = evaluated_summary
+    else:
+        write_json(summary_path, summary)
     write_json(
         task_output_dir / "run_config.json",
         {
@@ -1330,7 +1400,7 @@ def _run_repeated_task(
             "task": task_name,
             "num_repeats": num_repeats,
             "repeat_seeds": [item["seed"] for item in repeat_metadata],
-            "phase": summary["phase"],
+            "phase": phase,
         },
     )
     _info(
@@ -1340,32 +1410,52 @@ def _run_repeated_task(
     return summary
 
 
-def _resolve_task_num_repeats_for_phase(
-    *,
-    task_name: str,
-    task_output_dir: Path,
-    runtime_override: int | None,
-    eval_only: bool,
-) -> int:
-    if not eval_only:
-        return resolve_task_num_repeats(task_name, runtime_override)
+class _LazyJudgeClient:
+    """Offline judge that the runner starts only for a task with records to judge.
 
-    run_config_path = task_output_dir / "run_config.json"
-    if not run_config_path.exists():
-        return resolve_task_num_repeats(task_name, runtime_override)
-    with run_config_path.open("r", encoding="utf-8") as file:
-        saved_config = json.load(file)
-    saved_repeats = saved_config.get("num_repeats")
-    if saved_repeats is None:
-        return resolve_task_num_repeats(task_name, runtime_override)
+    An eval phase that reuses every stored judgment never loads the judge.
+    """
 
-    saved_repeats = int(saved_repeats)
-    if runtime_override is not None and int(runtime_override) != saved_repeats:
-        raise ValueError(
-            f"[{task_name}] eval-only num_repeats={runtime_override} conflicts "
-            f"with the saved run config value {saved_repeats}."
-        )
-    return resolve_task_num_repeats(task_name, saved_repeats)
+    def __init__(self, config: dict[str, Any]) -> None:
+        self._config = config
+        self._client: OfflineJudgeClient | None = None
+        self._start_error: BaseException | None = None
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("offline judge is closed")
+            if self._start_error is not None:
+                raise RuntimeError(
+                    "offline judge failed to start"
+                ) from self._start_error
+            if self._client is not None:
+                return
+            _info(
+                f"offline judge: model={self._config['model']} "
+                f"dp_size={self._config['dp_size']} "
+                f"tp_size={self._config['tensor_parallel_size']}"
+            )
+            try:
+                self._client = OfflineJudgeClient(**self._config)
+            except BaseException as exc:
+                self._start_error = exc
+                raise
+
+    def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        client = self._client
+        if client is None:
+            raise RuntimeError("offline judge is not running")
+        return client.complete(messages, **kwargs)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            client, self._client = self._client, None
+            if client is not None:
+                client.close()
 
 
 def run_evaluation(
@@ -1391,10 +1481,104 @@ def run_evaluation(
     generate_only: bool = False,
     eval_only: bool = False,
 ) -> dict[str, Any]:
+    """Run the generate-only or eval-only phase, or both in that order.
+
+    Without a phase flag, every task is generated before any is evaluated. A
+    backend created here is closed before evaluation starts, so candidate, judge
+    and reward models are never loaded together; a caller-supplied backend stays
+    open for both phases and cannot be combined with a local judge. That
+    automatic eval phase reuses judgments made with unchanged judge settings; an
+    explicit eval_only re-judges every record.
+    """
     if generate_only and eval_only:
         raise ValueError("generate_only and eval_only are mutually exclusive")
     if eval_only and overwrite:
         raise ValueError("eval_only cannot be combined with overwrite")
+    judge_backend = str((metric_options or {}).get("judge_backend", "api")).lower()
+    if (
+        judge_backend == "local"
+        and backend is not None
+        and not generate_only
+        and not eval_only
+    ):
+        raise ValueError(
+            "offline local judging requires disjoint candidate/judge lifecycles. "
+            "Close the supplied backend between a generate_only and an eval_only "
+            "run_evaluation call, or let run_evaluation create the backend."
+        )
+    options = dict(
+        model=model,
+        tasks=tasks,
+        output_dir=output_dir,
+        model_name=model_name,
+        dp_size=dp_size,
+        tensor_parallel_size=tensor_parallel_size,
+        gen_overrides=gen_overrides,
+        num_repeats=num_repeats,
+        bootstrap_resamples=bootstrap_resamples,
+        bootstrap_seed=bootstrap_seed,
+        bootstrap_confidence=bootstrap_confidence,
+        metric_options=metric_options,
+        run_id=run_id,
+        backend_name=backend_name,
+        backend_kwargs=backend_kwargs,
+        benchmarks_dir=benchmarks_dir,
+    )
+    if generate_only or eval_only:
+        return _run_phase(
+            **options,
+            overwrite=overwrite,
+            backend=backend,
+            generate_only=generate_only,
+            eval_only=eval_only,
+            rescore_existing=True,
+        )
+    _info(
+        "two-phase execution: generating all native tasks first, then "
+        "restarting in eval-only mode"
+    )
+    _run_phase(
+        **options,
+        overwrite=overwrite,
+        backend=backend,
+        generate_only=True,
+        eval_only=False,
+        rescore_existing=True,
+    )
+    return _run_phase(
+        **options,
+        overwrite=False,
+        backend=backend,
+        generate_only=False,
+        eval_only=True,
+        rescore_existing=False,
+    )
+
+
+def _run_phase(
+    *,
+    model: str,
+    tasks: str,
+    output_dir: str | Path,
+    model_name: str | None,
+    dp_size: int,
+    tensor_parallel_size: int,
+    gen_overrides: dict[str, Any] | None,
+    num_repeats: int | None,
+    bootstrap_resamples: int,
+    bootstrap_seed: int,
+    bootstrap_confidence: float,
+    metric_options: dict[str, Any] | None,
+    overwrite: bool,
+    run_id: str | None,
+    backend_name: str,
+    backend_kwargs: dict[str, Any] | None,
+    backend: GenerationBackend | None,
+    benchmarks_dir: Path | None,
+    generate_only: bool,
+    eval_only: bool,
+    rescore_existing: bool,
+) -> dict[str, Any]:
     phase = phase_name(generate_only=generate_only, eval_only=eval_only)
     effective_model_kwargs = backend_kwargs
     task_root = benchmarks_dir or BENCHMARKS_DIR
@@ -1404,13 +1588,6 @@ def run_evaluation(
         raise RuntimeError(f"No tasks found in {task_root}")
 
     selected = parse_task_names(tasks, available)
-    judge_backend = str((metric_options or {}).get("judge_backend", "api")).lower()
-    if judge_backend == "local" and not generate_only and not eval_only:
-        raise ValueError(
-            "offline local judging requires disjoint candidate/judge lifecycles. "
-            "Use the CLI (which automatically runs generate-only then eval-only), "
-            "or invoke run_evaluation in those two phases explicitly."
-        )
     out_dir = Path(output_dir)
     effective_model_name = model_output_name(model, model_name)
     this_run_id = run_id or effective_model_name
@@ -1459,7 +1636,7 @@ def run_evaluation(
         model_kwargs=effective_model_kwargs,
     )
 
-    local_judge_client: OfflineJudgeClient | None = None
+    local_judge_client: _LazyJudgeClient | None = None
     local_judge_key: str | None = None
     try:
         run_config_common = {
@@ -1485,7 +1662,7 @@ def run_evaluation(
                 task_name, resolved_metric_options
             )
             uses_local_judge = (
-                not generate_only
+                eval_only
                 and getattr(bundle.metrics_module, "USES_LLM_JUDGE", False)
                 and str(task_metric_options.get("judge_backend", "api")).lower()
                 == "local"
@@ -1507,13 +1684,11 @@ def run_evaluation(
                 judge_model_kwargs = dict(
                     task_metric_options.get("judge_sglang_args", {})
                 )
-                judge_batch_size = int(task_metric_options.get("judge_workers", 64))
                 judge_config = {
                     "model": judge_model,
                     "dp_size": judge_dp_size,
                     "tensor_parallel_size": judge_tp_size,
                     "model_kwargs": judge_model_kwargs,
-                    "batch_size": judge_batch_size,
                 }
             judge_key = (
                 json.dumps(judge_config, sort_keys=True, default=str)
@@ -1551,12 +1726,7 @@ def run_evaluation(
                 local_judge_key = None
             if judge_config is not None:
                 if local_judge_client is None:
-                    _info(
-                        f"offline judge: model={judge_config['model']} "
-                        f"dp_size={judge_config['dp_size']} "
-                        f"tp_size={judge_config['tensor_parallel_size']}"
-                    )
-                    local_judge_client = OfflineJudgeClient(**judge_config)
+                    local_judge_client = _LazyJudgeClient(judge_config)
                     local_judge_key = requested_judge_key
                 task_metric_options["_judge_client"] = local_judge_client
             if (
@@ -1583,9 +1753,9 @@ def run_evaluation(
                     f"{getattr(task_backend, 'name', type(task_backend).__name__)}"
                 )
             try:
-                task_num_repeats = _resolve_task_num_repeats_for_phase(
-                    task_name=task_name,
-                    task_output_dir=task_output_dir,
+                task_num_repeats = resolve_phase_num_repeats(
+                    task_name,
+                    task_output_dir / "run_config.json",
                     runtime_override=num_repeats,
                     eval_only=eval_only,
                 )
@@ -1604,6 +1774,7 @@ def run_evaluation(
                     tokenizer_getter=get_tokenizer,
                     generate_only=generate_only,
                     eval_only=eval_only,
+                    rescore_existing=rescore_existing,
                 )
             finally:
                 if created_evaluation_backend and task_backend is not None:
@@ -1673,8 +1844,7 @@ def inspect_prompts(
         samples_raw = bundle.task_module.load_samples(task_spec.task_dir)
         samples = [_to_sample(item) for item in samples_raw]
         gen_cfg = _merge_generation_config(
-            bundle.task_module.DEFAULT_GEN,
-            gen_overrides or {},
+            resolve_task_default_gen(task_name), gen_overrides or {}
         )
         chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
 

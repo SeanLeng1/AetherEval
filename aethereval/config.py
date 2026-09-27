@@ -75,16 +75,43 @@ def load_yaml_config(path: str | None) -> dict[str, Any]:
     return data
 
 
+def _check_unknown_yaml_keys(
+    cfg: dict[str, Any], looked_up: set[tuple[str, str]]
+) -> None:
+    sections = {section for section, _ in looked_up}
+    known = {key for _, key in looked_up}
+    unknown = []
+    for name, value in cfg.items():
+        if name in sections:
+            if value is None:
+                continue
+            if not isinstance(value, dict):
+                raise ValueError(f"YAML section '{name}' must be a mapping/object")
+            unknown += [
+                f"{name}.{key}" for key in value if (name, key) not in looked_up
+            ]
+        elif name not in known:
+            unknown.append(str(name))
+    if unknown:
+        raise ValueError(f"Unknown YAML config keys: {', '.join(unknown)}")
+
+
 def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
-    model = _pick(args.model, _cfg_get(cfg, "model", "run"))
+    looked_up: set[tuple[str, str]] = set()
+
+    def get(key: str, section: str) -> Any:
+        looked_up.add((section, key))
+        return _cfg_get(cfg, key, section)
+
+    model = _pick(args.model, get("model", "run"))
     model_name = _pick(
         getattr(args, "model_name", None),
-        _cfg_get(cfg, "model_name", "run"),
+        get("model_name", "run"),
     )
     backend = str(
         _pick(
             getattr(args, "backend", None),
-            _cfg_get(cfg, "backend", "runtime"),
+            get("backend", "runtime"),
             "vllm",
         )
     ).lower()
@@ -94,38 +121,31 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
             f"{', '.join(sorted(SUPPORTED_BACKENDS))}"
         )
 
-    tasks_raw = _pick(args.tasks, _cfg_get(cfg, "tasks", "run"), "all")
+    tasks_raw = _pick(args.tasks, get("tasks", "run"), "all")
     if isinstance(tasks_raw, (list, tuple)):
         tasks = ",".join(str(x) for x in tasks_raw)
     else:
         tasks = str(tasks_raw)
 
-    output_dir = _pick(args.output_dir, _cfg_get(cfg, "output_dir", "run"), "outputs")
-    run_id = _pick(args.run_id, _cfg_get(cfg, "run_id", "run"))
+    output_dir = _pick(args.output_dir, get("output_dir", "run"), "outputs")
+    run_id = _pick(args.run_id, get("run_id", "run"))
     num_repeats = _pick(
         getattr(args, "num_repeats", None),
-        _cfg_get(cfg, "num_repeats", "run"),
+        get("num_repeats", "run"),
     )
     if num_repeats is not None and int(num_repeats) < 1:
         raise ValueError("num_repeats must be >= 1")
-    overwrite = bool(_pick(args.overwrite, _cfg_get(cfg, "overwrite", "run"), False))
-    inspect = bool(
-        _pick(getattr(args, "inspect", None), _cfg_get(cfg, "inspect", "run"), False)
-    )
-    generate_only = bool(
-        _pick(
-            getattr(args, "generate_only", None),
-            _cfg_get(cfg, "generate_only", "run"),
-            False,
-        )
-    )
-    eval_only = bool(
-        _pick(
-            getattr(args, "eval_only", None),
-            _cfg_get(cfg, "eval_only", "run"),
-            False,
-        )
-    )
+    overwrite = bool(_pick(args.overwrite, get("overwrite", "run"), False))
+    inspect = bool(_pick(getattr(args, "inspect", None), get("inspect", "run"), False))
+    cli_generate_only = getattr(args, "generate_only", None)
+    cli_eval_only = getattr(args, "eval_only", None)
+    cfg_generate_only = get("generate_only", "run")
+    cfg_eval_only = get("eval_only", "run")
+    if cli_generate_only or cli_eval_only:
+        # A phase flag on the CLI replaces the YAML phase instead of combining with it.
+        cfg_generate_only = cfg_eval_only = None
+    generate_only = bool(_pick(cli_generate_only, cfg_generate_only, False))
+    eval_only = bool(_pick(cli_eval_only, cfg_eval_only, False))
     if generate_only and eval_only:
         raise ValueError("generate_only and eval_only are mutually exclusive")
     if eval_only and overwrite:
@@ -134,15 +154,15 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     arg_dp_size = getattr(args, "dp_size", None)
     arg_tp_size = getattr(args, "tp_size", None)
 
-    dp_size = int(_pick(arg_dp_size, _cfg_get(cfg, "dp_size", "runtime"), 1))
-    tp_size = int(_pick(arg_tp_size, _cfg_get(cfg, "tp_size", "runtime"), 1))
+    dp_size = int(_pick(arg_dp_size, get("dp_size", "runtime"), 1))
+    tp_size = int(_pick(arg_tp_size, get("tp_size", "runtime"), 1))
     if dp_size < 1 or tp_size < 1:
         raise ValueError("runtime dp_size and tp_size must both be >= 1")
 
     judge_backend = str(
         _pick(
             getattr(args, "judge_backend", None),
-            _cfg_get(cfg, "judge_backend", "metrics"),
+            get("judge_backend", "metrics"),
             "api",
         )
     ).lower()
@@ -150,11 +170,11 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("judge_backend must be 'api' or 'local'")
     raw_judge_dp_size = _pick(
         getattr(args, "judge_dp_size", None),
-        _cfg_get(cfg, "judge_dp_size", "metrics"),
+        get("judge_dp_size", "metrics"),
     )
     raw_judge_tp_size = _pick(
         getattr(args, "judge_tp_size", None),
-        _cfg_get(cfg, "judge_tp_size", "metrics"),
+        get("judge_tp_size", "metrics"),
     )
     if raw_judge_dp_size is None and raw_judge_tp_size is None:
         judge_dp_size = 1
@@ -165,7 +185,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     if judge_dp_size < 1 or judge_tp_size < 1:
         raise ValueError("judge dp/tp sizes must both be >= 1")
 
-    cfg_judge_sglang_args = _cfg_get(cfg, "judge_sglang_args", "metrics")
+    cfg_judge_sglang_args = get("judge_sglang_args", "metrics")
     if cfg_judge_sglang_args is not None and not isinstance(
         cfg_judge_sglang_args, dict
     ):
@@ -178,7 +198,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         )
     )
 
-    cfg_rm_sglang_args = _cfg_get(cfg, "rm_sglang_args", "metrics")
+    cfg_rm_sglang_args = get("rm_sglang_args", "metrics")
     if cfg_rm_sglang_args is not None and not isinstance(cfg_rm_sglang_args, dict):
         raise ValueError("metrics.rm_sglang_args must be a mapping/object")
     rm_sglang_args = dict(cfg_rm_sglang_args or {})
@@ -190,42 +210,40 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     )
 
     gen_overrides = {
-        "n": _pick(args.n, _cfg_get(cfg, "n", "generation")),
+        "n": _pick(args.n, get("n", "generation")),
         "max_new_tokens": _pick(
             args.max_new_tokens,
-            _cfg_get(cfg, "max_new_tokens", "generation"),
+            get("max_new_tokens", "generation"),
         ),
-        "temperature": _pick(
-            args.temperature, _cfg_get(cfg, "temperature", "generation")
-        ),
-        "top_p": _pick(args.top_p, _cfg_get(cfg, "top_p", "generation")),
-        "top_k": _pick(args.top_k, _cfg_get(cfg, "top_k", "generation")),
-        "min_p": _pick(args.min_p, _cfg_get(cfg, "min_p", "generation")),
-        "seed": _pick(args.seed, _cfg_get(cfg, "seed", "generation")),
+        "temperature": _pick(args.temperature, get("temperature", "generation")),
+        "top_p": _pick(args.top_p, get("top_p", "generation")),
+        "top_k": _pick(args.top_k, get("top_k", "generation")),
+        "min_p": _pick(args.min_p, get("min_p", "generation")),
+        "seed": _pick(args.seed, get("seed", "generation")),
         "enable_thinking": _pick(
             getattr(args, "enable_thinking", None),
-            _cfg_get(cfg, "enable_thinking", "generation"),
+            get("enable_thinking", "generation"),
         ),
     }
 
     bootstrap_resamples = int(
         _pick(
             getattr(args, "bootstrap_resamples", None),
-            _cfg_get(cfg, "bootstrap_resamples", "metrics"),
+            get("bootstrap_resamples", "metrics"),
             1000,
         )
     )
     bootstrap_seed = int(
         _pick(
             getattr(args, "bootstrap_seed", None),
-            _cfg_get(cfg, "bootstrap_seed", "metrics"),
+            get("bootstrap_seed", "metrics"),
             42,
         )
     )
     bootstrap_confidence = float(
         _pick(
             getattr(args, "bootstrap_confidence", None),
-            _cfg_get(cfg, "bootstrap_confidence", "metrics"),
+            get("bootstrap_confidence", "metrics"),
             0.95,
         )
     )
@@ -250,8 +268,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "judge_enable_thinking",
     )
     metric_options = {
-        key: _pick(getattr(args, key, None), _cfg_get(cfg, key, "metrics"))
-        for key in metric_keys
+        key: _pick(getattr(args, key, None), get(key, "metrics")) for key in metric_keys
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
     if "num_proc" in metric_options:
@@ -273,15 +290,15 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     vllm_kwargs = {
         "gpu_memory_utilization": _pick(
             args.gpu_memory_utilization,
-            _cfg_get(cfg, "gpu_memory_utilization", "vllm"),
+            get("gpu_memory_utilization", "vllm"),
         ),
         "max_model_len": _pick(
             args.max_model_len,
-            _cfg_get(cfg, "max_model_len", "vllm"),
+            get("max_model_len", "vllm"),
         ),
-        "dtype": _pick(args.dtype, _cfg_get(cfg, "dtype", "vllm")),
+        "dtype": _pick(args.dtype, get("dtype", "vllm")),
     }
-    cfg_extra_model_kwargs = _cfg_get(cfg, "extra_model_kwargs", "vllm")
+    cfg_extra_model_kwargs = get("extra_model_kwargs", "vllm")
     if cfg_extra_model_kwargs is not None and not isinstance(
         cfg_extra_model_kwargs, dict
     ):
@@ -296,15 +313,15 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     sglang_kwargs = {
         "mem_fraction_static": _pick(
             getattr(args, "mem_fraction_static", None),
-            _cfg_get(cfg, "mem_fraction_static", "sglang"),
+            get("mem_fraction_static", "sglang"),
         ),
         "context_length": _pick(
             getattr(args, "context_length", None),
-            _cfg_get(cfg, "context_length", "sglang"),
+            get("context_length", "sglang"),
         ),
-        "dtype": _pick(args.dtype, _cfg_get(cfg, "dtype", "sglang")),
+        "dtype": _pick(args.dtype, get("dtype", "sglang")),
     }
-    cfg_sglang_extra = _cfg_get(cfg, "extra_model_kwargs", "sglang")
+    cfg_sglang_extra = get("extra_model_kwargs", "sglang")
     if cfg_sglang_extra is not None and not isinstance(cfg_sglang_extra, dict):
         raise ValueError("sglang.extra_model_kwargs must be a mapping/object")
     if isinstance(cfg_sglang_extra, dict):
@@ -318,6 +335,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
     sglang_kwargs = {k: v for k, v in sglang_kwargs.items() if v is not None}
 
     backend_kwargs = vllm_kwargs if backend == "vllm" else sglang_kwargs
+    _check_unknown_yaml_keys(cfg, looked_up)
 
     return {
         "model": model,

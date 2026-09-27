@@ -15,10 +15,6 @@ from typing import Any
 from unittest.mock import mock_open, patch
 
 
-if hasattr(sys, "set_int_max_str_digits"):
-    sys.set_int_max_str_digits(50000)
-
-
 IMPORT_STRING = (
     "from string import *\n"
     "from re import *\n"
@@ -592,6 +588,10 @@ def _temp_run(
     timeout: int,
 ) -> None:
     try:
+        # Official LCB raises this at import (compute_code_generation_metrics); set it
+        # here so it does not leak into main-process scoring of other tasks.
+        if hasattr(sys, "set_int_max_str_digits"):
+            sys.set_int_max_str_digits(50000)
         _preload_numpy()
         try:
             res, metadata = run_test(sample, test=generation, debug=debug, timeout=timeout)

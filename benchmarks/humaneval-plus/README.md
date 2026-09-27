@@ -41,7 +41,7 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 
 ## Prompting
 
-- Implemented in `task.py`
+- Implemented in `benchmark_utils/evalplus.py`, shared with MBPP+
 - Uses chat-style prompt with explicit sections:
   - system instruction for Python code completion
   - user sections: `### Question`, `### Format`, `### Answer`
@@ -50,11 +50,16 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 
 ## Metrics
 
-- Implemented in `metrics.py`
+- Code extraction is implemented in `metrics.py`; Base/Plus execution and
+  aggregation are shared with MBPP+ in `benchmark_utils/evalplus.py`
 - For each generation:
   - assemble imports, helpers and definitions across code blocks, retaining the
     last function/class definition and dropping top-level usage examples, then use
     EvalPlus `sanitize(..., entrypoint=...)` to retain the implementation dependencies
+    (`benchmark_utils/evalplus_sanitize.py` swaps in an output-identical, pruned
+    `code_extract` that avoids upstream's cubic scan when the code runs to near the
+    end, e.g. assert floods or unclosed fences; code followed by long prose is as
+    slow as upstream; a differential test checks it against upstream)
   - indented function bodies are parsed as `prompt + body`; the final body can
     replace an earlier complete draft, while prompt imports/helpers remain available
   - compute reference outputs from the canonical solution (cached per process)
@@ -62,6 +67,15 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 - The pinned upstream commit includes the `find_zero` fix (#241); no local oracle
   patch is applied. It uses a 4-second minimum per-test time limit, up from
   0.3.1's 1 second. Serial and spawned workers use the same installed evaluator.
+- EvalPlus limits each checker to 4 GiB of address space. Scoring always runs in
+  spawned workers with BLAS threads capped at 1 (unless already set in the
+  environment), including at `--num-proc 1` (one worker), so that budget does not
+  depend on core count or `--num-proc`. Each check then starts a fresh
+  interpreter: on a 64-core node the 164 canonical solutions take about 90 s at
+  `--num-proc 1` and 11 s at `--num-proc 16`, so use a larger `--num-proc`.
+  Earlier runs could fail memory-heavy correct solutions (canonical HumanEval/130
+  at `--num-proc 1` on a 64-core node); re-score earlier checkpoints with
+  `--eval-only` before comparing against them.
 - HumanEval/32's canonical Newton solver is numerically sensitive to the Python
   runtime. In our audit, Python 3.10.14 passed all 788 Plus inputs; Python 3.12.4
   failed 7. Python 3.12's changed float `sum` changes the iteration trajectory;

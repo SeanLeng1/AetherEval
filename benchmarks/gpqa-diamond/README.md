@@ -46,11 +46,15 @@ benchmarks/gpqa-diamond/
 
 - Implemented in `metrics.py`
 - Deterministic extraction only (no second LLM extraction)
-- Choice parser is priority-based (lighteval-style):
+- The shared MCQ choice parser reads the last 1000 characters and is
+  priority-based (lighteval-style); within a stage the last match wins:
+  - terminal `\boxed{X}`
   - `final answer ...`
   - `answer: ...`
+  - any `\boxed{X}`
   - `answer ...`
   - `option/choice ...`
+  - `choose/select/pick ...`
   - line-start choice marker
 - No option-text fallback; only extracted choice letters are scored
 

@@ -4,21 +4,24 @@ import unittest
 from unittest import mock
 
 from benchmarks.bfcl._compat import ensure_bfcl_importable
+from tests._deps import BFCL_MODULES, available, requires
 
-ensure_bfcl_importable()
+# Not a module-level SkipTest: `python -m unittest tests.test_bfcl_handler` crashes on it.
+if available(*BFCL_MODULES):
+    ensure_bfcl_importable()
 
-from benchmarks.bfcl.handlers import (  # noqa: E402
-    OfficialPromptHandlerAdapter,
-    ToolRLHandler,
-)
-from benchmarks.bfcl.handlers.common import (  # noqa: E402
-    post_native_generate,
-)
-from benchmarks.bfcl.handlers.toolrl import (  # noqa: E402
-    _convert_to_format_tool,
-    _render_with_model_chat_template,
-    _tool_call_tags_are_special,
-)
+    from benchmarks.bfcl.handlers import (
+        OfficialPromptHandlerAdapter,
+        ToolRLHandler,
+    )
+    from benchmarks.bfcl.handlers.common import (
+        post_native_generate,
+    )
+    from benchmarks.bfcl.handlers.toolrl import (
+        _convert_to_format_tool,
+        _render_with_model_chat_template,
+        _tool_call_tags_are_special,
+    )
 
 
 class _TemplateTokenizer:
@@ -50,6 +53,7 @@ class _TemplateTokenizer:
         return f"<model-template>{body}<assistant>"
 
 
+@requires(*BFCL_MODULES)
 class BfclHandlerTests(unittest.TestCase):
     def test_official_adapter_preserves_prompt_and_uses_native_generate(self) -> None:
         class UpstreamPromptHandler:

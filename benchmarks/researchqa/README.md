@@ -12,16 +12,16 @@ This is the survey-mined ResearchQA release, not similarly named benchmarks.
 The released coverage judge uses `gpt-4.1-mini, temperature=0`,
 rubric batches of eight, and no explicit API max-token limit.
 AetherEval sets top-p 1 and a local 4096-token judge cap.
-Candidate defaults `n=1, temperature=0, top_p=1, max_new_tokens=2048`
+Candidate defaults `n=1, temperature=0, top_p=1, max_new_tokens=8192`
 are a local direct-answer profile; the paper's approximate 250-word instruction
-does not establish a tokenizer-independent 2048-token limit.
+does not establish a tokenizer-independent token limit.
 A direct-answer run without retrieval must not be represented as an equivalent
 deep-research agent evaluation.
 
 Native implementation of rubric coverage on the 3,750-item ResearchQA test set.
 
 - Candidate task protocol: the official leaderboard-submission prompt for systems without default attribution (240-260 words, in-line citations, `<ANSWER>\n\n<CITATIONS>` output), `n=1`, temperature `0`.
-- `max_new_tokens=2048` is a local output ceiling; the submission instructions fix the word range but no API max-token value.
+- `max_new_tokens=8192` is a local output ceiling; the submission instructions fix the word range but no API max-token value.
 - Judge: `gpt-4.1-mini`, temperature `0`, rubric batches of 8, three format attempts.
 - Primary metric: normalized rubric `coverage` on a 0–100 scale.
 

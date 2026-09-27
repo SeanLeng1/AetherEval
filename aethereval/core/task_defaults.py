@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -5,6 +6,24 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TASK_DEFAULTS_PATH = PROJECT_ROOT / "configs" / "task_defaults.yaml"
+# Generation keys the backends and chat templating understand.
+GENERATION_KEYS = frozenset(
+    {
+        "n",
+        "max_new_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "stop",
+        "seed",
+        "enable_thinking",
+        "regex",
+        "json_schema",
+        "ebnf",
+        "structural_tag",
+    }
+)
 
 
 @lru_cache(maxsize=1)
@@ -40,10 +59,8 @@ def _load_task_default_overrides() -> dict[str, dict[str, Any]]:
     return parsed
 
 
-def resolve_task_default_gen(
-    task_name: str, fallback_default_gen: dict[str, Any]
-) -> dict[str, Any]:
-    merged = dict(fallback_default_gen or {})
+def resolve_task_default_gen(task_name: str) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
     override = _load_task_default_overrides().get(task_name.replace("_", "-"))
     if override:
         merged.update(
@@ -82,6 +99,30 @@ def resolve_task_num_repeats(
             f"num_repeats for task '{task_name}' must be >= 1, got {value}"
         )
     return value
+
+
+def resolve_phase_num_repeats(
+    task_name: str,
+    saved_config_path: Path,
+    *,
+    runtime_override: int | None,
+    eval_only: bool,
+) -> int:
+    """Resolve repetitions; eval-only reuses the count its generation run saved."""
+    saved_repeats = None
+    if eval_only and saved_config_path.exists():
+        with saved_config_path.open("r", encoding="utf-8") as file:
+            saved_repeats = json.load(file).get("num_repeats")
+    if saved_repeats is None:
+        return resolve_task_num_repeats(task_name, runtime_override)
+
+    saved_repeats = int(saved_repeats)
+    if runtime_override is not None and int(runtime_override) != saved_repeats:
+        raise ValueError(
+            f"[{task_name}] eval-only num_repeats={runtime_override} conflicts "
+            f"with the saved run config value {saved_repeats}."
+        )
+    return resolve_task_num_repeats(task_name, saved_repeats)
 
 
 def resolve_task_default_metrics(

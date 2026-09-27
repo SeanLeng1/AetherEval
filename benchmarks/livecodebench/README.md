@@ -70,6 +70,16 @@ Why `v6`:
   failed answers, not excluded samples. This is a local execution limit, not a
   claim about the official leaderboard's memory budget. Parallel workers each
   have this limit; it is not a whole-job memory cap.
+- As in official LCB, candidates may convert integers of up to 50,000 digits.
+  The limit is raised only in the candidate process, so it does not apply to
+  other tasks scored in the same run.
+- Known leniency, kept to preserve scores: the official `timeout_handler`
+  (`testing_util.py` at `28fef95`) prints `timeout occured: alarm went off`
+  before raising, and stdio grading captures that line; ours raises silently.
+  A stdio candidate that catches the timeout (for example `except Exception:`)
+  and then prints the right answer therefore passes here (`[True]`) but gets
+  Wrong Answer (`[-2]`) from the official grader. Matching upstream would be a
+  score change.
 - Code extraction uses fenced-code parsing (last fenced block; no raw-text fallback).
 - Per generation score:
   - `1.0` if all tests pass

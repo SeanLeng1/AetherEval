@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aethereval.core.io import read_jsonl
+from aethereval.core.io import read_jsonl, write_json
 
 
 class IOTests(unittest.TestCase):
@@ -33,6 +33,19 @@ class IOTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 read_jsonl(Path(tmp) / "missing.jsonl")
+
+    def test_write_json_replaces_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "summary.json"
+            write_json(path, {"score": 1.0, "name": "é"})
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                json.dumps({"score": 1.0, "name": "é"}, indent=2, ensure_ascii=False),
+            )
+            with self.assertRaises(TypeError):
+                write_json(path, {"score": object()})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["score"], 1.0)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["summary.json"])
 
 
 if __name__ == "__main__":

@@ -44,13 +44,11 @@ def _verify_pair(verify: Any, gold: Any, prediction: Any) -> bool:
 def _math_verify_tools() -> tuple[
     Any,
     Any,
-    Any,
     tuple[Any, ...],
     tuple[Any, ...],
     tuple[Any, ...],
 ]:
     try:
-        from math_verify.errors import TimeoutException
         from math_verify.grader import verify
         from math_verify.parser import (
             ExprExtractionConfig,
@@ -65,7 +63,7 @@ def _math_verify_tools() -> tuple[
     latex_target = (LatexExtractionConfig(),)
     expr_target = (ExprExtractionConfig(),)
     pred_target = (ExprExtractionConfig(), LatexExtractionConfig())
-    return TimeoutException, parse, verify, latex_target, expr_target, pred_target
+    return parse, verify, latex_target, expr_target, pred_target
 
 
 @lru_cache(maxsize=1)
@@ -82,6 +80,10 @@ def _keep_units_pred_target() -> tuple[Any, ...]:
     )
 
 
+def _matches(verify: Any, golds: list[Any], predictions: list[Any]) -> bool:
+    return any(_verify_pair(verify, g, p) for g in golds for p in predictions)
+
+
 def score_with_math_verify(
     gold: str,
     prediction: str,
@@ -95,24 +97,22 @@ def score_with_math_verify(
     answer. Eval-set math tasks pass full `solution` text directly.
     `keep_units_fallback=True` re-parses an unmatched prediction without unit
     stripping, so symbolic answers ending in a variable can still match.
+
+    parse() and verify() absorb their own timeouts and errors (returning [] and
+    False). They raise only when called off the main thread, which must fail loudly
+    instead of scoring every record 0. _verify_pair's small-gold comparison catches
+    only TypeError/ValueError from float(); any other error there raises too.
     """
     # Normalize dataset gold notation during preparation, not arbitrary model text.
     gold_text = str(gold).strip()
     gold_input = f"\\boxed{{{gold_text}}}" if boxed_gold else gold_text
-    timeout_error, parse, verify, latex_target, expr_target, pred_target = (
-        _math_verify_tools()
-    )
+    parse, verify, latex_target, expr_target, pred_target = _math_verify_tools()
 
     prediction = _normalize_boxed_e_notation(prediction)
-    try:
-        extracted_predictions = parse(prediction, pred_target)
-        extracted_golds = parse(gold_input, latex_target)
-        if not boxed_gold and not extracted_golds:
-            extracted_golds = parse(gold_input, expr_target)
-    except timeout_error:
-        return 0.0, [], [], "parse timeout"
-    except Exception as exc:  # noqa: BLE001
-        return 0.0, [], [], f"parse error: {type(exc).__name__}: {exc}"
+    extracted_predictions = parse(prediction, pred_target)
+    extracted_golds = parse(gold_input, latex_target)
+    if not boxed_gold and not extracted_golds:
+        extracted_golds = parse(gold_input, expr_target)
 
     pred_strings = [str(x) for x in extracted_predictions]
     gold_strings = [str(x) for x in extracted_golds]
@@ -122,39 +122,10 @@ def score_with_math_verify(
     if not extracted_predictions:
         return 0.0, pred_strings, gold_strings, None
 
-    try:
-        matched = any(
-            _verify_pair(verify, g, p)
-            for g in extracted_golds
-            for p in extracted_predictions
-        )
-    except timeout_error:
-        return 0.0, pred_strings, gold_strings, "verify timeout"
-    except Exception as exc:  # noqa: BLE001
-        return (
-            0.0,
-            pred_strings,
-            gold_strings,
-            f"verify error: {type(exc).__name__}: {exc}",
-        )
-
+    matched = _matches(verify, extracted_golds, extracted_predictions)
     if not matched and keep_units_fallback:
-        try:
-            unit_predictions = parse(prediction, _keep_units_pred_target())
-            matched = any(
-                _verify_pair(verify, g, p)
-                for g in extracted_golds
-                for p in unit_predictions
-            )
-        except timeout_error:
-            return 0.0, pred_strings, gold_strings, "unit fallback timeout"
-        except Exception as exc:  # noqa: BLE001
-            return (
-                0.0,
-                pred_strings,
-                gold_strings,
-                f"unit fallback error: {type(exc).__name__}: {exc}",
-            )
+        unit_predictions = parse(prediction, _keep_units_pred_target())
+        matched = _matches(verify, extracted_golds, unit_predictions)
         if matched:
             pred_strings = [str(x) for x in unit_predictions]
 

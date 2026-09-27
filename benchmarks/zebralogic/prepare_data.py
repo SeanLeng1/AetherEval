@@ -1,15 +1,25 @@
-import json
 from pathlib import Path
 from typing import Any
+
+from benchmark_utils.data import load_hf, write_task_jsonl
 
 
 DATASET_CANDIDATES = [
     (
         "allenai/ZebraLogicBench-private",
         "grid_mode",
+        "9f39ef490ae924437376657205025f26c0bd1af3",
     ),  # preferred, if gated access is granted
-    ("WildEval/ZebraLogic", "grid_mode"),  # public mirror with solutions
-    ("allenai/ZebraLogicBench", "grid_mode"),  # public but often redacted
+    (
+        "WildEval/ZebraLogic",
+        "grid_mode",
+        "0a473f5a0054835754ed156d5a79c6ce27178bb1",
+    ),  # public mirror with solutions
+    (
+        "allenai/ZebraLogicBench",
+        "grid_mode",
+        "2f94a445d7079f20146f5443e2606049de8543e0",
+    ),  # public but often redacted
 ]
 
 
@@ -31,11 +41,11 @@ def _has_non_redacted_solutions(ds: Any) -> bool:
     return False
 
 
-def _load_best_dataset(load_dataset: Any) -> tuple[Any, str, str]:
+def _load_best_dataset() -> tuple[Any, str, str]:
     failures: list[str] = []
-    for dataset_path, dataset_name in DATASET_CANDIDATES:
+    for dataset_path, dataset_name, revision in DATASET_CANDIDATES:
         try:
-            ds = load_dataset(dataset_path, dataset_name, split="test")
+            ds = load_hf(dataset_path, dataset_name, "test", revision)
         except Exception as exc:  # noqa: BLE001
             failures.append(
                 f"{dataset_path}/{dataset_name}: {type(exc).__name__}: {exc}"
@@ -58,18 +68,7 @@ def _load_best_dataset(load_dataset: Any) -> tuple[Any, str, str]:
 
 
 def main() -> None:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "datasets is required for prepare_data.py. Install with `pip install datasets`."
-        ) from exc
-
-    task_dir = Path(__file__).resolve().parent
-    out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    ds, dataset_path, dataset_name = _load_best_dataset(load_dataset)
+    ds, dataset_path, dataset_name = _load_best_dataset()
     print(f"using dataset: {dataset_path}/{dataset_name} rows={len(ds)}")
 
     rows: list[dict[str, Any]] = []
@@ -99,11 +98,7 @@ def main() -> None:
             }
         )
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"wrote {out_path} rows={len(rows)}")
+    write_task_jsonl(Path(__file__).resolve().parent, rows)
 
 
 if __name__ == "__main__":

@@ -1,58 +1,20 @@
 import ast
-import json
 import re
-from functools import lru_cache
 from typing import Any
 
-from evalplus.eval import PASS, untrusted_check
-from evalplus.gen.util import trusted_exec
-from evalplus.sanitize import sanitize
-
-from aethereval.metrics.common import (
-    aggregate_binary_results,
-    mean,
-    mean_stderr,
-    to_records,
-)
-from aethereval.core.types import GenerationRecord, Sample
+from aethereval.core.types import Sample
+from benchmark_utils.evalplus import SCORING_PROTOCOL, aggregate_base_plus, score_base_plus
+from benchmark_utils.evalplus_sanitize import sanitize
 
 PRIMARY_METRIC = "pass@1"
-SCORING_PROTOCOL = "evalplus-26d6d00"
+# EvalPlus sets a 4 GiB RLIMIT_AS in a checker started from the scoring process;
+# score from a lean spawned worker even at num_proc=1 so the budget is the same.
+SCORE_IN_SUBPROCESS = True
 
 # Match fences with any info string so a ```text or ```bash block is consumed whole;
 # otherwise its closing fence would open the next block and misalign every later pair.
 _CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 _PYTHON_FENCE_TAGS = {"", "python", "py", "python3"}
-
-
-def _empty_aggregate_result() -> dict[str, float]:
-    return {
-        "accuracy": 0.0,
-        "accuracy_stderr": 0.0,
-        "accuracy_plus": 0.0,
-        "accuracy_plus_stderr": 0.0,
-        "accuracy_base": 0.0,
-        "accuracy_base_stderr": 0.0,
-        "pass@1": 0.0,
-        "pass@1_stderr": 0.0,
-    }
-
-
-def _record_plus_score(record: GenerationRecord) -> float:
-    parsed = record.parsed if isinstance(record.parsed, dict) else {}
-    plus_pass = bool(parsed.get("plus_pass", bool(record.score >= 1.0)))
-    return 1.0 if plus_pass else 0.0
-
-
-def _record_base_score(record: GenerationRecord) -> float:
-    parsed = record.parsed if isinstance(record.parsed, dict) else {}
-    plus_pass = bool(parsed.get("plus_pass", bool(record.score >= 1.0)))
-    base_pass = bool(parsed.get("base_pass", plus_pass))
-    return 1.0 if base_pass else 0.0
-
-
-def _record_has_parsed(record: GenerationRecord) -> bool:
-    return isinstance(record.parsed, dict) and bool(record.parsed)
 
 
 def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
@@ -105,16 +67,11 @@ def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
     return prompt + joiner + "\n" + sanitize(code, entrypoint=entry_point), full_solution
 
 
-@lru_cache(maxsize=256)
-def _oracle(reference: str, entry_point: str, inputs_json: str):
-    # Key by contents, not task ID: a different dataset must not reuse stale outputs.
-    # EvalPlus trusted_exec deep-copies each input before calling the reference.
-    return trusted_exec(reference, json.loads(inputs_json), entry_point, record_time=True)
-
-
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
     data = sample.data
-    entry_point = str(data["entry_point"])
+    for split in ("base", "plus"):
+        if not data[f"{split}_input"]:
+            raise ValueError(f"{sample.id}: {split}_input is empty")
     solution, is_full_solution = _candidate_solution(sample, generation)
     prompt = str(data["prompt"])
     reference = (
@@ -122,37 +79,10 @@ def score_generation(sample: Sample, generation: str) -> dict[str, Any]:
         + ("" if prompt.endswith("\n") else "\n")
         + str(data["canonical_solution"])
     )
-    statuses = {}
-    for split in ("base", "plus"):
-        if split == "plus" and statuses["base"] != PASS:
-            statuses["plus"] = "skipped"
-            break
-        inputs = data[f"{split}_input"]
-        if not inputs:
-            raise ValueError(f"{sample.id}: {split}_input is empty")
-        expected, ref_time = _oracle(reference, entry_point, json.dumps(inputs))
-        statuses[split], _ = untrusted_check(
-            "humaneval",
-            solution,
-            inputs,
-            entry_point,
-            expected=expected,
-            atol=float(data["atol"]),
-            ref_time=ref_time,
-            fast_check=True,
-        )
-
-    base_pass = statuses["base"] == PASS
-    plus_pass = base_pass and statuses["plus"] == PASS
-    parsed = {
-        "base_status": statuses["base"],
-        "plus_status": statuses["plus"],
-        "base_pass": base_pass,
-        "plus_pass": plus_pass,
-    }
+    parsed = score_base_plus("humaneval", sample, solution, reference)
     return {
-        "score": float(plus_pass),
-        "is_pass": plus_pass,
+        "score": float(parsed["plus_pass"]),
+        "is_pass": parsed["plus_pass"],
         "parsed": parsed,
         "meta": {
             **parsed,
@@ -166,40 +96,8 @@ def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    if not sample_results:
-        return _empty_aggregate_result()
-
-    base_means: list[float] = []
-    plus_metrics = aggregate_binary_results(
+    return aggregate_base_plus(
         sample_results,
         metric_options,
-        score_fn=_record_plus_score,
-        parsed_flag_fn=_record_has_parsed,
+        parsed_flag_fn=lambda record: isinstance(record.parsed, dict) and bool(record.parsed),
     )
-
-    for item in sample_results:
-        records = to_records(item["records"])
-        if not records:
-            continue
-
-        base_scores = [_record_base_score(record) for record in records]
-        base_means.append(mean(base_scores))
-
-    if not base_means:
-        return _empty_aggregate_result()
-
-    accuracy_plus = float(plus_metrics.get("accuracy", 0.0))
-    accuracy_plus_stderr = float(plus_metrics.get("accuracy_stderr", 0.0))
-    result: dict[str, float] = dict(plus_metrics)
-    result.update(
-        {
-            "accuracy": accuracy_plus,
-            "accuracy_stderr": accuracy_plus_stderr,
-            "accuracy_plus": accuracy_plus,
-            "accuracy_plus_stderr": accuracy_plus_stderr,
-            "accuracy_base": mean(base_means),
-            "accuracy_base_stderr": mean_stderr(base_means),
-        }
-    )
-
-    return result

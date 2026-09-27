@@ -124,6 +124,12 @@ The default is `1`. This also works with `--eval-only` and resume; it does not
 regenerate answers or change grading, aggregation, or the output order.
 Choose the count for the CPU cores and memory available on the invoking node,
 not the GPU count. Code workers can launch their existing test subprocesses.
+HumanEval+ and MBPP+ always score in spawned workers (one at the default) with
+BLAS threads capped at 1 unless already set in the environment, so EvalPlus's
+4 GiB candidate memory limit does not depend on the node's core count. Each check
+then starts a fresh interpreter, so give these tasks a larger `--num-proc`.
+Earlier versions could score them lower on many-core nodes; re-score those
+checkpoints with `--eval-only` before comparing.
 RM batch scoring and LLM-judge concurrency (`--judge-workers`) are unchanged.
 
 ### Ray data parallelism
@@ -157,6 +163,17 @@ group must fit on one node. For two eight-GPU nodes, `--dp-size 16 --tp-size 1`
 and `--dp-size 2 --tp-size 8` are supported topologies; one cross-node
 `--tp-size 16` replica is not supported by this launcher.
 
+AetherEval keeps at most 64 SGLang requests in flight per replica (`64 x dp-size`
+in total). `--sglang-arg inflight_per_replica=128` (or the same key in
+`sglang.extra_model_kwargs` and `--rm-sglang-arg`) raises the cap for candidate
+generation and reward-model scoring; the local judge's concurrency is set by
+`--judge-workers` and BFCL's by `--num-threads`, which this cap does not limit.
+It helps only when the KV cache has room for more sequences, for example
+models with few KV heads or short-output tasks on 80 GB+ GPUs; Qwen3-4B/8B at a
+16k budget already come close to the KV limit at 64. Compare generation time on
+one checkpoint before keeping a larger value. A different cap changes SGLang's
+batching, so individual sampled outputs differ, as they already do between runs.
+
 `dp-size` and `tp-size` default to `1`, so you only need to set them when overriding.
 If `--run-id` is not provided, the default is:
 `<model_suffix_lower>`, for example:
@@ -186,6 +203,23 @@ generation for every selected native task, unloads the candidate backend, and
 then evaluates every task. This ordering is shared by API judges, local judges,
 and non-judge metrics. Explicit phase flags are only needed when the two phases
 must run as separate commands or on separate machines.
+
+When a normal run resumes, non-judge metrics rescore every record. LLM-judge
+tasks judge only new or unscored records and keep stored judgments whose judge
+settings are unchanged: each judged record stores a fingerprint of the
+`judge_*` options (model, backend, endpoint, temperature, top-p, max tokens,
+repeats, thinking and local SGLang arguments, but not workers, timeouts,
+retries, API-key variable or judge DP/TP), and records with a different or
+missing fingerprint are judged again. A rerun whose judgments are all reused
+does not start the local judge. The generation phase leaves the `summary.json`
+of an already evaluated task untouched when it has nothing to generate. Use
+`--eval-only` to re-judge every record, for example after changing a judge
+prompt or parser, or a judge endpoint set only through environment variables.
+Each evaluation also records the installed scorer versions (math-verify, which
+`pyproject.toml` pins to the validated 0.9.0, latex2sympy2_extended, EvalPlus,
+NLTK, langdetect, SGLang, vLLM) as `scoring_packages` in the task's
+`run_config.json`; re-score saved generations with `--eval-only` after
+changing them.
 
 ### Split offline generation from online evaluation
 
@@ -228,10 +262,10 @@ aethereval \
 The model/model-name, output directory, and run id must identify the generation
 run. Eval-only automatically inherits its saved generation settings (including
 `n`) and rejects conflicting explicit generation overrides. It is intentionally
-incompatible with `--overwrite`, and always re-evaluates all existing records
-for the selected tasks. Both modes can also be set as `run.generate_only` or
-`run.eval_only` in YAML. BFCL maps these flags to its existing generation and
-evaluation phases as well.
+incompatible with `--overwrite`, and always re-evaluates (and re-judges) all
+existing records for the selected tasks. Both modes can also be set as
+`run.generate_only` or `run.eval_only` in YAML. BFCL maps these flags to its
+existing generation and evaluation phases as well.
 
 `safe-alignment` also supports this split. In eval-only mode it starts
 Ray-managed SGLang sequence-classification servers over the requested
@@ -296,11 +330,19 @@ its official external runner manages its data. No temporary upstream checkout is
 required. Task-specific options remain available via
 `python -m benchmarks.<task>.prepare_data --help` where supported.
 
+Most sources are pinned to a commit, release or dataset revision (the GPQA CSV by
+sha256). The exceptions: Arena-Hard baseline answers and its style cohort follow
+the upstream `main` branch, HealthBench reads a fixed but unhashed blob URL, and
+ZebraLogic reproduces its committed file only with gated access to
+`allenai/ZebraLogicBench-private` (the public fallbacks record a different
+`source_dataset`).
+
 Dynamic Safe Alignment also regenerates `data/protocol.json` from current training
 score statistics by default. To preserve a particular RL/SFT experiment's mapping,
 prepare that task with `--rl-data` or `--revision` instead. Rebuilt prompts or gold
 answers may differ when an upstream dataset has changed; old evaluation results
-are not automatically refreshed.
+are not automatically refreshed. The fingerprint test (see [Development](#development))
+names every task whose rows, prompts, golds or scoring metadata a rebuild changed.
 
 ## Benchmark Contract
 
@@ -323,7 +365,12 @@ benchmarks/<task_name>/
 - `load_samples(task_dir) -> list[Sample]`
 - `build_prompt(sample) -> str | list[dict]`
 
-`DEFAULT_GEN` is optional in `task.py`; per-task generation defaults are loaded from `configs/task_defaults.yaml`.
+Per-task generation defaults are loaded only from `configs/task_defaults.yaml`; a
+`task.py` that defines `DEFAULT_GEN` is rejected. Loading a task fails on any
+generation key the backends do not understand (`n`, `max_new_tokens`,
+`temperature`, `top_p`, `top_k`, `min_p`, `stop`, `seed`, `enable_thinking`,
+`regex`, `json_schema`, `ebnf`, `structural_tag`), so a typo cannot silently fall
+back to a default.
 
 Prompt handling:
 
@@ -351,6 +398,14 @@ offline data; generation settings belong in `configs/task_defaults.yaml`, sorted
 in the same order as benchmark directories. BFCL remains an external adapter for
 its official multi-turn execution loop, not a single-response scorer.
 
+A new benchmark also needs, each checked by the test suite:
+
+- an entry in `configs/task_defaults.yaml` (`n>1` only with `temperature>0`);
+- an **Official source and protocol** README section that states the configured
+  `n=` and `max_new_tokens=` values;
+- a fingerprint pin in `tests/golden/benchmark_fingerprints.json` (see
+  [Development](#development)), plus a scoring unit test in `tests/`.
+
 Shared benchmark implementation code lives in `benchmark_utils/`, outside
 `benchmarks/`, so helper modules are not visually or programmatically mixed with
 task folders.
@@ -358,6 +413,22 @@ task folders.
 Benchmark names in CLI, YAML and output JSON use hyphens (for example `gpqa-diamond`).
 Benchmark directories also use hyphens; legacy underscore CLI names resolve to
 canonical names. Existing output directories are not renamed.
+
+### Optional Hooks
+
+The runner also looks for these optional names:
+
+| Module | Hook | Effect |
+| --- | --- | --- |
+| `task.py` | `load_protocol(task_dir) -> dict` | Saved as `protocol` in `run_config.json` and passed to metrics as `_protocol`; resuming with a different protocol is rejected. |
+| `task.py` | `generate_outputs(backend, samples, pending_indices, existing_records, gen_cfg)` | Replaces the single `backend.generate` call, for multi-turn or retried generation. Returns `list[GenerationOutput]`. |
+| `metrics.py` | `USES_LLM_JUDGE = True` | With `judge_backend: local`, a shared local judge is passed as `_judge_client`. |
+| `metrics.py` | `PRESERVE_EXISTING_SCORES_ON_RESUME = True` | On a normal rerun, records judged with unchanged judge settings keep their scores instead of being judged again; `--eval-only` re-judges them (see the resume notes above). |
+| `metrics.py` | `REQUIRES_BACKEND = True` | Scoring receives a backend as `_backend`: one passed to `run_evaluation(backend=...)`, otherwise the one `create_evaluation_backend(metric_options, dp_size, tensor_parallel_size)` returns, which CLI runs always use. |
+| `metrics.py` | `validate_metric_options(options)` | Called with the task's metric options plus `n` before a phase that scores; raise to reject the run early. |
+
+Metric options whose names start with `_` are runtime objects and are not written
+to `run_config.json`.
 
 ## Reward-Model Metrics
 
@@ -385,12 +456,6 @@ sweeps a frozen weight set on the same held-out problems. It reports utility and
 paired matching gains, and exports JSON for external reward-curve/cross-utility plotting. Prepare
 its HF data once before running; the original `safe-alignment` task is unchanged.
 
-## MBPP+
-
-`mbpp-plus` evaluates the complete 378-task MBPP+ v0.2.0 release with EvalPlus
-0.3.1. Generation uses the existing local backend; base and Plus tests are scored
-offline with the official checker. See [protocol and preparation](benchmarks/mbpp-plus/README.md).
-
 ## Native LLM-Judge Benchmarks
 
 These benchmarks use the regular offline backend for candidate generation and an
@@ -406,20 +471,12 @@ OpenAI-compatible chat-completions endpoint only for judging:
   primary `style_controlled_win_rate` (hard prompts); `creative_writing_win_rate`
   is reported separately.
 
-The documented per-task judge model and sampling defaults live under each task's
+The documented per-task judge model and sampling defaults (`judge_model`,
+`judge_temperature`, `judge_top_p`, `judge_max_new_tokens`) live under each task's
 `metrics` section in `configs/task_defaults.yaml`. Judge resolution follows the
 same rule as candidate generation: CLI/config values override every selected
 task, while omitted values preserve each task's own defaults. Judge settings
 remain separate from candidate generation settings.
-
-| Task | Judge temperature | Judge top-p | Judge max new tokens |
-| --- | ---: | ---: | ---: |
-| `llmeval-med` | 1.0 | 1.0 | 4096 |
-| `healthbench` | 0.5 | 1.0 | 2048 |
-| `writingbench` | 1.0 | 0.95 | 2048 |
-| `creative-writing-v3` | 0.0 | 1.0 | 4096 |
-| `researchqa` | 0.0 | 1.0 | 4096 |
-| `arena-hard-v2` | 0.0 | 1.0 | 16000 |
 
 Upstream LLMEval-Med omits temperature/top-p, and several other upstreams omit
 top-p. AetherEval pins those conventional unfiltered values to `1.0` so API and
@@ -428,6 +485,10 @@ an upstream model's inherited defaults. OpenAI does not document a
 fixed omitted-value token limit, so the otherwise-unspecified LLMEval-Med and
 ResearchQA judge limits are pinned to 4096. These are local caps, not official
 token-limit requirements or guarantees against truncation.
+Where `judge_top_p` is omitted (Creative Writing v3), API judges send no top-p and
+a local judge uses `1.0`. A Claude judge reached through LiteLLM's native Anthropic
+route (no `--judge-base-url`) never receives top-p together with a temperature,
+because that API rejects the combination; WritingBench's `0.95` is not sent there.
 
 Online judges use LiteLLM, so OpenAI, Anthropic, Gemini, and other supported
 providers share the same benchmark message templates. For native provider routing,
@@ -489,8 +550,10 @@ occupy GPU memory at the same time. Explicit `--generate-only` and `--eval-only`
 commands remain supported as well.
 
 During eval-only, non-judge metrics run first, then local judge tasks are grouped
-by model and runtime configuration (DP/TP, SGLang arguments and batch size).
-Each group shares one loaded judge; it is unloaded before the next group.
+by model and runtime configuration (DP/TP and SGLang arguments).
+Each group shares one judge, loaded by the group's first task that has records
+to judge (so a group whose judgments are all reused never loads it) and unloaded
+before the next group.
 Per-task prompts, sampling settings and scoring rules remain separate, and API
 judging and candidate generation retain their original task order.
 
@@ -507,9 +570,13 @@ managed local SGLang judge then gets one task-specific structured-output attempt
 (`json_schema` or `regex`). If that also fails, each benchmark keeps its official
 failure behavior rather than applying a shared zero-score fallback: for example,
 ResearchQA and Arena-Hard exclude failed judgments, while WritingBench raises and
-HealthBench continues retrying. Failure and exclusion counts are included in the
-reported metrics where applicable. ResearchQA and Creative Writing failures are
-left eligible for scoring again on resume, matching their upstream workflows.
+HealthBench keeps re-sampling like simple-evals, for at most 50 extra attempts,
+and then raises. Failure and exclusion counts are included in the
+reported metrics where applicable. On a normal rerun, ResearchQA and Arena-Hard
+keep their excluded judgments like any other stored judgment, while Creative
+Writing failures are judged again, matching their upstream workflows. A Creative
+Writing failure is reported as a warning and keeps the task's
+`evaluation_complete` false instead of aborting the evaluation phase.
 
 The benchmark folders document the pinned candidate and judge decoding settings.
 CLI generation flags override candidate defaults except for the `n>1` sampling
@@ -563,66 +630,32 @@ aethereval \
   --eval-only
 ```
 
-Resuming these tasks preserves completed judge results and judges only newly
-generated rows. Use a new `--run-id` or `--overwrite` when changing the judge
-model, endpoint behavior, or judging protocol.
+A normal rerun of these tasks keeps completed judgments made with the same judge
+settings and judges only new or unscored rows; this explicit `--eval-only`
+command re-judges every row. Use `--eval-only` after changing the judging
+protocol, and a new `--run-id` to keep both results.
 
 ## External Benchmarks
 
-Some benchmarks do not fit the native `task.py`/`metrics.py` contract because they own
-their own generation loop, agent runtime, or reference output layout. These live under
-`benchmarks/<name>/` with an `external.py` API. The CLI task router still lets you
-select them with `--tasks`; it dispatches them to their external runner internally.
+Some benchmarks own their generation loop, agent runtime, or reference output layout
+and do not fit the native `task.py`/`metrics.py` contract. They live under
+`benchmarks/<name>/` with an `external.py` API (`run(spec) -> ExternalResult`), are
+still selected with `--tasks`, share the regular runtime flags (`--backend`,
+`--dp-size`, `--tp-size`, `--context-length`, ...), and write an AetherEval-style
+`summary.json` next to their reference-format raw outputs.
 
-Current external benchmarks:
+The only external benchmark is BFCL V3 (`bfcl-eval==2025.6.8`):
+`aethereval --tasks bfcl --model <model> --output-dir outputs`. It runs one complete
+benchmark pass by default (`num_repeats: 1` in `configs/task_defaults.yaml`; pass
+`--num-repeats 4` for a repeated-run mean) and reports per-section accuracy and
+ToolRL-format rates plus `overall_acc`. See
+[benchmarks/bfcl/README.md](benchmarks/bfcl/README.md) for handlers, categories,
+SGLang routing, metrics and output layout.
 
-- `benchmarks/bfcl` — BFCL V3 wrapper (`bfcl-eval==2025.6.8`):
-  `aethereval --tasks bfcl --model <model> --output-dir outputs`
-
-BFCL defaults to `live,non_live,multi_turn` and reports each section's `Acc` and
-reference-aware ToolRL-format rate plus `overall_acc` and `overall_format`,
-matching common V3 comparison tables. The expected format comes from the BFCL subset and
-multi-turn ground truth, so no-tool cases require `<response>` while tool execution
-steps require `<tool_call>` and terminate with `<response>`. It runs four independent
-repetitions by default (`--num-repeats 1` for a quick single run) and reports their
-mean. BFCL keeps `n=1`; `--n` controls completions per prompt, not full benchmark
-repetitions. In V3 these three collections together are the full benchmark.
-The default `--bfcl-handler toolrl` accepts arbitrary ToolRL-trained checkpoints;
-`--bfcl-handler official` instead reuses an exact prompt-mode model registration from
-the pinned BFCL package and reports official accuracy metrics without ToolRL format
-columns.
-
-External runs use the regular `aethereval` CLI for shared runtime flags
-(`--backend`, `--tp-size`, `--gpu-memory-utilization`, `--max-model-len`, etc.) plus
-benchmark-specific selectors such as `--categories` for BFCL.
-
-BFCL with SGLang always uses SGLang Model Gateway with cache-aware routing, including
-when `--dp-size 1`; `--tp-size` remains the tensor-parallel size per replica. This
-avoids the upstream BFCL behavior that treats the total GPU count as tensor
-parallelism. BFCL keeps its official generation loop and scorer but connects to
-the same Ray-managed SGLang workers and SMG router as native tasks, so its DP
-replicas can be placed across an attached multi-node Ray cluster.
-
-External benchmark modules use the same shape:
-
-- `ExternalRunSpec`
-- `ExternalResult`
-- `run(spec) -> ExternalResult`
-
-They still write an AetherEval-style `summary.json` with `metrics`,
-`primary_metric`, and `primary_score`, but raw outputs follow each reference
-benchmark schema:
-
-```text
-outputs/<run_id>/bfcl/
-  predictions.jsonl
-  result/
-  score/
-  summary.json
-```
-
-See `benchmarks/bfcl/README.md` for exact metrics,
-runtime requirements, and output details.
+The CLI registers each external benchmark in `aethereval/cli.py` `EXTERNAL_TASKS`;
+its `cli.py` provides `add_arguments(parser)` and
+`run_external(args, resolved, output_dir)`, which returns the task's `summary.json`
+contents.
 
 ## Bootstrap
 
@@ -642,10 +675,10 @@ Task-specific details (data source, prompt template, metric definition) should l
 
 ## Output Format
 
-Per run:
+Per run (`<run-id>` only when `--run-id` is given):
 
 ```text
-outputs/<run_id>/
+<output-dir>/<model-name>[/<run-id>]/
   run_summary.json
   <task>/
     predictions.jsonl
@@ -687,47 +720,12 @@ outputs/<run_id>/
 
 `run_summary.json` is run-level summary:
 
-- `results`: all per-task summaries
+- `results`: all per-task summaries in the run directory, native and external,
+  including tasks from earlier invocations
+- `phase`: the phase this invocation requested (`generate_and_eval` for a normal run)
 - `primary_scores`: each task's primary metric name/value
 - `primary_score_aggregate`: mean of task `primary_score` values (direct average across tasks)
 - `summary.metrics`: average of same metric names across tasks
-
-## Package Structure
-
-```text
-aethereval/
-  cli.py
-  config.py
-  backends/
-    base.py
-    factory.py
-    prompt.py
-    sglang/
-      backend.py
-    vllm/
-      backend.py
-  core/
-    io.py
-    types.py
-    task_defaults.py
-    task_register.py
-    runner.py
-  metrics/
-    common.py
-    bootstrap.py
-benchmarks/
-  <task>/
-    README.md
-    data/*.jsonl
-    task.py
-    metrics.py
-benchmark_utils/
-  aime.py
-  instruction_following.py
-configs/
-  example.yaml
-  task_defaults.yaml
-```
 
 ## Git LFS
 
@@ -742,3 +740,27 @@ Initialize once in your repo:
 ```bash
 git lfs install
 ```
+
+## Development
+
+Run the checks from the repository root. Outside the AetherRL image, install the
+tools with `python -m pip install -e '.[test]'`; inside it, install only `pytest`
+and `ruff` so the pinned runtime stays untouched.
+
+```bash
+ruff check .
+python -m pytest -q        # or: python -m unittest discover -s tests
+```
+
+- Tests that need an optional scorer or runtime (EvalPlus, the BFCL V3 stack) are
+  skipped with a reason when it is missing. Set `AETHEREVAL_REQUIRE_ALL_TEST_DEPS=1`
+  in the runtime image to make them fail instead.
+- Data tests read the benchmark files, so fetch the Git LFS data first.
+- `tests/test_benchmark_fingerprints.py` pins each native task's row count and the
+  hashes of its rendered prompts and of its golds and scoring metadata, and checks
+  that math, MCQ and BBH golds pass their own scorers. After a deliberate data or
+  prompt change, refresh the pins and review the diff:
+  `AETHEREVAL_UPDATE_GOLDEN=1 python -m unittest tests.test_benchmark_fingerprints`.
+  `AETHEREVAL_SLOW_TESTS=1` also runs every HumanEval+/MBPP+ canonical solution.
+- The vendored IFEval/IFBench checkers are compared with their pinned upstream
+  commits by `tools/check_vendored.py`; see each library's `NOTICE`.

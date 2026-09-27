@@ -111,12 +111,18 @@ BFCL tokenizer templates too.
 `--categories` accepts the official V3 collections `all`, `live`, `non_live`,
 `multi_turn`, `single_turn`, `ast`, `python`, and `non_python`, or individual V3
 categories such as `simple`, `live_parallel`, and `multi_turn_miss_param`. Omitting it
-selects `live,non_live,multi_turn`.
+selects `live,non_live,multi_turn`. `summary.json`, the format rates, `predictions.jsonl`
+and the score CSVs cover only the requested categories, even when the output directory
+still holds results of other categories from an earlier run; rerun `--eval-only` with
+the default categories to rebuild the combined report.
 
 With SGLang, `--dp-size` is the replica count and `--tp-size` is tensor parallelism
 per replica. AetherEval starts its managed SGLang Model Gateway and reuses it across
-all repeats. BFCL requests are concurrent; `--num-threads` defaults to
-`max(16, 16 * dp_size)`, capped at 100.
+all repeats. BFCL requests are concurrent; `--num-threads` sets the request pool size
+and defaults to `max(64, 64 * dp_size)`, the same in-flight limit native SGLang tasks
+use. Earlier releases used `min(100, max(16, 16 * dp_size))` (100 at `--dp-size 8`);
+pass `--num-threads 100` to keep an in-progress checkpoint series on that setting,
+because SGLang batching at temperature 0.001 can move individual outputs at noise level.
 
 Deterministic context-length errors are not retried and score zero. Connection errors,
 429s, and transient 5xx responses retain bounded retries. Use `--bfcl-verbose` to show
@@ -125,7 +131,11 @@ BFCL's normally filtered per-turn logs.
 Generation resumes existing JSONL results unless `--overwrite` is set. If a process
 was interrupted during its final JSONL write, AetherEval saves the incomplete bytes as
 `*.corrupt-tail`, truncates only that final record, and resumes it. Earlier corruption
-is reported and never silently repaired.
+is reported and never silently repaired. Records whose generation failed with any
+`Error during inference` other than a context-length overflow (for example during a
+router or worker outage) are dropped when generation resumes, so a plain rerun
+regenerates only those records and restores BFCL's result order. Context-length
+failures are kept and score zero; `--eval-only` never drops records and fails on them.
 
 BFCL uses the same global `--context-length` and `--sglang-arg KEY=VALUE`
 settings as other tasks; there is no BFCL-only server override layer.

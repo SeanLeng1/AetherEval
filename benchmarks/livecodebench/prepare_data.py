@@ -1,11 +1,13 @@
-import json
 from pathlib import Path
 from typing import Any
+
+from benchmark_utils.data import load_hf, write_task_jsonl
 
 
 SOURCE_REPO = "lighteval/code_generation_lite"
 SOURCE_SUBSET = "v6"
 SOURCE_SPLIT = "test"
+SOURCE_REVISION = "89e5fc5c2a8e748f50e95bc7235fab2372d49bfa"
 
 
 def _to_iso_date(value: Any) -> str:
@@ -15,18 +17,7 @@ def _to_iso_date(value: Any) -> str:
 
 
 def main() -> None:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "datasets is required for prepare_data.py. Install with `pip install datasets`."
-        ) from exc
-
-    task_dir = Path(__file__).resolve().parent
-    out_path = task_dir / "data" / "eval.jsonl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    ds = load_dataset(SOURCE_REPO, SOURCE_SUBSET, split=SOURCE_SPLIT)
+    ds = load_hf(SOURCE_REPO, SOURCE_SUBSET, SOURCE_SPLIT, SOURCE_REVISION)
 
     rows: list[dict[str, Any]] = []
     for idx, row in enumerate(ds):
@@ -57,13 +48,10 @@ def main() -> None:
             }
         )
 
-    with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(
-        f"wrote {out_path} rows={len(rows)} "
-        f"(repo={SOURCE_REPO}, subset={SOURCE_SUBSET}, split={SOURCE_SPLIT})"
+    write_task_jsonl(
+        Path(__file__).resolve().parent,
+        rows,
+        f" (repo={SOURCE_REPO}, subset={SOURCE_SUBSET}, split={SOURCE_SPLIT})",
     )
 
 

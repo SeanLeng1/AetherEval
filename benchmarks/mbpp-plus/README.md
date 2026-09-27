@@ -10,7 +10,7 @@ The bundled `data/eval.jsonl` contains the prompt, canonical solution, base and
 Plus inputs, and tolerance. To download it again on a connected machine:
 
 ```bash
-python benchmarks/mbpp-plus/prepare_data.py
+python -m benchmarks.mbpp-plus.prepare_data
 ```
 
 With dependencies and the model also available locally, both generation and
@@ -20,10 +20,11 @@ scoring run without network access or an external judge:
 aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
 ```
 
-## Protocol
+## Official source and protocol
 
 - Prompt uses the same short-reasoning-then-fenced-code format as our HumanEval+
-  task, with `### Question`, `### Format`, and `### Answer` sections. The question
+  task (shared in `benchmark_utils/evalplus.py`, with Base/Plus execution and
+  aggregation), with `### Question`, `### Format`, and `### Answer` sections. The question
   retains MBPP+'s original specification and examples; no reference solution or
   private test inputs are included. There is no assistant/code prefill.
   The local backend applies the model's chat template. This is a local reasoning
@@ -36,14 +37,29 @@ aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
   fit the prompt; EOS can end generation before the ceiling.
 - Use the official `sanitize`, `mbpp_deserialize_inputs`, and
   `untrusted_check(dataset="mbpp")`, including special oracles and official time limits.
+  `sanitize` runs with an output-identical, pruned `code_extract`
+  (`benchmark_utils/evalplus_sanitize.py`) that avoids upstream's cubic scan when
+  the code runs to near the end, e.g. assert floods or unclosed fences; code
+  followed by long prose is as slow as upstream. A differential test checks it
+  against upstream.
   Reference execution also honors `MBPP_OUTPUT_NOT_NONE_TASKS`.
   This revision uses a 4-second minimum per-test time limit (0.3.1 used 1 second);
   re-score saved generations with `--eval-only` after upgrading.
+- Known upstream defect: `sanitize` drops the recursive generator helper `adjac`
+  from the canonical Mbpp/630 solution, so that reference fails its base tests.
 - Primary `pass@1` and `accuracy_plus` require both base and Plus tests to pass.
   `accuracy_base` is reported separately on the same 378 tasks, not the original
   full MBPP benchmark. A base failure skips Plus execution without changing pass/fail.
 - No runtime dataset downloads: scoring reads raw local inputs and computes
   reference outputs locally, cached per process.
+- EvalPlus limits each checker to 4 GiB of address space. Scoring always runs in
+  spawned workers with BLAS threads capped at 1 (unless already set in the
+  environment), including at `--num-proc 1` (one worker), so that budget does not
+  depend on core count or `--num-proc`. Each check then starts a fresh
+  interpreter: on a 64-core node the 378 canonical solutions take about 220 s at
+  `--num-proc 1` and 38 s at `--num-proc 16`, so use a larger `--num-proc`.
+  Earlier runs failed the canonical Mbpp/255 on a 64-core node; re-score earlier
+  checkpoints with `--eval-only` before comparing against them.
 
 Execute generated programs in an isolated environment without credentials or
 valuable files. EvalPlus's reliability guard is not a security sandbox.

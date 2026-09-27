@@ -28,10 +28,12 @@ _BUNDLED_HARMONY_ENCODING_DIR = Path(__file__).with_name("encodings")
 _UNSUPPORTED_SERVER_ARGS = {
     "grpc_http_sidecar_port",
     "log_level_http",
+    "smg_http_sidecar_port",
 }
 _CONTROLLED_SERVER_ARGS = {
     "grpc_mode",
     "host",
+    "inflight_per_replica",
     "log_level",
     "model",
     "model_path",
@@ -381,6 +383,10 @@ class SGLangService:
     embedding pipeline only tokenizes text, and reward scoring posts token ids.
     """
 
+    # Client-side cap on in-flight requests per replica, overridable with the
+    # inflight_per_replica model kwarg. SGLang admits requests by KV capacity.
+    inflight_per_replica = 64
+
     def __init__(
         self,
         *,
@@ -395,6 +401,13 @@ class SGLangService:
         if int(tensor_parallel_size) < 1:
             raise ValueError(
                 f"tensor_parallel_size must be >= 1, got {tensor_parallel_size}"
+            )
+        inflight_per_replica = int(
+            (model_kwargs or {}).get("inflight_per_replica", self.inflight_per_replica)
+        )
+        if inflight_per_replica < 1:
+            raise ValueError(
+                f"inflight_per_replica must be >= 1, got {inflight_per_replica}"
             )
 
         harmony_encoding_dir = _resolve_harmony_encoding_dir()
@@ -417,6 +430,7 @@ class SGLangService:
         ):
             self.model_kwargs["tokenizer_path"] = self.model
         self.dp_size = int(dp_size)
+        self.inflight_per_replica = inflight_per_replica
         self.router_policy = router_policy
         self.router_log_level = str(self.model_kwargs.get("router_log_level", "warn"))
         self._harmony_encoding_dir = harmony_encoding_dir
@@ -525,10 +539,7 @@ class SGLangService:
         if not payloads:
             return []
         results: list[Any] = [None] * len(payloads)
-        max_workers = min(
-            len(payloads),
-            max(64, self.dp_size * 64),
-        )
+        max_workers = min(len(payloads), self.dp_size * self.inflight_per_replica)
         progress = Progress(len(payloads), progress_desc, progress_unit, show_progress)
         executor = ThreadPoolExecutor(max_workers=max_workers)
         futures = {}
@@ -545,6 +556,7 @@ class SGLangService:
                 )
                 futures[future] = index
 
+        succeeded = False
         try:
             for _ in range(max_workers):
                 submit_next()
@@ -556,8 +568,11 @@ class SGLangService:
                     results[futures.pop(future)] = future.result()
                     progress.update()
                     submit_next()
+            succeeded = True
         finally:
-            executor.shutdown(wait=True, cancel_futures=True)
+            # On an error or Ctrl-C, do not join the in-flight requests: the
+            # caller's close() stops the servers, which unblocks those threads.
+            executor.shutdown(wait=succeeded, cancel_futures=True)
             progress.close()
         return results
 

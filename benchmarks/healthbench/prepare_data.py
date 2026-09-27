@@ -4,6 +4,8 @@ import json
 import urllib.request
 from pathlib import Path
 
+from aethereval.core.io import write_jsonl
+
 
 SOURCE_URL = "https://openaipublic.blob.core.windows.net/simple-evals/healthbench/2025-05-07-06-14-12_oss_eval.jsonl"
 
@@ -20,17 +22,20 @@ def main() -> None:
         source = urllib.request.urlopen(args.source)
     else:
         source = Path(args.source).open("rb")
-    with source, output.open("w", encoding="utf-8") as dst:
+    rows: list[dict] = []
+    with source:
         for idx, raw in enumerate(source):
             row = json.loads(raw)
-            payload = {
-                "id": str(row.get("prompt_id", idx)),
-                "prompt_id": row.get("prompt_id", idx),
-                "prompt": row["prompt"],
-                "rubrics": row["rubrics"],
-                "example_tags": row.get("example_tags", []),
-            }
-            dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            rows.append(
+                {
+                    "id": str(row.get("prompt_id", idx)),
+                    "prompt_id": row.get("prompt_id", idx),
+                    "prompt": row["prompt"],
+                    "rubrics": row["rubrics"],
+                    "example_tags": row.get("example_tags", []),
+                }
+            )
+    write_jsonl(output, rows)
 
 
 if __name__ == "__main__":

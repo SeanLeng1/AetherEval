@@ -89,5 +89,12 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 
 def write_json(path: Path, obj: dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
+    """Atomically replace a JSON file after the object is serialized."""
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()

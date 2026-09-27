@@ -3,3 +3,37 @@ https://github.com/allenai/IFBench
 
 License: Apache-2.0
 Copyright 2025 Allen Institute for AI.
+
+Pinned upstream commit: 1c40f0c10d9b5c5c2f10a175a28007ebb64f7f4d
+
+Vendored files (upstream path -> local file):
+- ifbench/instructions.py -> instructions.py
+- ifbench/instructions_registry.py -> instructions_registry.py
+- ifbench/instructions_util.py -> instructions_util.py
+- evaluation_lib.py -> evaluation_lib.py
+
+Local adaptations:
+- code is reformatted (4-space black style); docstrings and comments are trimmed.
+- package import paths are rewritten to local relative imports; unused imports dropped.
+- upstream's NLTK data-path setup and automatic downloads at import are removed; the
+  data path is set in __init__.py and resources come from prepare_nltk.py.
+- instructions_registry.py: INSTRUCTION_DICT keeps only the 58 IFBench OOD entries;
+  classic_instructions (the IFEval registry) is not imported.
+- instructions_util.py: the unused LANGUAGE_CODES table is removed.
+- evaluation_lib.py: the file IO and report helpers (read_prompt_list, write_outputs,
+  read_prompt_to_response_dict, print_report) are removed.
+
+Checking or upgrading: because of the reformatting, a textual diff against upstream
+is thousands of lines of noise. tools/check_vendored.py compares code only
+(formatting, comments and docstrings ignored); at the pinned commit its output shows
+exactly the adaptations above. From the repository root:
+
+  U=https://raw.githubusercontent.com/allenai/IFBench/1c40f0c10d9b5c5c2f10a175a28007ebb64f7f4d
+  for f in instructions instructions_registry instructions_util; do
+    python tools/check_vendored.py "$U/ifbench/$f.py" "benchmarks/ifbench/ifbench_lib/$f.py"
+  done
+  python tools/check_vendored.py "$U/evaluation_lib.py" benchmarks/ifbench/ifbench_lib/evaluation_lib.py
+
+To upgrade, run the same commands against the new commit, port the code changes they
+report beyond the adaptations above, and update the pinned commit here and in
+../README.md and ../prepare_data.py.

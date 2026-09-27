@@ -29,46 +29,12 @@ def _build_sampling_params(gen_cfg: dict[str, Any]) -> dict[str, Any]:
         params["min_p"] = float(gen_cfg["min_p"])
     if gen_cfg.get("stop") is not None:
         params["stop"] = gen_cfg["stop"]
-    if gen_cfg.get("seed") is not None:
-        params["seed"] = int(gen_cfg["seed"])
+    # No seed: SMG's /generate sampling params, the SGLang scheduler proto and
+    # smg-grpc-servicer carry no per-request seed, so seeds apply to vLLM only.
     for key in ("regex", "json_schema", "ebnf", "structural_tag"):
         if gen_cfg.get(key) is not None:
             params[key] = gen_cfg[key]
     return params
-
-
-def _extract_text(output: Any) -> str:
-    if isinstance(output, list):
-        if len(output) != 1:
-            raise ValueError(
-                f"SGLang gRPC returned an unexpected batch size: {len(output)}"
-            )
-        return _extract_text(output[0])
-    if isinstance(output, str):
-        return output
-
-    if isinstance(output, dict):
-        for key in ("text", "output_text", "generated_text"):
-            if key in output:
-                return str(output[key])
-        choices = output.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                if "text" in first:
-                    return str(first["text"])
-                message = first.get("message")
-                if isinstance(message, dict) and "content" in message:
-                    return str(message["content"])
-        outputs = output.get("outputs")
-        if isinstance(outputs, list) and outputs:
-            return _extract_text(outputs[0])
-
-    text = getattr(output, "text", None)
-    if text is not None:
-        return str(text)
-
-    raise TypeError(f"Unsupported SGLang output type: {type(output).__name__}")
 
 
 def _maybe_int(value: Any) -> int | None:
@@ -81,99 +47,35 @@ def _maybe_int(value: Any) -> int | None:
     return None
 
 
-def _dict_first_int(mapping: dict[str, Any], keys: tuple[str, ...]) -> int | None:
-    for key in keys:
-        value = _maybe_int(mapping.get(key))
-        if value is not None:
-            return value
-    return None
+def _parse_generate_response(
+    output: Any,
+) -> tuple[str, int | None, int | None, str | None]:
+    """Parse one SMG /generate response: text, output_ids and meta_info."""
 
-
-def _maybe_count_token_ids(token_ids: Any) -> int | None:
-    if token_ids is None:
-        return None
-    try:
-        return count_token_ids(token_ids)
-    except TypeError:
-        return None
-
-
-def _extract_output_token_count(output: Any) -> int | None:
     if isinstance(output, list):
         if len(output) != 1:
             raise ValueError(
                 f"SGLang gRPC returned an unexpected batch size: {len(output)}"
             )
-        return _extract_output_token_count(output[0])
-    if isinstance(output, str):
-        return None
-
-    if isinstance(output, dict):
-        for key in ("output_token_ids", "output_ids", "token_ids"):
-            count = _maybe_count_token_ids(output.get(key))
-            if count is not None:
-                return count
-        count = _dict_first_int(
-            output,
-            (
-                "output_token_count",
-                "completion_token_count",
-                "num_output_tokens",
-                "num_completion_tokens",
-                "completion_tokens",
-            ),
-        )
-        if count is not None:
-            return count
-        meta_info = output.get("meta_info")
-        if isinstance(meta_info, dict):
-            count = _dict_first_int(
-                meta_info,
-                (
-                    "output_token_count",
-                    "completion_token_count",
-                    "num_output_tokens",
-                    "num_completion_tokens",
-                    "completion_tokens",
-                ),
-            )
-            if count is not None:
-                return count
-        choices = output.get("choices")
-        if isinstance(choices, list) and choices:
-            return _extract_output_token_count(choices[0])
-        outputs = output.get("outputs")
-        if isinstance(outputs, list) and outputs:
-            return _extract_output_token_count(outputs[0])
-        return None
-
-    for attr in ("output_token_ids", "output_ids", "token_ids"):
-        count = _maybe_count_token_ids(getattr(output, attr, None))
-        if count is not None:
-            return count
-    for attr in (
-        "output_token_count",
-        "completion_token_count",
-        "num_output_tokens",
-        "num_completion_tokens",
-        "completion_tokens",
-    ):
-        count = _maybe_int(getattr(output, attr, None))
-        if count is not None:
-            return count
-    meta_info = getattr(output, "meta_info", None)
-    if isinstance(meta_info, dict):
-        return _dict_first_int(
-            meta_info,
-            (
-                "output_token_count",
-                "completion_token_count",
-                "num_output_tokens",
-                "num_completion_tokens",
-                "completion_tokens",
-            ),
-        )
-    return None
+        output = output[0]
+    meta_info = output.get("meta_info")
+    if not isinstance(meta_info, dict):
+        meta_info = {}
+    output_ids = output.get("output_ids")
+    completion_tokens = (
+        count_token_ids(output_ids)
+        if output_ids is not None
+        else _maybe_int(meta_info.get("completion_tokens"))
+    )
+    finish_reason = meta_info.get("finish_reason")
+    if isinstance(finish_reason, dict):
+        finish_reason = finish_reason.get("type")
+    return (
+        str(output["text"]),
+        _maybe_int(meta_info.get("prompt_tokens")),
+        completion_tokens,
+        finish_reason if isinstance(finish_reason, str) else None,
+    )
 
 
 def _outputs_from_dicts(output_dicts: list[dict[str, Any]]) -> list[GenerationOutput]:
@@ -187,40 +89,6 @@ def _outputs_from_dicts(output_dicts: list[dict[str, Any]]) -> list[GenerationOu
         )
         for item in output_dicts
     ]
-
-
-def _extract_prompt_token_count(output: Any) -> int | None:
-    if isinstance(output, list) and len(output) == 1:
-        return _extract_prompt_token_count(output[0])
-    if isinstance(output, dict):
-        for values in (output.get("meta_info"), output.get("usage"), output):
-            if isinstance(values, dict):
-                count = _dict_first_int(
-                    values, ("prompt_tokens", "prompt_token_count", "input_token_count")
-                )
-                if count is not None:
-                    return count
-    return None
-
-
-def _extract_finish_reason(output: Any) -> str | None:
-    if isinstance(output, list) and len(output) == 1:
-        return _extract_finish_reason(output[0])
-    if not isinstance(output, dict):
-        return None
-    meta_info = output.get("meta_info")
-    reason = meta_info.get("finish_reason") if isinstance(meta_info, dict) else None
-    if reason is None:
-        reason = output.get("finish_reason")
-    if isinstance(reason, dict):
-        reason = reason.get("type")
-    if isinstance(reason, str):
-        return reason
-    for key in ("choices", "outputs"):
-        nested = output.get(key)
-        if isinstance(nested, list) and nested:
-            return _extract_finish_reason(nested[0])
-    return None
 
 
 def _run_service_generation(
@@ -264,18 +132,20 @@ def _run_service_generation(
         request_items, request_payloads, raw_outputs, strict=True
     ):
         item_idx = int(item["idx"])
+        text, prompt_tokens, completion_tokens, finish_reason = (
+            _parse_generate_response(output)
+        )
         if item_idx not in prompt_token_counts:
-            count = _extract_prompt_token_count(output)
             prompt_token_counts[item_idx] = (
-                count
-                if count is not None
+                prompt_tokens
+                if prompt_tokens is not None
                 else count_text_tokens(request["text"], tokenizer)
             )
         grouped_texts[item_idx].append(
-            prefilled_reasoning_prefix(request["text"]) + _extract_text(output)
+            prefilled_reasoning_prefix(request["text"]) + text
         )
-        grouped_token_counts[item_idx].append(_extract_output_token_count(output))
-        grouped_finish_reasons[item_idx].append(_extract_finish_reason(output))
+        grouped_token_counts[item_idx].append(completion_tokens)
+        grouped_finish_reasons[item_idx].append(finish_reason)
 
     results: list[dict[str, Any]] = []
     for item in payloads:

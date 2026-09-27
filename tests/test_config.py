@@ -308,6 +308,46 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(resolved["generate_only"])
         self.assertFalse(resolved["eval_only"])
 
+    def test_cli_phase_replaces_yaml_phase(self) -> None:
+        from aethereval.cli import build_parser
+
+        cfg = {"run": {"generate_only": True}}
+        args = build_parser().parse_args(["--model", "candidate", "--eval-only"])
+        resolved = resolve_run_arguments(args, cfg)
+        self.assertTrue(resolved["eval_only"])
+        self.assertFalse(resolved["generate_only"])
+
+        args = build_parser().parse_args(["--model", "candidate"])
+        cfg = {"run": {"generate_only": True, "eval_only": True}}
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            resolve_run_arguments(args, cfg)
+
+    def test_unknown_yaml_keys_are_rejected(self) -> None:
+        from aethereval.cli import build_parser
+
+        args = build_parser().parse_args(["--model", "candidate"])
+        for cfg, key in (
+            ({"generation": {"max_new_token": 16384}}, "generation.max_new_token"),
+            ({"run": {"num_proc": 8}}, "run.num_proc"),
+            ({"runtime": {"judge_backend": "local"}}, "runtime.judge_backend"),
+            ({"max_new_token": 16384}, "max_new_token"),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(
+                    ValueError, f"^Unknown YAML config keys: {key}$"
+                ):
+                    resolve_run_arguments(args, cfg)
+        with self.assertRaisesRegex(ValueError, "YAML section 'run' must be a mapping"):
+            resolve_run_arguments(args, {"run": "oops"})
+
+        # Empty sections, flat top-level keys and the shipped example still load.
+        cfg = {"vllm": None, "metrics": {"num_proc": 2}, "max_new_tokens": 64}
+        resolved = resolve_run_arguments(args, cfg)
+        self.assertEqual(resolved["gen_overrides"]["max_new_tokens"], 64)
+        example = Path(__file__).resolve().parents[1] / "configs" / "example.yaml"
+        resolved = resolve_run_arguments(args, load_yaml_config(str(example)))
+        self.assertEqual(resolved["tasks"], "ifeval")
+
 
 if __name__ == "__main__":
     unittest.main()

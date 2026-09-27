@@ -42,12 +42,9 @@ _NOISY_BFCL_MESSAGES = {
     "Empty response from the model. Proceed to next turn.",
     "Failed to decode the model response. Proceed to next turn.",
 }
-_DEFAULT_GEN = resolve_task_default_gen("bfcl", {})
-_DEFAULT_NUM_REPEATS = resolve_task_num_repeats("bfcl")
-_DEFAULT_HANDLER = str(_DEFAULT_GEN.get("handler", "toolrl"))
-DEFAULT_CATEGORIES = tuple(
-    _DEFAULT_GEN.get("categories", ("live", "non_live", "multi_turn"))
-)
+# configs/task_defaults.yaml is the single source of BFCL's protocol defaults.
+_DEFAULT_GEN = resolve_task_default_gen("bfcl")
+DEFAULT_CATEGORIES = tuple(_DEFAULT_GEN["categories"])
 _COMPARISON_SECTIONS = (
     ("live", "live_acc", "live_format"),
     ("non_live", "non_live_acc", "non_live_format"),
@@ -60,7 +57,7 @@ class ExternalRunSpec:
     model: str  # Hugging Face id or local checkpoint path
     output_dir: Path  # AetherEval run dir; result/ + score/ go under it
     model_name: str | None = None  # Logical/output label; never used for loading
-    handler: str = _DEFAULT_HANDLER
+    handler: str = str(_DEFAULT_GEN["handler"])
     categories: list[str] = field(default_factory=lambda: list(DEFAULT_CATEGORIES))
     backend: str = "sglang"  # tmux0 container ships sglang
     dp_size: int = 1
@@ -70,13 +67,11 @@ class ExternalRunSpec:
     gpu_memory_utilization: float = 0.9
     dtype: str = "bfloat16"
     sglang_server_args: dict[str, Any] = field(default_factory=dict)
-    temperature: float = float(
-        _DEFAULT_GEN.get("temperature", 0.001)
-    )  # near-greedy, BFCL tool-calling default
-    max_tokens: int = int(_DEFAULT_GEN.get("max_new_tokens", 4096))
+    temperature: float = float(_DEFAULT_GEN["temperature"])
+    max_tokens: int = int(_DEFAULT_GEN["max_new_tokens"])
     max_context_length: int | None = None
-    top_p: float = float(_DEFAULT_GEN.get("top_p", 1.0))
-    top_k: int = int(_DEFAULT_GEN.get("top_k", -1))
+    top_p: float = float(_DEFAULT_GEN["top_p"])
+    top_k: int = int(_DEFAULT_GEN["top_k"])
     repetition_penalty: float = 1.0
     seed: int | None = None
     enable_thinking: bool | None = None
@@ -84,7 +79,7 @@ class ExternalRunSpec:
     allow_overwrite: bool = True
     run_generation: bool = True
     run_evaluation: bool = True
-    num_repeats: int = _DEFAULT_NUM_REPEATS
+    num_repeats: int = resolve_task_num_repeats("bfcl")
 
     @property
     def num_gpus(self) -> int:
@@ -119,7 +114,10 @@ def _gen_args(
         skip_server_setup=skip_server_setup,
         local_model_path=spec.model if Path(spec.model).is_dir() else None,
         result_dir=result_dir,  # absolute -> PROJECT_ROOT / abs == abs
-        allow_overwrite=spec.allow_overwrite,
+        # Upstream's overwrite mode rewrites the whole category file per record
+        # and dedupes the duplicated live_relevance_3-3-0 id; run() deletes the
+        # selected result files itself and upstream always appends.
+        allow_overwrite=False,
         run_ids=False,
         enable_lora=False,
         max_lora_rank=None,
@@ -166,8 +164,8 @@ def _handler_env(spec: ExternalRunSpec) -> dict[str, str | None]:
 
 
 @contextlib.contextmanager
-def _cap_bfcl_thread_pool(max_workers: int):
-    """Cap BFCL V3's hard-coded 100-request local inference pool."""
+def _size_bfcl_thread_pool(max_workers: int):
+    """Replace BFCL V3's hard-coded 100-worker local inference pool size."""
     if max_workers <= 0:
         raise ValueError("BFCL num_threads must be positive.")
 
@@ -175,18 +173,14 @@ def _cap_bfcl_thread_pool(max_workers: int):
 
     original = base_oss_handler.ThreadPoolExecutor
 
-    def capped_thread_pool_executor(*args, **kwargs):
-        requested = kwargs.get("max_workers")
-        if requested is None and args:
-            requested = args[0]
-        capped = max_workers if requested is None else min(int(requested), max_workers)
+    def sized_thread_pool_executor(*args, **kwargs):
         if args:
-            args = (capped, *args[1:])
+            args = (max_workers, *args[1:])
         else:
-            kwargs["max_workers"] = capped
+            kwargs["max_workers"] = max_workers
         return original(*args, **kwargs)
 
-    base_oss_handler.ThreadPoolExecutor = capped_thread_pool_executor
+    base_oss_handler.ThreadPoolExecutor = sized_thread_pool_executor
     try:
         yield
     finally:
@@ -322,7 +316,7 @@ def _run_generations(
                     }
                 ),
                 _filter_bfcl_prints(not spec.verbose),
-                _cap_bfcl_thread_pool(spec.num_threads),
+                _size_bfcl_thread_pool(spec.num_threads),
             ):
                 for run_index, result_dir in runs:
                     run_spec = replace(spec, seed=_repeat_seed(spec, run_index))
@@ -339,7 +333,7 @@ def _run_generations(
         with (
             _temporary_env(_handler_env(run_spec)),
             _filter_bfcl_prints(not spec.verbose),
-            _cap_bfcl_thread_pool(run_spec.num_threads),
+            _size_bfcl_thread_pool(run_spec.num_threads),
             _patch_bfcl_server_command(run_spec),
         ):
             generation_main(_gen_args(run_spec, result_dir))
@@ -412,33 +406,118 @@ def _validate_or_repair_result_jsonl(path: Path, *, repair_tail: bool) -> None:
                 ) from exc
 
 
+def _requested_categories(categories: list[str]) -> set[str]:
+    """Expand BFCL collections such as ``live`` into their V3 categories."""
+    from bfcl_eval.utils import parse_test_category_argument
+
+    return set(parse_test_category_argument(list(categories))[1])
+
+
+def _model_result_files(
+    result_dir: Path,
+    model: str,
+    categories: set[str] | None = None,
+) -> list[Path]:
+    """Result files of ``model``, restricted to ``categories`` when given."""
+    model_dir = result_dir / model.replace("/", "_")
+    if not model_dir.exists():
+        return []
+    return [
+        path
+        for path in sorted(model_dir.rglob("*_result.json"))
+        if categories is None or _result_file_category(path) in categories
+    ]
+
+
+def _replace_file_bytes(path: Path, data: bytes) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_bytes(data)
+    os.replace(tmp_path, path)
+
+
+def _drop_failed_inference_records(path: Path) -> int:
+    """Drop every record of a failed id so BFCL's resume regenerates it."""
+    lines = path.read_bytes().splitlines(keepends=True)
+    records = [json.loads(line) if line.strip() else None for line in lines]
+    failed_ids = {
+        record["id"]
+        for record in records
+        if record is not None and _disallowed_inference_errors(record["result"])
+    }
+    if not failed_ids:
+        return 0
+    kept = [
+        line
+        for line, record in zip(lines, records)
+        if record is None or record["id"] not in failed_ids
+    ]
+    _replace_file_bytes(path, b"".join(kept))
+    return len(lines) - len(kept)
+
+
 def _prepare_existing_results(
     result_dirs: list[Path],
     model: str,
     *,
     repair_tail: bool,
+    categories: set[str] | None = None,
 ) -> None:
-    model_dir_name = model.replace("/", "_")
+    """Validate resumable results; when generating, also drop failed records."""
+    dropped = 0
     for result_dir in result_dirs:
-        model_dir = result_dir / model_dir_name
-        if not model_dir.exists():
-            continue
-        for result_file in sorted(model_dir.rglob("*_result.json")):
+        for result_file in _model_result_files(result_dir, model, categories):
             _validate_or_repair_result_jsonl(result_file, repair_tail=repair_tail)
+            if repair_tail:
+                dropped += _drop_failed_inference_records(result_file)
+    if dropped:
+        print(
+            f"[aethereval] BFCL resume will regenerate {dropped} records after "
+            "inference errors."
+        )
+
+
+def _clear_results(result_dirs: list[Path], model: str, categories: set[str]) -> None:
+    """Delete the selected categories' result files, as upstream overwrite does."""
+    for result_dir in result_dirs:
+        for result_file in _model_result_files(result_dir, model, categories):
+            result_file.unlink()
+
+
+def _sort_result_files(
+    result_dirs: list[Path],
+    model: str,
+    categories: set[str],
+) -> None:
+    """Restore BFCL's id order after resumed records were appended out of order."""
+    from bfcl_eval.utils import sort_key
+
+    for result_dir in result_dirs:
+        for result_file in _model_result_files(result_dir, model, categories):
+            lines = [
+                line
+                for line in result_file.read_bytes().splitlines(keepends=True)
+                if line.strip()
+            ]
+            ordered = sorted(lines, key=lambda line: sort_key(json.loads(line)))
+            if ordered != lines:
+                _replace_file_bytes(result_file, b"".join(ordered))
 
 
 def run(spec: ExternalRunSpec) -> ExternalResult:
     out = Path(spec.output_dir).resolve()
+    categories = _requested_categories(spec.categories)
     run_paths = _evaluation_run_paths(out, spec.num_repeats)
+    result_dirs = [result_dir for result_dir, _ in run_paths]
     for result_dir, score_dir in run_paths:
         result_dir.mkdir(parents=True, exist_ok=True)
         score_dir.mkdir(parents=True, exist_ok=True)
 
     if not spec.allow_overwrite:
         _prepare_existing_results(
-            [result_dir for result_dir, _ in run_paths],
+            result_dirs,
             spec.model,
             repair_tail=spec.run_generation,
+            categories=categories,
         )
 
     if spec.run_generation or spec.run_evaluation:
@@ -451,11 +530,10 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
     if spec.run_generation:
         from bfcl_eval._llm_response_generation import main as generation_main
 
-        _run_generations(
-            spec,
-            [(index, paths[0]) for index, paths in enumerate(run_paths)],
-            generation_main,
-        )
+        if spec.allow_overwrite:
+            _clear_results(result_dirs, spec.model, categories)
+        _run_generations(spec, list(enumerate(result_dirs)), generation_main)
+        _sort_result_files(result_dirs, spec.model, categories)
 
     repeat_metrics: list[dict[str, float]] = []
     repeat_summaries: list[dict[str, Any]] = []
@@ -466,11 +544,14 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
     }
     for run_index, (result_dir, score_dir) in enumerate(run_paths):
         if spec.run_generation or spec.run_evaluation:
-            _raise_on_inference_errors(result_dir, spec.model)
+            _raise_on_inference_errors(result_dir, spec.model, categories)
 
         if spec.run_evaluation:
             from bfcl_eval.eval_checker import eval_runner
 
+            # BFCL's leaderboard CSVs merge every score file already in
+            # score_dir; start clean so they cover only the requested categories.
+            shutil.rmtree(score_dir / spec.model.replace("/", "_"), ignore_errors=True)
             eval_runner.main(
                 [spec.model],
                 list(spec.categories),
@@ -482,7 +563,7 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
         if spec.handler == "toolrl":
             add_comparison_metrics(
                 metrics,
-                compute_format_rates(result_dir, spec.model),
+                compute_format_rates(result_dir, spec.model, categories),
             )
         if spec.run_evaluation and not metrics:
             raise RuntimeError(
@@ -497,6 +578,7 @@ def run(spec: ExternalRunSpec) -> ExternalResult:
             handler=spec.handler,
             gen_idx=run_index,
             append=run_index > 0,
+            categories=categories,
         )
         prediction_stats["prediction_records"] = int(
             prediction_stats["prediction_records"]
@@ -643,26 +725,30 @@ def _is_allowed_zero_score_error(error: str) -> bool:
     return is_context_length_error(error)
 
 
-def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
-    model_dir = result_dir / model.replace("/", "_")
-    result_files = list(model_dir.rglob("*_result.json")) if model_dir.exists() else []
+def _disallowed_inference_errors(result: Any) -> list[str]:
+    return [
+        str(value)
+        for value in _iter_result_values(result)
+        if str(value).startswith("Error during inference:")
+        and not _is_allowed_zero_score_error(str(value))
+    ]
 
+
+def _raise_on_inference_errors(
+    result_dir: Path,
+    model: str,
+    categories: set[str] | None = None,
+) -> None:
     count = 0
     examples: list[str] = []
-    for jf in result_files:
+    for jf in _model_result_files(result_dir, model, categories):
         with open(jf) as f:
             for line_no, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 record = json.loads(line)
-                result = record["result"]
-                errors = [
-                    str(value)
-                    for value in _iter_result_values(result)
-                    if str(value).startswith("Error during inference:")
-                    and not _is_allowed_zero_score_error(str(value))
-                ]
+                errors = _disallowed_inference_errors(record["result"])
                 if not errors:
                     continue
 
@@ -675,16 +761,20 @@ def _raise_on_inference_errors(result_dir: Path, model: str) -> None:
     if count:
         raise RuntimeError(
             "BFCL generation produced inference errors instead of model outputs. "
-            f"count={count}; examples={'; '.join(examples)}"
+            f"count={count}; examples={'; '.join(examples)}. Rerun without "
+            "--eval-only or --overwrite to regenerate only these records."
         )
 
 
-def compute_format_rates(result_dir: Path, model: str) -> dict[str, float]:
+def compute_format_rates(
+    result_dir: Path,
+    model: str,
+    categories: set[str] | None = None,
+) -> dict[str, float]:
     """Reference-aware ToolRL format percentages for BFCL comparison sections."""
 
-    model_dir = result_dir / model.replace("/", "_")
     counts = {section: {"total": 0, "ok": 0} for section, _, _ in _COMPARISON_SECTIONS}
-    for jf in model_dir.rglob("*_result.json"):
+    for jf in _model_result_files(result_dir, model, categories):
         category = _result_file_category(jf)
         section = _comparison_section(category)
         if section not in counts:
@@ -936,18 +1026,16 @@ def write_predictions_jsonl(
     handler: str,
     gen_idx: int = 0,
     append: bool = False,
+    categories: set[str] | None = None,
 ) -> dict[str, int | str]:
     predictions_path = out / "predictions.jsonl"
     model_dir = result_dir / model.replace("/", "_")
     score_model_dir = score_dir / model.replace("/", "_")
-    result_files = (
-        sorted(model_dir.rglob("*_result.json")) if model_dir.exists() else []
-    )
 
     total_records = 0
     scored_records = 0
     with predictions_path.open("a" if append else "w", encoding="utf-8") as f:
-        for result_file in result_files:
+        for result_file in _model_result_files(result_dir, model, categories):
             invalid_ids = _invalid_ids_from_score_file(
                 _score_file_for_result_file(
                     result_file=result_file,

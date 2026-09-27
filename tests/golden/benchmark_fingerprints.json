@@ -1,0 +1,122 @@
+{
+  "agieval-en": {
+    "count": 2646,
+    "prompt_sha256": "e5a0b3120b52824b0446b74d4ae5a87ff15a930a0c4a2c29d75773d4b6a35232",
+    "sample_sha256": "31166ba609b80d25d9b51769ec40fa9a0b2310083a013c51bf9ed9aef460942b"
+  },
+  "aime24": {
+    "count": 30,
+    "prompt_sha256": "d48d824fd31e6c6ca3f7d10dabde3750a6f8878714917014947e3148f4b78d2d",
+    "sample_sha256": "eab507442978fac262adc9492d598f0f0fcea43d62b343e50be5a8b6fdf913a6"
+  },
+  "aime25": {
+    "count": 30,
+    "prompt_sha256": "097324e73237a51cd9b3ee41f257dfb8fae1c1f016b7dd1623fc1f10d4be1e91",
+    "sample_sha256": "58cbbf61fb2f495a66f9cf38961a5c6b12d339cff9efb562adfae5bdcea19629"
+  },
+  "amc23": {
+    "count": 40,
+    "prompt_sha256": "421db6a31deed6b697deb2f2a6ace7e6e734f095deb527ea7a9047c7186059a0",
+    "sample_sha256": "b24fffe191eec4f8b198e9fc5f2a347bd6569f50105261f46d9b9abbaf5c36f0"
+  },
+  "arena-hard-v2": {
+    "count": 750,
+    "prompt_sha256": "37cd2ec302ec4bfa4beb7c44896cdb2144dfe11268355b19c0eb8501fd75aa0d",
+    "sample_sha256": "a069e5f7aad38d26ff71f16608aa3b5c499262425d71be2e8aead303dc950ed0"
+  },
+  "bbh": {
+    "count": 6511,
+    "prompt_sha256": "7a13602594233c365e32c45bc11f1ca406c2e9c462400aa59e00868990c7abd3",
+    "sample_sha256": "5fa7e5cf02b0baa11a9341107cd1a371250ebcf9ac57094c6294f05fb8decdb9"
+  },
+  "creative-writing-v3": {
+    "count": 96,
+    "prompt_sha256": "e83dd226344a550b8805e459adae4a2480c1286c91eb4f70270be3dc78e8bb6e",
+    "sample_sha256": "039494115be76787d9c62f2279be517575c86028a868c69217ff20ae2fe7dd4e"
+  },
+  "gpqa-diamond": {
+    "count": 198,
+    "prompt_sha256": "c9c997a3bc9e02353b24d0a4f6f52c88984ed2c592c72a0dee0025226cf838d3",
+    "sample_sha256": "7d997b5f4df105aa395efe952ee182b45c0a97c0dbb068716e3229632fcb3ccc"
+  },
+  "healthbench": {
+    "count": 5000,
+    "prompt_sha256": "1a4bc51aa43ef16f92669fdbc28f07c56affd786ee476d91f7297a396c698752",
+    "sample_sha256": "aff9e9bc7dc410e490553cccb047a3db826661d57fd68115f798edfac4e8d32f"
+  },
+  "humaneval-plus": {
+    "count": 164,
+    "prompt_sha256": "f4abf65afabff29ce4627e98d7ad78c22f40127c5d0535b0baad67a36630cac0",
+    "sample_sha256": "ecfbfd4c2cfb95790e03ae22b29abfa1f4af1d8e943039ebf73408cb23001290"
+  },
+  "ifbench": {
+    "count": 300,
+    "prompt_sha256": "27e00438c2bc0c536a8e816935d3d759f7936e308efddeb809bcb8763ca00019",
+    "sample_sha256": "b1c8abaa354007c68cf31cdd20744d85acb37f3732091444a049ca73ed44566a"
+  },
+  "ifeval": {
+    "count": 541,
+    "prompt_sha256": "48442f0508fb519d7e1ac70a514cf4f111dc2ddf04dd4ef0c00ca91fa63e2597",
+    "sample_sha256": "968b0b0d22dae9a7fbfa3d7cde543da33dbdbf8262a25f4a4e2b68bde7848183"
+  },
+  "livecodebench": {
+    "count": 175,
+    "prompt_sha256": "c46487877e479c93b8dd4104cd25bdda9c9433d33985f5dcb8294853f3b6293b",
+    "sample_sha256": "6eae80d083a7513fc18007fe82c28d49ec60dde0016d5842a4213f6322469d8a"
+  },
+  "llmeval-med": {
+    "count": 667,
+    "prompt_sha256": "c740edc47eea0906409a5b3deca21ea9fd54239b3275329225807ddb7f654539",
+    "sample_sha256": "8bb0d36926385320a42b59b58455bacadecf4013e9b416fb39c2b2aaf45ead4a"
+  },
+  "math500": {
+    "count": 500,
+    "prompt_sha256": "09247111cd95c87ddadf6f0af1284fbbe54c33d416d5029a9b1bc6f333eb2102",
+    "sample_sha256": "a92968572ddc741c010af045fd9e3781140b4b84145573ca2457519574bae00e"
+  },
+  "mbpp-plus": {
+    "count": 378,
+    "prompt_sha256": "4155f0215cf1ab987a310d8097b3ba3c49798228b49ad93c59d19b9a5bd0e5c5",
+    "sample_sha256": "711acbb48c4f2915d75022d1ce8802857b7d55f198d7fa7b35e7034dbfb71293"
+  },
+  "minerva": {
+    "count": 272,
+    "prompt_sha256": "84fd6c027a6778aaccbf4eaf209a053437652837109eaa9c680fd1d850c7874b",
+    "sample_sha256": "7d1e311de7fa142b2c9721153750fff6bf9c189d0b7f8aa0b85d624a9ad42743"
+  },
+  "mmlu-pro": {
+    "count": 12032,
+    "prompt_sha256": "134cad8221809bd487ae663cc2e0b99f2322d2b37664c499a3bbb2b5c9b58dd8",
+    "sample_sha256": "6ac6046d13e7f2be2be217a8b7a3984614ac6c962716f743e1350c099ca15f7b"
+  },
+  "olympiad-bench": {
+    "count": 674,
+    "prompt_sha256": "e8586a8dc4856878674ee73d8885f9d48959e5d7b3aaf8b3b83b79ee076f1154",
+    "sample_sha256": "1a17d4c7a761197159641a95ac3380f441477412ff92ff2492f50ddc5c758479"
+  },
+  "researchqa": {
+    "count": 3750,
+    "prompt_sha256": "ca8c1d8cece9680574b72628aa3b52ce01849fe3b5aa35ee3c1a91205a31408a",
+    "sample_sha256": "a8de69fb9ed5b531d69e8cf4a2737c059c03649e7ab3810b7781431475b5837c"
+  },
+  "safe-alignment": {
+    "count": 17243,
+    "prompt_sha256": "c2aa05eed4edb82b877710f4172b6e3f19454bc183413f8a9606c4e5da89f0b4",
+    "sample_sha256": "1d42489f23575c76bc8888da3426293ed40bd6ed0842bd6a320a78e3813fa926"
+  },
+  "safe-alignment-dynamic": {
+    "count": 103458,
+    "prompt_sha256": "97cba7ab8372d85c6f1877f9575832ec63c44a91c6e1267cd1f8eca1df476cb0",
+    "sample_sha256": "30cc8f5752e0bd170e82cceacf16af202514b709304634f146bbc5b65c8ea106"
+  },
+  "writingbench": {
+    "count": 1000,
+    "prompt_sha256": "79e00e2bc18a8ce610c88085ae9ef6e1ea617571604126248803e6d5f6722f8d",
+    "sample_sha256": "fef6223491289197b0394b157fe7ca665af8252c01f7f7a2ddc20d46c613adf6"
+  },
+  "zebralogic": {
+    "count": 1000,
+    "prompt_sha256": "f05b761783c55b16c8be6d4c1891562aad36942b6f390a30a66cdb8856cb9243",
+    "sample_sha256": "cefde4ce6c05ae7be113c29ec6e4506b1f15e49c3c44af7054ad0b3de68c8766"
+  }
+}

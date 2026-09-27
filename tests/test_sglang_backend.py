@@ -3,6 +3,8 @@ import hashlib
 import struct
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -617,6 +619,101 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(results, [str(i) for i in range(200)])
         self.assertLessEqual(max(windows), 64)
 
+    def test_service_in_flight_window_scales_with_replicas(self) -> None:
+        for dp_size, inflight, expected in ((8, None, 512), (2, 3, 6)):
+            service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
+            service._closed = False
+            service._endpoints = ["http://unused"]
+            service.model = "test/model"
+            service.dp_size = dp_size
+            if inflight is not None:
+                service.inflight_per_replica = inflight
+
+            with (
+                self.subTest(dp_size=dp_size, inflight_per_replica=inflight),
+                mock.patch.object(
+                    sglang_service,
+                    "_post_json",
+                    side_effect=lambda url, body: body["text"],
+                ),
+                mock.patch.object(
+                    sglang_service,
+                    "ThreadPoolExecutor",
+                    wraps=sglang_service.ThreadPoolExecutor,
+                ) as executor_cls,
+            ):
+                results = service.request_many(
+                    "/generate",
+                    [{"text": str(i)} for i in range(600)],
+                    show_progress=False,
+                    progress_desc="test",
+                    progress_unit="gen",
+                )
+                self.assertEqual(results, [str(i) for i in range(600)])
+                executor_cls.assert_called_once_with(max_workers=expected)
+
+    def test_service_reads_and_validates_inflight_per_replica(self) -> None:
+        self.assertEqual(
+            sglang_service._server_cli_args({"inflight_per_replica": 128}), []
+        )
+        with self.assertRaisesRegex(ValueError, "inflight_per_replica must be >= 1"):
+            sglang_service.SGLangService(
+                model="test/model",
+                dp_size=1,
+                tensor_parallel_size=1,
+                model_kwargs={"inflight_per_replica": 0},
+            )
+        for options, expected in [({}, 64), ({"inflight_per_replica": 128}, 128)]:
+            ray = mock.Mock()
+            ray.is_initialized.return_value = True
+            ray.get.return_value = ["grpc://127.0.0.1:9000"]
+            with (
+                mock.patch.dict(sys.modules, {"ray": ray}),
+                mock.patch.object(
+                    sglang_service.SGLangService,
+                    "_start_router",
+                    return_value="http://127.0.0.1:9001",
+                ),
+            ):
+                service = sglang_service.SGLangService(
+                    model="test/model",
+                    dp_size=2,
+                    tensor_parallel_size=1,
+                    model_kwargs=options,
+                )
+            self.assertEqual(service.inflight_per_replica, expected)
+
+    def test_service_failure_does_not_wait_for_in_flight_requests(self) -> None:
+        service = sglang_service.SGLangService.__new__(sglang_service.SGLangService)
+        service._closed = False
+        service._endpoints = ["http://unused"]
+        service.model = "test/model"
+        service.dp_size = 1
+        release = threading.Event()
+
+        def post(url, body):  # noqa: ANN001
+            if body["text"] == "0":
+                raise RuntimeError("SGLang request failed with HTTP 500")
+            release.wait(timeout=30)
+            return body["text"]
+
+        started = time.monotonic()
+        try:
+            with (
+                mock.patch.object(sglang_service, "_post_json", side_effect=post),
+                self.assertRaisesRegex(RuntimeError, "HTTP 500"),
+            ):
+                service.request_many(
+                    "/generate",
+                    [{"text": str(i)} for i in range(200)],
+                    show_progress=False,
+                    progress_desc="test",
+                    progress_unit="gen",
+                )
+            self.assertLess(time.monotonic() - started, 5)
+        finally:
+            release.set()
+
     def test_server_prompt_counts_avoid_local_tokenization(self) -> None:
         service = _FakeService()
         service.request_many = mock.Mock(
@@ -657,9 +754,9 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(outputs[0]["meta"]["finish_reasons"], ["stop", "length"])
         tokenizer.encode.assert_not_called()
         self.assertEqual(
-            sglang_backend._extract_prompt_token_count(
-                [{"usage": {"prompt_tokens": 8}}]
-            ),
+            sglang_backend._parse_generate_response(
+                [{"text": "", "meta_info": {"prompt_tokens": 8}}]
+            )[1],
             8,
         )
 
@@ -704,7 +801,11 @@ class SGLangBackendTests(unittest.TestCase):
         )
 
     def test_server_cli_args_reject_http_sidecar_options(self) -> None:
-        for key in ("log_level_http", "grpc_http_sidecar_port"):
+        for key in (
+            "log_level_http",
+            "grpc_http_sidecar_port",
+            "smg_http_sidecar_port",
+        ):
             with (
                 self.subTest(key=key),
                 self.assertRaisesRegex(
@@ -729,7 +830,7 @@ class SGLangBackendTests(unittest.TestCase):
         self.assertEqual(params["temperature"], 0.2)
         self.assertEqual(params["top_p"], 0.9)
         self.assertEqual(params["min_p"], 0.05)
-        self.assertEqual(params["seed"], 123)
+        self.assertNotIn("seed", params)
         self.assertNotIn("top_k", params)
 
     def test_sampling_params_include_structured_output_constraints(self) -> None:
@@ -755,13 +856,12 @@ class SGLangBackendTests(unittest.TestCase):
             }
         ]
 
-        self.assertEqual(sglang_backend._extract_text(response), "generated")
         self.assertEqual(
-            sglang_backend._extract_output_token_count(response),
-            7,
+            sglang_backend._parse_generate_response(response),
+            ("generated", None, 7, None),
         )
         with self.assertRaisesRegex(ValueError, "unexpected batch size"):
-            sglang_backend._extract_text([])
+            sglang_backend._parse_generate_response([])
 
     def test_run_generation_supports_thinking_and_no_thinking(self) -> None:
         payloads = [

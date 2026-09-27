@@ -8,11 +8,9 @@ Official evaluation repository: [WildEval/ZeroEval](https://github.com/WildEval/
 Checked [README](https://github.com/WildEval/ZeroEval/blob/8c1485edf12c6efb5f69135a562927c5ad484059/README.md)
 and [src/unified_infer.py](https://github.com/WildEval/ZeroEval/blob/8c1485edf12c6efb5f69135a562927c5ad484059/src/unified_infer.py).
 
-AetherEval retains the documented README profile:
-`n=1, temperature=0, top_p=1, max_new_tokens=4096`.
-The current generic CLI defaults to 7500 output tokens, illustrating why a
-repository URL alone does not specify a unique protocol. This task names the
-4096-token README profile rather than silently adopting the generic CLI value.
+Defaults `n=1, temperature=0, top_p=1, max_new_tokens=8192` keep the documented
+README profile's greedy sampling with a local 8192-token ceiling; that profile uses
+4096 and the current generic CLI defaults to 7500, so neither value is adopted.
 Model-specific reasoning runs may need a different declared budget; preserve
 the grid-mode prompt, answer visibility and full-puzzle scoring when comparing.
 

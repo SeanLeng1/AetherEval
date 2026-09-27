@@ -3,7 +3,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterable
 
-from .task_defaults import resolve_task_default_gen
+from .task_defaults import GENERATION_KEYS, resolve_task_default_gen
 from .types import TaskBundle, TaskSpec
 
 
@@ -66,18 +66,10 @@ def parse_task_names(tasks: str, available: Iterable[str]) -> list[str]:
 def list_task_default_gens(
     benchmarks_dir: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    tasks = discover_tasks(benchmarks_dir)
-    resolved: dict[str, dict[str, Any]] = {}
-    for task_name in sorted(tasks.keys()):
-        spec = tasks[task_name]
-        task_module = _load_module_from_path(
-            f"aethereval_task_defaults_{task_name}",
-            spec.task_module_path,
-        )
-        _validate_task_contract(task_module)
-        fallback_default_gen = getattr(task_module, "DEFAULT_GEN", {})
-        resolved[task_name] = resolve_task_default_gen(task_name, fallback_default_gen)
-    return resolved
+    return {
+        task_name: resolve_task_default_gen(task_name)
+        for task_name in sorted(discover_tasks(benchmarks_dir))
+    }
 
 
 def _load_module_from_path(module_name: str, module_path: Path) -> ModuleType:
@@ -117,10 +109,11 @@ def _validate_task_contract(module: ModuleType) -> None:
         raise ValueError("TASK_NAME must be a non-empty string")
     if not isinstance(data_file, str) or not data_file.endswith(".jsonl"):
         raise ValueError("DATA_FILE must be a .jsonl path under the task folder")
-    if hasattr(module, "DEFAULT_GEN") and not isinstance(
-        getattr(module, "DEFAULT_GEN"), dict
-    ):
-        raise ValueError("DEFAULT_GEN must be a dict when provided")
+    if hasattr(module, "DEFAULT_GEN"):
+        raise ValueError(
+            "DEFAULT_GEN is no longer read; set generation defaults in "
+            "configs/task_defaults.yaml"
+        )
 
 
 def _validate_metrics_contract(module: ModuleType) -> None:
@@ -153,7 +146,11 @@ def load_task(task_name: str, benchmarks_dir: Path | None = None) -> TaskBundle:
     )
     _validate_task_contract(task_module)
     task_module.TASK_NAME = task_name
-    fallback_default_gen = getattr(task_module, "DEFAULT_GEN", {})
-    task_module.DEFAULT_GEN = resolve_task_default_gen(task_name, fallback_default_gen)
+    unknown = sorted(set(resolve_task_default_gen(task_name)) - GENERATION_KEYS)
+    if unknown:
+        raise ValueError(
+            f"configs/task_defaults.yaml '{task_name}' has unknown generation "
+            f"keys: {unknown}"
+        )
     _validate_metrics_contract(metrics_module)
     return TaskBundle(spec=spec, task_module=task_module, metrics_module=metrics_module)

@@ -4,6 +4,7 @@ import json
 from io import StringIO
 from pathlib import Path
 
+from aethereval.core.io import write_jsonl
 from benchmark_utils.data import read_text
 
 
@@ -41,21 +42,21 @@ def main() -> None:
             for row in (json.loads(line) for line in StringIO(read_text(subset_c)))
         }
 
-    source = StringIO(read_text(args.source))
-    with output.open("w", encoding="utf-8") as dst:
-        for line in source:
-            row = json.loads(line)
-            index = int(row["index"])
-            row["requirement_subsets"] = [
-                dimension
-                for dimension in ("style", "format", "length")
-                if index in requirement_members[dimension]
-            ]
-            row["requirement_criteria"] = {
-                dimension: requirement_criteria[dimension].get(index, [])
-                for dimension in ("style", "format", "length")
-            }
-            dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+    rows: list[dict] = []
+    for line in StringIO(read_text(args.source)):
+        row = json.loads(line)
+        index = int(row["index"])
+        row["requirement_subsets"] = [
+            dimension
+            for dimension in ("style", "format", "length")
+            if index in requirement_members[dimension]
+        ]
+        row["requirement_criteria"] = {
+            dimension: requirement_criteria[dimension].get(index, [])
+            for dimension in ("style", "format", "length")
+        }
+        rows.append(row)
+    write_jsonl(output, rows)
 
 
 if __name__ == "__main__":

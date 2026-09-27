@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -8,11 +10,15 @@ from unittest import mock
 from aethereval.cli import build_parser
 from aethereval.config import resolve_run_arguments
 from aethereval.core.runner import run_evaluation
-from aethereval.core.task_defaults import resolve_task_default_metrics
-from aethereval.core.task_register import load_task
+from aethereval.core.task_defaults import (
+    resolve_task_default_gen,
+    resolve_task_default_metrics,
+)
+from aethereval.core.task_register import list_tasks, load_task
 from aethereval.core.types import GenerationInput, GenerationOutput
 from benchmark_utils.llm_judge import (
     chat_completion,
+    parallel_map,
     parse_json_object,
     resolve_judge_settings,
 )
@@ -55,74 +61,58 @@ class NeverGenerateBackend:
 
 class LlmJudgeBenchmarkTests(unittest.TestCase):
     def test_official_judge_models_come_from_task_defaults(self) -> None:
-        expected = {
-            "llmeval_med": ("gpt-4o", 1.0, 1.0, 4096),
-            "healthbench": ("gpt-4.1-2025-04-14", 0.5, 1.0, 2048),
-            "writingbench": ("claude-sonnet-4-5", 1.0, 0.95, 2048),
-            "creative_writing_v3": ("claude-sonnet-4-6", 0.0, None, 4096),
-            "researchqa": ("gpt-4.1-mini", 0.0, 1.0, 4096),
-            "arena_hard_v2": ("gpt-4.1", 0.0, 1.0, 16000),
-        }
-        for task_name, judge_defaults in expected.items():
+        # Values are user-owned in configs/task_defaults.yaml; test wiring, not numbers.
+        judge_tasks = [
+            name
+            for name in list_tasks(BENCHMARKS)
+            if "judge_model" in resolve_task_default_metrics(name)
+        ]
+        self.assertEqual(len(judge_tasks), 6)
+        for task_name in judge_tasks:
             with self.subTest(task=task_name):
-                judge_model, temperature, top_p, max_new_tokens = judge_defaults
                 defaults = resolve_task_default_metrics(task_name)
                 bundle = load_task(task_name, BENCHMARKS)
-                self.assertEqual(defaults["judge_model"], judge_model)
-                self.assertEqual(defaults["judge_temperature"], temperature)
-                self.assertEqual(defaults.get("judge_top_p"), top_p)
-                self.assertEqual(defaults["judge_max_new_tokens"], max_new_tokens)
+                self.assertTrue(bundle.metrics_module.USES_LLM_JUDGE)
+                self.assertIsInstance(defaults["judge_model"], str)
+                self.assertGreaterEqual(defaults["judge_temperature"], 0.0)
+                self.assertGreater(defaults["judge_max_new_tokens"], 0)
                 self.assertEqual(
                     bundle.metrics_module.DEFAULT_JUDGE_MODEL,
-                    judge_model,
+                    defaults["judge_model"],
                 )
-                self.assertNotIn("metrics", bundle.task_module.DEFAULT_GEN)
-                self.assertNotIn("judge_model", bundle.task_module.DEFAULT_GEN)
+                self.assertNotIn("metrics", resolve_task_default_gen(task_name))
+                self.assertNotIn("judge_model", resolve_task_default_gen(task_name))
 
     def test_multiple_tasks_keep_independent_judge_defaults(self) -> None:
         writing = resolve_task_default_metrics("writingbench")
         arena = resolve_task_default_metrics("arena_hard_v2")
 
-        self.assertEqual(writing["judge_temperature"], 1.0)
-        self.assertEqual(writing["judge_max_new_tokens"], 2048)
-        self.assertEqual(arena["judge_temperature"], 0.0)
-        self.assertEqual(arena["judge_max_new_tokens"], 16000)
-
         runtime_override = {"judge_temperature": 0.25}
-        self.assertEqual(
-            resolve_task_default_metrics("writingbench", runtime_override)[
-                "judge_temperature"
-            ],
-            0.25,
-        )
-        self.assertEqual(
-            resolve_task_default_metrics("arena_hard_v2", runtime_override)[
-                "judge_temperature"
-            ],
-            0.25,
-        )
+        for name, before in (("writingbench", writing), ("arena_hard_v2", arena)):
+            with self.subTest(task=name):
+                self.assertEqual(
+                    resolve_task_default_metrics(name, runtime_override)[
+                        "judge_temperature"
+                    ],
+                    0.25,
+                )
+                # A runtime override must not leak into the cached YAML defaults.
+                self.assertEqual(resolve_task_default_metrics(name), before)
 
     def test_native_tasks_load_expected_release_sizes_and_defaults(self) -> None:
         expected = {
-            "llmeval_med": (667, 1, 2048, 1.0),
-            "healthbench": (5000, 1, 2048, 0.5),
-            "writingbench": (1000, 1, 16000, 0.7),
-            "creative_writing_v3": (96, 1, 12000, 0.7),
-            "researchqa": (3750, 1, 2048, 0.0),
-            "arena_hard_v2": (750, 1, 8192, 0.0),
+            "llmeval_med": 667,
+            "healthbench": 5000,
+            "writingbench": 1000,
+            "creative_writing_v3": 96,
+            "researchqa": 3750,
+            "arena_hard_v2": 750,
         }
-        for name, (count, n, max_tokens, temperature) in expected.items():
+        for name, count in expected.items():
             with self.subTest(task=name):
                 bundle = load_task(name, BENCHMARKS)
                 samples = bundle.task_module.load_samples(bundle.spec.task_dir)
                 self.assertEqual(len(samples), count)
-                self.assertEqual(bundle.task_module.DEFAULT_GEN["n"], n)
-                self.assertEqual(
-                    bundle.task_module.DEFAULT_GEN["max_new_tokens"], max_tokens
-                )
-                self.assertEqual(
-                    bundle.task_module.DEFAULT_GEN["temperature"], temperature
-                )
 
     def test_judge_settings_and_json_parser(self) -> None:
         with mock.patch.dict(
@@ -144,6 +134,30 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
         self.assertTrue(
             parse_json_object('```json\n{"criteria_met": true}\n```')["criteria_met"]
         )
+
+    def test_parallel_map_keeps_order_and_stops_queued_jobs_on_first_error(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parallel_map(lambda value: value * 2, range(50), workers=4, desc="t"),
+            [value * 2 for value in range(50)],
+        )
+        started = 0
+        lock = threading.Lock()
+
+        def job(value: int) -> int:
+            nonlocal started
+            with lock:
+                started += 1
+            if value == 0:
+                raise RuntimeError("judge failed")
+            time.sleep(0.01)
+            return value
+
+        with self.assertRaisesRegex(RuntimeError, "judge failed"):
+            parallel_map(job, range(500), workers=4, desc="t")
+        # Only the calls already in flight finish; queued calls are cancelled.
+        self.assertLess(started, 100)
 
     def test_api_judge_uses_resolved_sampling_and_thinking_defaults(self) -> None:
         with mock.patch.dict(
@@ -290,7 +304,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             samples=[sample],
             pending_indices={sample.id: [0]},
             existing_records=[],
-            gen_cfg=bundle.task_module.DEFAULT_GEN,
+            gen_cfg=resolve_task_default_gen(bundle.spec.name),
         )
         self.assertEqual(len(backend.calls), 3)
         self.assertEqual(outputs[0].generations, ["x" * 500])
@@ -307,7 +321,6 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 "from aethereval.core.types import GenerationOutput, Sample\n"
                 "TASK_NAME='hooked'\n"
                 "DATA_FILE='data/eval.jsonl'\n"
-                "DEFAULT_GEN={'n':1,'max_new_tokens':8,'temperature':0.0}\n"
                 "def load_samples(task_dir):\n"
                 "    return [Sample(id='one')]\n"
                 "def build_prompt(sample):\n"
@@ -376,7 +389,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             samples=turns,
             pending_indices={sample.id: [0] for sample in turns},
             existing_records=[],
-            gen_cfg=bundle.task_module.DEFAULT_GEN,
+            gen_cfg=resolve_task_default_gen(bundle.spec.name),
         )
         self.assertEqual(len(outputs), 2)
         second_prompt = backend.calls[1][0].prompt
@@ -695,6 +708,31 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             self.assertEqual(arena_metrics["scored_judgments"], 0.0)
             self.assertEqual(arena_metrics["judge_failures"], 1.0)
 
+    def test_healthbench_raises_after_bounded_format_retries(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"AETHEREVAL_JUDGE_API_KEY": "test"}, clear=True
+        ):
+            health = load_task("healthbench", BENCHMARKS)
+            sample = health.task_module.load_samples(health.spec.task_dir)[0]
+            output = GenerationOutput(
+                sample.id, health.task_module.build_prompt(sample), ["answer"]
+            )
+            with mock.patch.object(
+                health.metrics_module,
+                "chat_completion",
+                return_value='prose {"criteria_met": true, "explanation": "ok"}',
+            ) as judge:
+                with self.assertRaisesRegex(ValueError, "no parseable grade"):
+                    health.metrics_module.score_generations_batch(
+                        [sample],
+                        [output],
+                        {"judge_workers": 1, "judge_max_retries": 0},
+                    )
+        # Every job that ran stopped at the cap: 3 normal + the extra attempts.
+        attempts_per_job = 3 + health.metrics_module.MAX_EXTRA_FORMAT_ATTEMPTS
+        self.assertGreater(judge.call_count, 0)
+        self.assertEqual(judge.call_count % attempts_per_job, 0)
+
     def test_arena_style_metadata_matches_published_baseline_metadata(self) -> None:
         bundle = load_task("arena_hard_v2", BENCHMARKS)
         sample = bundle.task_module.load_samples(bundle.spec.task_dir)[0]
@@ -817,6 +855,76 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             "json_schema",
         )
         self.assertFalse(arena_result[0][0]["meta"]["judge_failed"])
+
+
+    def test_writingbench_judges_only_the_text_after_thinking(self) -> None:
+        writing = load_task("writingbench", BENCHMARKS)
+        sample = writing.task_module.load_samples(writing.spec.task_dir)[0]
+        output = GenerationOutput(
+            sample.id, "prompt", ["<think>\nsecret plan\n</think>\n\nfinal answer"]
+        )
+        prompts = []
+
+        def fake_completion(settings, messages, **kwargs):  # noqa: ANN001, ANN003
+            del settings, kwargs
+            prompts.append(messages[-1]["content"])
+            return '{"score": 8, "reason": "ok"}'
+
+        with mock.patch.object(
+            writing.metrics_module, "chat_completion", side_effect=fake_completion
+        ):
+            writing.metrics_module.score_generations_batch(
+                [sample], [output], {"judge_workers": 1}
+            )
+        self.assertEqual(len(prompts), len(sample.data["checklist"]))
+        for prompt in prompts:
+            self.assertIn("final answer", prompt)
+            self.assertNotIn("secret plan", prompt)
+
+    def test_researchqa_keeps_failed_constrained_request_error_as_raw(self) -> None:
+        research = load_task("researchqa", BENCHMARKS)
+        sample = next(
+            sample
+            for sample in research.task_module.load_samples(research.spec.task_dir)
+            if len(sample.data["rubric"]) <= 8
+        )
+        output = GenerationOutput(sample.id, "prompt", ["answer"])
+
+        def fake_completion(settings, messages, extra_body=None):  # noqa: ANN001
+            del settings, messages
+            if extra_body is not None:
+                raise RuntimeError("offline judge request 3 failed: boom")
+            return "invalid"
+
+        with mock.patch.object(
+            research.metrics_module, "chat_completion", side_effect=fake_completion
+        ):
+            result = research.metrics_module.score_generations_batch(
+                [sample], [output], {"judge_workers": 1, "_judge_client": object()}
+            )[0][0]
+        self.assertTrue(result["meta"]["judge_failed"])
+        self.assertEqual(
+            {item["raw"] for item in result["parsed"]},
+            {"offline judge request 3 failed: boom"},
+        )
+
+    def test_arena_style_metadata_fails_before_any_judge_call(self) -> None:
+        arena = load_task("arena_hard_v2", BENCHMARKS)
+        sample = arena.task_module.load_samples(arena.spec.task_dir)[0]
+        output = GenerationOutput(sample.id, "prompt", ["answer"])
+        with (
+            mock.patch.object(
+                arena.metrics_module,
+                "_style_metadata",
+                side_effect=RuntimeError("no tiktoken encoding"),
+            ),
+            mock.patch.object(arena.metrics_module, "chat_completion") as judge,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no tiktoken encoding"):
+                arena.metrics_module.score_generations_batch(
+                    [sample], [output], {"judge_workers": 1}
+                )
+        judge.assert_not_called()
 
 
 if __name__ == "__main__":

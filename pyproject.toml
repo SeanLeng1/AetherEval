@@ -18,7 +18,7 @@ dependencies = [
   "syllapy==0.8.0",
   "immutabledict",
   "absl-py",
-  "math-verify",
+  "math-verify==0.9.0",
   "tiktoken",
   "litellm>=1.93.0,<2",
   "numpy",
@@ -33,6 +33,7 @@ sglang = ["sglang"]
 reward-model = ["sglang", "transformers"]
 all-backends = ["vllm", "sglang"]
 dynamic = ["datasets", "pyarrow", "huggingface_hub"]
+test = ["pytest>=8", "ruff"]
 
 [project.scripts]
 aethereval = "aethereval.cli:main"
@@ -42,4 +43,17 @@ include = ["aethereval*", "benchmark_utils*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 "aethereval.backends.sglang" = ["encodings/*.tiktoken"]
-"benchmarks.creative-writing-v3" = ["prompts/*.txt"]
+# Keys must be importable names; hyphenated task dirs go in the path.
+"benchmarks" = ["creative-writing-v3/prompts/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Test this checkout, not whichever one an editable install points at.
+pythonpath = ["."]
+
+[tool.ruff]
+# Vendored upstream checkers (see their NOTICE files) are kept close to upstream.
+extend-exclude = ["benchmarks/ifeval/ifeval_lib", "benchmarks/ifbench/ifbench_lib"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

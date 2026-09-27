@@ -1,11 +1,8 @@
 import argparse
 import json
-from dataclasses import fields, is_dataclass
-from pathlib import Path
 from typing import Any
 
-from benchmarks.bfcl.cli import add_bfcl_arguments, build_bfcl_spec
-from benchmarks.bfcl.external import run as run_bfcl
+from benchmarks.bfcl import cli as bfcl_cli
 
 from .config import load_yaml_config, resolve_run_arguments
 from .core.io import ensure_dir, model_output_name, run_output_dir
@@ -14,25 +11,13 @@ from .core.runner import inspect_prompts, run_evaluation
 from .core.task_defaults import resolve_task_default_gen, resolve_task_num_repeats
 from .core.task_register import list_task_default_gens, list_tasks, parse_task_names
 
-EXTERNAL_TASKS = ("bfcl",)
+# External benchmarks own their generation loop; each module provides
+# add_arguments(parser) and run_external(args, resolved, output_dir) -> summary.
+EXTERNAL_TASKS = {"bfcl": bfcl_cli}
 
 
 def _info(message: str) -> None:
     print(f"[aethereval] {message}")
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return {
-            field.name: _jsonable(getattr(value, field.name)) for field in fields(value)
-        }
-    if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
 
 
 def _split_native_external_tasks(tasks_arg: str) -> tuple[list[str], list[str]]:
@@ -41,28 +26,6 @@ def _split_native_external_tasks(tasks_arg: str) -> tuple[list[str], list[str]]:
     native_tasks = [name for name in selected if name in native_available]
     external_tasks = [name for name in selected if name in EXTERNAL_TASKS]
     return native_tasks, external_tasks
-
-
-def _external_summary(
-    task_name: str, task_output_dir: Path, result: Any
-) -> dict[str, Any]:
-    summary_path = task_output_dir / "summary.json"
-    if summary_path.exists():
-        with summary_path.open("r", encoding="utf-8") as f:
-            summary = json.load(f)
-        if not isinstance(summary, dict):
-            raise ValueError(f"External summary must be a JSON object: {summary_path}")
-    else:
-        summary = {}
-
-    result_json = _jsonable(result)
-    summary.setdefault("task", task_name)
-    summary.setdefault("benchmark", task_name)
-    summary.setdefault("external", True)
-    summary.setdefault("metrics", result_json.get("metrics", {}))
-    summary.setdefault("primary_metric", result_json.get("primary_metric"))
-    summary.setdefault("primary_score", result_json.get("primary_score"))
-    return summary
 
 
 def run_selected_tasks(
@@ -103,89 +66,50 @@ def run_selected_tasks(
 
     native_result: dict[str, Any] | None = None
     if native_tasks:
-
-        def run_native_phase(
-            *,
-            generate_only: bool,
-            eval_only: bool,
-            overwrite: bool,
-        ) -> dict[str, Any]:
-            return run_evaluation(
-                model=resolved["model"],
-                model_name=resolved["model_name"],
-                tasks=",".join(native_tasks),
-                output_dir=resolved["output_dir"],
-                dp_size=resolved["dp_size"],
-                tensor_parallel_size=resolved["tp_size"],
-                gen_overrides=resolved["gen_overrides"],
-                num_repeats=resolved["num_repeats"],
-                bootstrap_resamples=resolved["bootstrap_resamples"],
-                bootstrap_seed=resolved["bootstrap_seed"],
-                bootstrap_confidence=resolved["bootstrap_confidence"],
-                metric_options=resolved["metric_options"],
-                overwrite=overwrite,
-                run_id=resolved["run_id"],
-                backend_name=resolved["backend"],
-                backend_kwargs=resolved["backend_kwargs"],
-                generate_only=generate_only,
-                eval_only=eval_only,
-            )
-
-        if not resolved["generate_only"] and not resolved["eval_only"]:
-            _info(
-                "two-phase execution: generating all native tasks first, then "
-                "restarting in eval-only mode"
-            )
-            run_native_phase(
-                generate_only=True,
-                eval_only=False,
-                overwrite=resolved["overwrite"],
-            )
-            native_result = run_native_phase(
-                generate_only=False,
-                eval_only=True,
-                overwrite=False,
-            )
-        else:
-            native_result = run_native_phase(
-                generate_only=resolved["generate_only"],
-                eval_only=resolved["eval_only"],
-                overwrite=resolved["overwrite"],
-            )
-        task_summaries = dict(native_result["results"])
-    else:
-        task_summaries = load_task_summaries(
-            run_root,
-            skip_tasks=set(external_tasks),
+        native_result = run_evaluation(
+            model=resolved["model"],
+            model_name=resolved["model_name"],
+            tasks=",".join(native_tasks),
+            output_dir=resolved["output_dir"],
+            dp_size=resolved["dp_size"],
+            tensor_parallel_size=resolved["tp_size"],
+            gen_overrides=resolved["gen_overrides"],
+            num_repeats=resolved["num_repeats"],
+            bootstrap_resamples=resolved["bootstrap_resamples"],
+            bootstrap_seed=resolved["bootstrap_seed"],
+            bootstrap_confidence=resolved["bootstrap_confidence"],
+            metric_options=resolved["metric_options"],
+            overwrite=resolved["overwrite"],
+            run_id=resolved["run_id"],
+            backend_name=resolved["backend"],
+            backend_kwargs=resolved["backend_kwargs"],
+            generate_only=resolved["generate_only"],
+            eval_only=resolved["eval_only"],
         )
 
+    # The run summary covers this invocation's tasks plus every other native or
+    # external task summary already in the run directory, whatever was selected.
+    task_summaries = load_task_summaries(
+        run_root,
+        allowed_tasks=set(list_tasks()) | set(EXTERNAL_TASKS),
+        skip_tasks=set(native_tasks) | set(external_tasks),
+    )
+    if native_result is not None:
+        task_summaries.update(native_result["results"])
     for task_name in external_tasks:
-        task_output_dir = run_root / task_name
-        if task_name != "bfcl":
-            raise ValueError(f"Unknown external task: {task_name}")
-        spec = build_bfcl_spec(args, resolved, task_output_dir)
-        _info(
-            f"external_task={task_name} model={spec.model} "
-            f"backend={spec.backend} dp_size={spec.dp_size} tp_size={spec.tp_size} "
-            f"num_repeats={spec.num_repeats} output_dir={spec.output_dir}"
-        )
-        result = run_bfcl(spec)
-        task_summaries[task_name] = _external_summary(
-            task_name,
-            task_output_dir,
-            result,
+        task_summaries[task_name] = EXTERNAL_TASKS[task_name].run_external(
+            args, resolved, run_root / task_name
         )
 
-    if not external_tasks and native_result is not None:
-        return native_result
-
+    # The eval-only runner keeps the backend label of the generation run.
+    backend = native_result["backend"] if native_result else resolved["backend"]
     return build_run_summary(
         run_root=run_root,
         run_id=run_id,
         selected_tasks=native_tasks + external_tasks,
         model=str(resolved["model"]),
         model_name=effective_model_name,
-        backend=str(resolved["backend"]),
+        backend=str(backend),
         phase=phase_name(
             generate_only=resolved["generate_only"],
             eval_only=resolved["eval_only"],
@@ -205,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_group.add_argument(
         "--list-task-defaults",
         action="store_true",
-        help="Print effective DEFAULT_GEN for all tasks and exit.",
+        help="Print effective generation defaults for all tasks and exit.",
     )
     run_group.add_argument(
         "--config", type=str, default=None, help="YAML config file path."
@@ -271,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Evaluate a complete existing predictions.jsonl without loading the "
-            "candidate inference backend."
+            "candidate inference backend; re-judges every LLM-judge record."
         ),
     )
 
@@ -313,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-p", type=float, default=None, help="Override min-p."
     )
     generation_group.add_argument(
-        "--seed", type=int, default=None, help="Override sampling seed."
+        "--seed", type=int, default=None, help="Override sampling seed (vLLM only)."
     )
     generation_group.add_argument(
         "--enable-thinking",
@@ -536,7 +460,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra SGLang Engine kwargs (repeatable), format: key=value",
     )
 
-    add_bfcl_arguments(parser)
+    for module in EXTERNAL_TASKS.values():
+        module.add_arguments(parser)
     return parser
 
 
@@ -552,7 +477,7 @@ def main() -> None:
         payload = list_task_default_gens()
         payload.update(
             {
-                task_name: resolve_task_default_gen(task_name, {})
+                task_name: resolve_task_default_gen(task_name)
                 for task_name in EXTERNAL_TASKS
             }
         )

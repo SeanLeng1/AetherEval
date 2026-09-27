@@ -1,7 +1,11 @@
 import ast
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aethereval.core.task_register import (
     discover_tasks,
@@ -25,10 +29,13 @@ class TaskRegisterTests(unittest.TestCase):
             _validate_metrics_contract(SimpleNamespace(__name__="test", aggregate=lambda: {}))
 
     def test_defaults_follow_benchmark_directory_order(self):
+        from aethereval.cli import EXTERNAL_TASKS
         from aethereval.core.task_defaults import _load_task_default_overrides
 
         names = list(_load_task_default_overrides())
         self.assertEqual(names, sorted(names))
+        # One YAML entry per benchmark directory (plus external adapters), no strays.
+        self.assertEqual(set(names), set(list_tasks()) | set(EXTERNAL_TASKS))
 
     def test_canonical_names_and_legacy_aliases(self):
         from aethereval.core.task_register import parse_task_names
@@ -88,7 +95,6 @@ class TaskRegisterTests(unittest.TestCase):
             (bad_task_dir / "task.py").write_text(
                 "TASK_NAME='bad_task'\n"
                 "DATA_FILE='data.json'\n"
-                "DEFAULT_GEN={}\n"
                 "def load_samples(task_dir):\n"
                 "    return []\n"
                 "def build_prompt(sample):\n"
@@ -108,7 +114,7 @@ class TaskRegisterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_task("bad-task", root)
 
-    def test_contract_allows_missing_default_gen(self) -> None:
+    def test_contract_rejects_default_gen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_dir = root / "ok-task"
@@ -131,38 +137,87 @@ class TaskRegisterTests(unittest.TestCase):
             )
 
             bundle = load_task("ok-task", root)
-            self.assertEqual(bundle.task_module.DEFAULT_GEN, {})
+            self.assertFalse(hasattr(bundle.task_module, "DEFAULT_GEN"))
+            task_path = task_dir / "task.py"
+            task_path.write_text(
+                "DEFAULT_GEN={'n': 1}\n" + task_path.read_text(), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "configs/task_defaults.yaml"):
+                load_task("ok-task", root)
+
+    def test_task_defaults_use_known_generation_keys(self) -> None:
+        from aethereval.core.task_defaults import (
+            GENERATION_KEYS,
+            resolve_task_default_gen,
+        )
+
+        # The YAML task set itself is checked in test_defaults_follow_benchmark_directory_order.
+        for name in list_tasks():
+            defaults = resolve_task_default_gen(name)
+            self.assertLessEqual(set(defaults), GENERATION_KEYS, name)
+            for key in ("n", "max_new_tokens", "temperature", "top_p"):
+                self.assertIn(key, defaults, name)
+
+        typo = {"math500": {"n": 16, "max_new_token": 16384, "temperature": 0.6}}
+        with mock.patch(
+            "aethereval.core.task_defaults._load_task_default_overrides",
+            return_value=typo,
+        ):
+            with self.assertRaisesRegex(ValueError, r"'math500'.*\['max_new_token'\]"):
+                load_task("math500")
+
+    def test_list_task_default_gens_does_not_need_evalplus(self) -> None:
+        # EvalPlus is a scoring-only install; task.py modules must load without it.
+        code = (
+            "import json, sys\n"
+            "sys.modules['evalplus'] = None\n"
+            "from aethereval.core.task_register import list_task_default_gens\n"
+            "print(json.dumps(sorted(list_task_default_gens())))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), list_tasks())
 
     def test_list_task_default_gens(self) -> None:
+        # Values are user-owned in configs/task_defaults.yaml; test shape, not numbers.
         defaults = list_task_default_gens()
-        self.assertIn("ifeval", defaults)
-        self.assertIn("gpqa-diamond", defaults)
-        self.assertIn("bbh", defaults)
-        self.assertEqual(defaults["ifeval"]["n"], 1)
-        self.assertEqual(defaults["bbh"]["n"], 1)
-        self.assertEqual(defaults["aime24"]["n"], 16)
-        self.assertEqual(defaults["amc23"]["n"], 16)
-        self.assertEqual(defaults["math500"]["n"], 16)
+        self.assertEqual(set(defaults), set(list_tasks()))
+        for task, gen in defaults.items():
+            with self.subTest(task=task):
+                self.assertIsInstance(gen["n"], int)
+                self.assertGreaterEqual(gen["n"], 1)
+                self.assertIsInstance(gen["max_new_tokens"], int)
+                self.assertGreater(gen["max_new_tokens"], 0)
+                self.assertGreaterEqual(gen["temperature"], 0.0)
+                self.assertTrue(0.0 < gen.get("top_p", 1.0) <= 1.0)
+                if gen["n"] > 1:
+                    self.assertGreater(gen["temperature"], 0.0)
+                self.assertNotIn("metrics", gen)
+                self.assertNotIn("judge_model", gen)
         # Every math task shares one prompt, so one long-reasoning profile.
         for task in ("aime24", "aime25", "amc23", "math500", "minerva", "olympiad-bench"):
             self.assertEqual(defaults[task], defaults["aime24"], task)
-        self.assertEqual(defaults["minerva"]["max_new_tokens"], 32768)
-        self.assertEqual(defaults["safe-alignment"]["n"], 1)
-        self.assertEqual(defaults["safe-alignment"]["temperature"], 0.0)
-        self.assertEqual(defaults["safe-alignment"]["max_new_tokens"], 1024)
-        self.assertNotIn("metrics", defaults["healthbench"])
-        self.assertNotIn("judge_model", defaults["healthbench"])
-        self.assertIn("max_new_tokens", defaults["livecodebench"])
-        self.assertEqual(defaults["livecodebench"]["temperature"], 0.2)
-        self.assertEqual(defaults["livecodebench"]["top_p"], 0.95)
-        self.assertEqual(defaults["livecodebench"]["max_new_tokens"], 32768)
+        # Deliberate: few-shot/base-model stop strings would truncate chat answers.
         self.assertNotIn("stop", defaults["livecodebench"])
-        self.assertEqual(defaults["mmlu-pro"]["max_new_tokens"], 2048)
         self.assertNotIn("stop", defaults["mmlu-pro"])
-        self.assertEqual(defaults["humaneval-plus"]["n"], 1)
-        self.assertEqual(defaults["humaneval-plus"]["temperature"], 0.0)
-        self.assertEqual(defaults["humaneval-plus"]["max_new_tokens"], 32768)
-        self.assertEqual(defaults["mbpp-plus"]["max_new_tokens"], 32768)
+
+    def test_readmes_state_configured_defaults(self) -> None:
+        from aethereval.core.task_defaults import _load_task_default_overrides
+
+        benchmarks = Path(__file__).resolve().parents[1] / "benchmarks"
+        for task, defaults in _load_task_default_overrides().items():
+            text = " ".join((benchmarks / task / "README.md").read_text("utf-8").split())
+            with self.subTest(task=task):
+                self.assertIn("## Official source and protocol", text)
+            # A regex, not a substring: n=1 must not match n=16 or judge_max_new_tokens.
+            for key in ("n", "max_new_tokens"):
+                with self.subTest(task=task, key=key):
+                    self.assertRegex(text, rf"(?<![\w]){key}={defaults[key]}(?![\w.])")
 
     def test_instruction_following_primary_metrics(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

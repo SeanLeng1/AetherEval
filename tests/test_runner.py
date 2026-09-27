@@ -1,5 +1,9 @@
+import importlib.metadata
 import json
+import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,6 +25,7 @@ from aethereval.core.types import (
     GenerationRecord,
     Sample,
 )
+from tests._deps import requires
 
 
 class FakeTokenizer:
@@ -218,7 +223,6 @@ def _write_toy_benchmark(root: Path) -> None:
         "from aethereval.core.types import Sample\n"
         "TASK_NAME='toy'\n"
         "DATA_FILE='data/eval.jsonl'\n"
-        "DEFAULT_GEN={'n': 1, 'max_new_tokens': 16, 'temperature': 0.0, 'top_p': 1.0}\n"
         "def load_samples(task_dir: Path):\n"
         "    rows = []\n"
         "    with (task_dir / DATA_FILE).open('r', encoding='utf-8') as f:\n"
@@ -267,7 +271,6 @@ def _write_toy2_benchmark(root: Path) -> None:
         "from aethereval.core.types import Sample\n"
         "TASK_NAME='toy2'\n"
         "DATA_FILE='data/eval.jsonl'\n"
-        "DEFAULT_GEN={'n': 1, 'max_new_tokens': 16, 'temperature': 0.0, 'top_p': 1.0}\n"
         "def load_samples(task_dir: Path):\n"
         "    rows = []\n"
         "    with (task_dir / DATA_FILE).open('r', encoding='utf-8') as f:\n"
@@ -297,6 +300,18 @@ def _write_toy2_benchmark(root: Path) -> None:
     )
 
 
+# A judge metric that sends one offline-judge request per sample when available.
+_JUDGE_METRIC_PREFIX = (
+    "USES_LLM_JUDGE = True\n"
+    "def score_generations_batch(samples, outputs, options):\n"
+    "    client = options.get('_judge_client')\n"
+    "    if client is not None:\n"
+    "        for output in outputs:\n"
+    "            client.complete([{'role': 'user', 'content': output.sample_id}])\n"
+    "    return [[{'score': 1.0} for _ in output.generations] for output in outputs]\n"
+)
+
+
 def _write_batch_benchmark(root: Path) -> None:
     task_dir = root / "batch_toy"
     data_dir = task_dir / "data"
@@ -316,7 +331,6 @@ def _write_batch_benchmark(root: Path) -> None:
         "from aethereval.core.types import Sample\n"
         "TASK_NAME='batch_toy'\n"
         "DATA_FILE='data/eval.jsonl'\n"
-        "DEFAULT_GEN={'n': 1, 'max_new_tokens': 16, 'temperature': 0.0, 'top_p': 1.0}\n"
         "def load_samples(task_dir: Path):\n"
         "    rows = []\n"
         "    with (task_dir / DATA_FILE).open('r', encoding='utf-8') as f:\n"
@@ -352,6 +366,7 @@ def _write_batch_benchmark(root: Path) -> None:
 
 
 class RunnerTests(unittest.TestCase):
+    @requires("evalplus")
     def test_evalplus_find_zero_scoring_matches_across_process_counts(self) -> None:
         metrics = _load_module_from_path(
             "find_zero_test_metrics",
@@ -382,6 +397,101 @@ class RunnerTests(unittest.TestCase):
         parallel = _score_generation_outputs(**kwargs, metric_options={"num_proc": 2})
         self.assertEqual([result[0] for result in serial[sample.id]], [1.0, 0.0])
         self.assertEqual(parallel, serial)
+
+    @requires("evalplus")
+    def test_evalplus_candidate_memory_budget_matches_across_process_counts(self) -> None:
+        # A per-core BLAS pool in the checker, or a checker forked from this process,
+        # used to leave candidates under 1.5 GB of EvalPlus's 4 GiB RLIMIT_AS.
+        metrics = _load_module_from_path(
+            "memory_budget_test_metrics",
+            Path(__file__).resolve().parents[1] / "benchmarks/humaneval-plus/metrics.py",
+        )
+        sample = Sample(
+            id="HumanEval/memory-probe",
+            data={
+                "prompt": 'def f(x):\n    """Return x."""\n',
+                "entry_point": "f",
+                "canonical_solution": "    return x\n",
+                "base_input": [[1]],
+                "plus_input": [[2]],
+                "atol": 0.0,
+            },
+        )
+        # bytes(n) reserves address space (what RLIMIT_AS counts) without touching it.
+        kwargs = dict(
+            metrics_module=metrics,
+            samples_by_id={sample.id: sample},
+            outputs=[GenerationOutput(sample.id, "", [
+                "    buffer = bytes(5 * 1024**3 // 2)\n    return x\n",
+                "    buffer = bytes(5 * 1024**3)\n    return x\n",
+            ])],
+            total_records=2,
+            progress_desc="EvalPlus memory budget",
+        )
+        for num_proc in (1, 2):
+            with self.subTest(num_proc=num_proc):
+                scored = _score_generation_outputs(**kwargs, metric_options={"num_proc": num_proc})
+                self.assertEqual([result[0] for result in scored[sample.id]], [1.0, 0.0])
+
+    def test_score_in_subprocess_uses_spawned_worker_with_single_thread_blas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metrics.py"
+            path.write_text(
+                "import os\n"
+                "SCORE_IN_SUBPROCESS = True\n"
+                "def score_generation(sample, generation):\n"
+                "    return {'score': 1.0, 'meta': {\n"
+                "        'pid': os.getpid(), 'blas': os.environ.get('OPENBLAS_NUM_THREADS')}}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ):
+                os.environ.pop("OPENBLAS_NUM_THREADS", None)
+                scored = _score_generation_outputs(
+                    metrics_module=_load_module_from_path("subprocess_test_metrics", path),
+                    samples_by_id={"a": Sample(id="a")},
+                    outputs=[GenerationOutput("a", "", ["x"])],
+                    metric_options={"num_proc": 1},
+                    total_records=1,
+                    progress_desc="test scoring",
+                )
+                # Only the scoring worker is capped, not processes started from here.
+                self.assertNotIn("OPENBLAS_NUM_THREADS", os.environ)
+            meta = scored["a"][0][3]
+            self.assertNotEqual(meta["pid"], os.getpid())
+            self.assertEqual(meta["blas"], "1")
+
+    def test_pooled_scoring_stops_queued_records_on_first_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metrics.py"
+            log = Path(tmp) / "started.log"
+            path.write_text(
+                "import time\n"
+                "SCORE_IN_SUBPROCESS = True\n"
+                "def score_generation(sample, generation):\n"
+                f"    with open({str(log)!r}, 'a') as handle:\n"
+                "        handle.write(generation + '\\n')\n"
+                "    if generation == '0':\n"
+                "        raise ValueError('bad record')\n"
+                "    time.sleep(0.2)\n"
+                "    return {'score': 1.0}\n",
+                encoding="utf-8",
+            )
+            generations = [str(index) for index in range(31)]
+            for num_proc in (1, 2):
+                with self.subTest(num_proc=num_proc):
+                    log.write_text("", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "bad record"):
+                        _score_generation_outputs(
+                            metrics_module=_load_module_from_path("fail_fast_test_metrics", path),
+                            samples_by_id={"a": Sample(id="a")},
+                            outputs=[GenerationOutput("a", "", generations)],
+                            metric_options={"num_proc": num_proc},
+                            total_records=len(generations),
+                            progress_desc="test scoring",
+                        )
+                    # Only records already handed to a worker run; queued ones are cancelled.
+                    started = log.read_text(encoding="utf-8").splitlines()
+                    self.assertLess(len(started), 10)
 
     def test_parallel_scoring_preserves_order_and_allows_test_subprocesses(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -428,7 +538,7 @@ class RunnerTests(unittest.TestCase):
             _write_toy_benchmark(root)
             metrics_path = root / "toy" / "metrics.py"
             metrics_path.write_text(
-                "USES_LLM_JUDGE = True\n" + metrics_path.read_text(encoding="utf-8"),
+                _JUDGE_METRIC_PREFIX + metrics_path.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
             out = Path(tmp) / "outputs"
@@ -466,12 +576,12 @@ class RunnerTests(unittest.TestCase):
                 )
 
             self.assertTrue(evaluated["results"]["toy"]["evaluation_complete"])
+            self.assertEqual(judge.complete.call_count, 2)
             judge_class.assert_called_once_with(
                 model="local/judge",
                 dp_size=1,
                 tensor_parallel_size=2,
                 model_kwargs={"context_length": 8192},
-                batch_size=8,
             )
             judge.close.assert_called_once_with()
             run_config_path = out / "model" / "local_judge" / "toy" / "run_config.json"
@@ -492,7 +602,7 @@ class RunnerTests(unittest.TestCase):
                 if name == "cpu":
                     continue
                 path = root / name / "metrics.py"
-                path.write_text("USES_LLM_JUDGE = True\n" + path.read_text())
+                path.write_text(_JUDGE_METRIC_PREFIX + path.read_text())
                 defaults[name] = {"metrics": {
                     "judge_model": "local/b" if name == "judge-b" else "local/a",
                     "judge_sglang_args": {
@@ -544,14 +654,15 @@ class RunnerTests(unittest.TestCase):
                         constructor.assert_not_called()
                         self.assertEqual(events, [("score", name) for name in names])
                         continue
+                    # Judges start lazily on the first request of their group.
                     expected = [
-                        ("score", "cpu"), ("load", 0), ("score", "judge-a1"),
+                        ("score", "cpu"), ("score", "judge-a1"), ("load", 0),
                         ("score", "judge-a2"), ("close", 0),
                     ]
                     if mode == "local":
                         expected += [
-                            ("load", 1), ("score", "judge-b"), ("close", 1),
-                            ("load", 2), ("score", "judge-context"), ("close", 2),
+                            ("score", "judge-b"), ("load", 1), ("close", 1),
+                            ("score", "judge-context"), ("load", 2), ("close", 2),
                         ]
                     self.assertEqual(events, expected)
                     self.assertIs(scored_options["judge-a1"]["_judge_client"], scored_options["judge-a2"]["_judge_client"])
@@ -559,6 +670,195 @@ class RunnerTests(unittest.TestCase):
                     self.assertEqual(scored_options["judge-a2"]["judge_temperature"], 0.7)
                     for client in clients:
                         client.close.assert_called_once_with()
+
+    def test_lazy_judge_starts_once_caches_failures_and_stays_closed(self) -> None:
+        from aethereval.core.runner import _LazyJudgeClient
+
+        config = {"model": "local/judge", "dp_size": 1, "tensor_parallel_size": 2}
+        judge = mock.Mock()
+
+        def slow_start(**kwargs):
+            time.sleep(0.05)
+            return judge
+
+        with mock.patch(
+            "aethereval.core.runner.OfflineJudgeClient", side_effect=slow_start
+        ) as constructor:
+            client = _LazyJudgeClient(config)
+            with self.assertRaisesRegex(RuntimeError, "not running"):
+                client.complete([{"role": "user", "content": "q"}])
+            threads = [threading.Thread(target=client.start) for _ in range(16)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            constructor.assert_called_once_with(**config)
+            self.assertIs(
+                client.complete([{"role": "user", "content": "q"}], temperature=0.0),
+                judge.complete.return_value,
+            )
+            client.close()
+            client.close()
+            judge.close.assert_called_once_with()
+            with self.assertRaisesRegex(RuntimeError, "not running"):
+                client.complete([{"role": "user", "content": "q"}])
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                client.start()
+            constructor.assert_called_once()
+
+        with mock.patch(
+            "aethereval.core.runner.OfflineJudgeClient",
+            side_effect=RuntimeError("no GPUs"),
+        ) as constructor:
+            client = _LazyJudgeClient(config)
+            with self.assertRaisesRegex(RuntimeError, "no GPUs"):
+                client.start()
+            with self.assertRaisesRegex(RuntimeError, "failed to start"):
+                client.start()
+            constructor.assert_called_once()
+            client.close()
+
+    def test_grouped_local_judge_starts_on_runner_thread(self) -> None:
+        # Judge servers are guarded subprocesses that exit with the thread that
+        # started them, so a judge started by a parallel_map worker would die
+        # before the group's next task.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            names = ["judge-a", "judge-b"]
+            for name in names:
+                _write_toy_benchmark(root)
+                (root / "toy").rename(root / name)
+                path = root / name / "metrics.py"
+                path.write_text(
+                    "USES_LLM_JUDGE = True\n"
+                    "from benchmark_utils.llm_judge import parallel_map\n"
+                    "def score_generations_batch(samples, outputs, options):\n"
+                    "    client = options['_judge_client']\n"
+                    "    parallel_map(\n"
+                    "        lambda o: client.complete([{'role': 'user', 'content': o.sample_id}]),\n"
+                    "        outputs, workers=2, desc='judge',\n"
+                    "    )\n"
+                    "    return [[{'score': 1.0} for _ in o.generations] for o in outputs]\n"
+                    + path.read_text()
+                )
+            kwargs = dict(
+                model="candidate/model", tasks=",".join(names),
+                output_dir=Path(tmp) / "outputs", run_id="threads", benchmarks_dir=root,
+            )
+            run_evaluation(**kwargs, backend=FakeBackend(), generate_only=True)
+            started, requests, closed = [], [], []
+
+            class ThreadCheckingJudge:
+                def __init__(self, **config):
+                    started.append(threading.current_thread())
+
+                def complete(self, messages, **options):
+                    requests.append(threading.current_thread())
+                    return "ok"
+
+                def close(self):
+                    closed.append(threading.current_thread())
+
+            with mock.patch(
+                "aethereval.core.runner.OfflineJudgeClient", ThreadCheckingJudge
+            ):
+                result = run_evaluation(
+                    **kwargs,
+                    eval_only=True,
+                    metric_options={"judge_backend": "local", "judge_model": "local/judge"},
+                )
+
+            self.assertTrue(
+                all(item["evaluation_complete"] for item in result["results"].values())
+            )
+            self.assertEqual(started, [threading.main_thread()])
+            self.assertEqual(len(requests), 4)
+            self.assertNotIn(threading.main_thread(), requests)
+            self.assertEqual(closed, [threading.main_thread()])
+
+    def test_automatic_eval_phase_reuses_judgments_with_same_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_toy_benchmark(root)
+            _write_toy2_benchmark(root)
+            metrics_path = root / "toy" / "metrics.py"
+            metrics_path.write_text(
+                "PRESERVE_EXISTING_SCORES_ON_RESUME = True\n"
+                + _JUDGE_METRIC_PREFIX
+                + metrics_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            kwargs = dict(
+                model="fake-model",
+                tasks="toy,toy2",
+                output_dir=Path(tmp) / "outputs",
+                run_id="reuse",
+                benchmarks_dir=root,
+            )
+            task_dir = Path(tmp) / "outputs" / "fake-model" / "reuse" / "toy"
+            predictions_path = task_dir / "predictions.jsonl"
+            judge = mock.Mock()
+
+            def evaluate(*, backend=None, eval_only=False, **options):
+                judge.reset_mock()
+                # The runner creates (and closes) the candidate backend, as for the CLI.
+                with mock.patch(
+                    "aethereval.core.runner.create_backend",
+                    return_value=backend or NeverCalledBackend(),
+                ), mock.patch(
+                    "aethereval.core.runner.OfflineJudgeClient", return_value=judge
+                ) as judge_class:
+                    result = run_evaluation(
+                        **kwargs,
+                        eval_only=eval_only,
+                        metric_options={
+                            "judge_backend": "local",
+                            "judge_model": "local/judge",
+                            "judge_workers": 4,
+                            **options,
+                        },
+                    )
+                calls = judge.complete.call_count
+                self.assertEqual(judge_class.call_count, min(calls, 1))
+                return calls, result["results"]
+
+            calls, first = evaluate(backend=FakeBackend())
+            self.assertEqual(calls, 2)
+            self.assertEqual(first["toy"]["rescored_records"], 2)
+            lines = predictions_path.read_text().splitlines()
+            rows = [json.loads(line) for line in lines]
+            fingerprint = rows[0]["meta"]["_aethereval_judge"]
+            self.assertTrue(
+                all(row["meta"]["_aethereval_judge"] == fingerprint for row in rows)
+            )
+
+            # A rerun keeps judgments and never starts the judge; CPU metrics rescore.
+            predictions = predictions_path.read_bytes()
+            summary = (task_dir / "summary.json").read_bytes()
+            run_evaluation(**kwargs, backend=NeverCalledBackend(), generate_only=True)
+            self.assertEqual((task_dir / "summary.json").read_bytes(), summary)
+            calls, rerun = evaluate(judge_workers=8)
+            self.assertEqual(calls, 0)
+            self.assertEqual(rerun["toy"]["rescored_records"], 0)
+            self.assertEqual(rerun["toy"]["metrics"], first["toy"]["metrics"])
+            self.assertEqual(rerun["toy2"]["rescored_records"], 2)
+            self.assertEqual(predictions_path.read_bytes(), predictions)
+
+            # Only records without a current judgment are judged.
+            predictions_path.write_text(
+                predictions.decode().splitlines()[0] + "\n", encoding="utf-8"
+            )
+            self.assertEqual(evaluate(backend=FakeBackend())[0], 1)
+            self.assertEqual(evaluate(judge_temperature=0.5)[0], 2)
+            self.assertEqual(evaluate(judge_temperature=0.5)[0], 0)
+            self.assertEqual(evaluate(eval_only=True)[0], 2)
+            predictions_path.write_text(
+                predictions_path.read_text().replace(
+                    f'"_aethereval_judge": "{fingerprint}"', '"legacy": true'
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(evaluate()[0], 2)
 
     def test_generate_only_then_eval_only_without_candidate_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -609,6 +909,9 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(
                 all(row["meta"]["_aethereval_unscored"] is True for row in raw_rows)
             )
+            run_config_path = predictions_path.parent / "run_config.json"
+            generated_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("scoring_packages", generated_config)
 
             metrics_path.write_text(metrics_source, encoding="utf-8")
             with mock.patch(
@@ -641,9 +944,12 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(
                 all("_aethereval_unscored" not in row["meta"] for row in scored_rows)
             )
-            run_config_path = predictions_path.parent / "run_config.json"
             with run_config_path.open(encoding="utf-8") as f:
                 run_config = json.load(f)
+            self.assertEqual(
+                run_config["scoring_packages"]["math-verify"],
+                importlib.metadata.version("math-verify"),
+            )
             self.assertEqual(run_config["generation_config"]["n"], 2)
             self.assertEqual(run_config["generation_config"]["temperature"], 0.7)
             self.assertIs(
@@ -742,6 +1048,52 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary["rescored_records"], 2)
             self.assertAlmostEqual(summary["metrics"]["batch_mean"], 8.0)
 
+    def test_metric_unscored_record_is_excluded_without_aborting_later_tasks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "benchmarks"
+            _write_batch_benchmark(root)
+            _write_toy_benchmark(root)
+            out = Path(tmp) / "outputs"
+            kwargs = dict(
+                model="fake-model",
+                tasks="batch_toy,toy",
+                output_dir=out,
+                run_id="unscored",
+                benchmarks_dir=root,
+            )
+            run_evaluation(**kwargs, backend=FakeBackend(), generate_only=True)
+            metrics_path = root / "batch_toy" / "metrics.py"
+
+            def write_metric(failed_id: str) -> None:
+                metrics_path.write_text(
+                    "def score_generations_batch(samples, outputs, options=None):\n"
+                    "    return [[{'score': 1.0, 'meta': {\n"
+                    f"        'judge_failed': o.sample_id == {failed_id!r},\n"
+                    f"        '_aethereval_unscored': o.sample_id == {failed_id!r},\n"
+                    "    }} for _ in o.generations] for o in outputs]\n"
+                    "def aggregate(results, options=None):\n"
+                    "    kept = [r for r in results if not r['records'][0]['meta']['judge_failed']]\n"
+                    "    return {'judged': float(len(kept))}\n",
+                    encoding="utf-8",
+                )
+
+            write_metric("1")
+            failed = run_evaluation(**kwargs, eval_only=True)["results"]
+            self.assertEqual(failed["batch-toy"]["metrics"]["judged"], 1.0)
+            self.assertEqual(failed["batch-toy"]["unscored_records"], 1)
+            self.assertFalse(failed["batch-toy"]["evaluation_complete"])
+            self.assertIn("scored again on resume", failed["batch-toy"]["warnings"][-1])
+            self.assertTrue(failed["toy"]["evaluation_complete"])
+
+            write_metric("none")
+            retried = run_evaluation(**kwargs, eval_only=True)["results"]
+            self.assertEqual(retried["batch-toy"]["metrics"]["judged"], 2.0)
+            self.assertEqual(retried["batch-toy"]["unscored_records"], 0)
+            self.assertTrue(retried["batch-toy"]["evaluation_complete"])
+            self.assertEqual(retried["batch-toy"]["warnings"], [])
+
     def test_eval_only_creates_and_closes_metric_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"
@@ -805,6 +1157,52 @@ class RunnerTests(unittest.TestCase):
                 1.0,
             )
 
+            # Without a phase flag, a caller-supplied backend also serves the metric.
+            close_marker.unlink()
+            supplied = FakeBackend()
+            supplied.name = "metric-only"
+            result = run_evaluation(
+                model="fake-model",
+                tasks="batch_toy",
+                output_dir=out,
+                run_id="backend_split",
+                dp_size=2,
+                tensor_parallel_size=2,
+                metric_options={"close_marker": str(close_marker)},
+                backend=supplied,
+                benchmarks_dir=root,
+            )
+            self.assertFalse(close_marker.exists())
+            self.assertEqual(supplied.calls, 0)
+            self.assertEqual(result["results"]["batch-toy"]["primary_score"], 1.0)
+
+    def test_run_evaluation_without_phase_flag_generates_then_evaluates(self) -> None:
+        from aethereval.core import runner
+
+        backend = FakeBackend()
+        kwargs = dict(model="fake-model", tasks="toy", output_dir="unused")
+        with mock.patch.object(runner, "_run_phase", return_value={}) as run_phase:
+            run_evaluation(**kwargs, backend=backend, overwrite=True)
+            run_evaluation(**kwargs, eval_only=True)
+            # A caller-supplied backend stays loaded, so it cannot meet a local judge.
+            with self.assertRaisesRegex(ValueError, "disjoint candidate/judge"):
+                run_evaluation(
+                    **kwargs, backend=backend, metric_options={"judge_backend": "local"}
+                )
+        calls = [call.kwargs for call in run_phase.call_args_list]
+        flags = ("generate_only", "eval_only", "overwrite", "rescore_existing")
+        self.assertEqual(
+            [tuple(call[flag] for flag in flags) for call in calls],
+            [
+                (True, False, True, True),
+                (False, True, False, False),
+                (False, True, False, True),
+            ],
+        )
+        self.assertIs(calls[0]["backend"], backend)
+        self.assertIs(calls[1]["backend"], backend)
+        self.assertIsNone(calls[2]["backend"])
+
     def test_eval_only_rejects_overwrite(self) -> None:
         with self.assertRaisesRegex(ValueError, "cannot be combined with overwrite"):
             run_evaluation(
@@ -858,7 +1256,9 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertIn("toy", first["results"])
             summary = first["results"]["toy"]
-            self.assertEqual(summary["new_records"], 2)
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(first["phase"], "eval_only")
+            self.assertEqual(summary["rescored_records"], 2)
             self.assertAlmostEqual(summary["metrics"]["accuracy_first"], 1.0, places=6)
             self.assertAlmostEqual(
                 summary["metrics"]["avg_response_tokens"], 1.0, places=6
@@ -901,7 +1301,7 @@ class RunnerTests(unittest.TestCase):
                 metric_options={"num_proc": 2},
             )
             summary2 = second["results"]["toy"]
-            self.assertEqual(summary2["new_records"], 0)
+            self.assertEqual(summary2["rescored_records"], 2)
             self.assertEqual(summary2["existing_records"], 2)
             self.assertEqual(summary2["metrics"]["avg_completed_response_tokens"], 1.0)
             self.assertEqual(predictions_path.read_text(), original_predictions)
@@ -1053,6 +1453,75 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(run_1["generation_config"]["seed"], 0)
             self.assertEqual(run_2["generation_config"]["seed"], 1)
 
+            summaries = [
+                (task_dir / name / "summary.json").read_bytes()
+                for name in (".", "run_01", "run_02")
+            ]
+            run_evaluation(
+                model="fake-model",
+                tasks="toy",
+                output_dir=out,
+                run_id="repeated",
+                backend=NeverCalledBackend(),
+                benchmarks_dir=root,
+                num_repeats=2,
+                generate_only=True,
+            )
+            self.assertEqual(
+                [
+                    (task_dir / name / "summary.json").read_bytes()
+                    for name in (".", "run_01", "run_02")
+                ],
+                summaries,
+            )
+
+            def generate_parent(backend) -> dict:
+                run_evaluation(
+                    model="fake-model",
+                    tasks="toy",
+                    output_dir=out,
+                    run_id="repeated",
+                    backend=backend,
+                    benchmarks_dir=root,
+                    num_repeats=2,
+                    generate_only=True,
+                )
+                parent = json.loads((task_dir / "summary.json").read_text())
+                self.assertEqual(parent["phase"], "generate_only")
+                self.assertFalse(parent["evaluation_complete"])
+                self.assertEqual(parent["metrics"], {})
+                self.assertIsNone(parent["primary_metric"])
+                self.assertEqual(parent["warnings"], [])
+                self.assertEqual(
+                    [item["metrics"] for item in parent["repeats"]], [{}, {}]
+                )
+                return parent
+
+            # Without a kept parent, or with a regenerated repeat, the parent
+            # summarizes generation only; kept repeat summaries stay evaluated.
+            (task_dir / "summary.json").unlink()
+            parent = generate_parent(NeverCalledBackend())
+            self.assertEqual((parent["existing_records"], parent["new_records"]), (4, 0))
+            self.assertEqual(
+                [(task_dir / name / "summary.json").read_bytes() for name in ("run_01", "run_02")],
+                summaries[1:],
+            )
+            predictions_path = task_dir / "run_02" / "predictions.jsonl"
+            predictions_path.write_text(
+                predictions_path.read_text().splitlines()[0] + "\n"
+            )
+            parent = generate_parent(FakeBackend())
+            self.assertEqual((parent["existing_records"], parent["new_records"]), (3, 1))
+            self.assertEqual(
+                (task_dir / "run_01" / "summary.json").read_bytes(), summaries[1]
+            )
+
+            # An unreadable summary is regenerated rather than kept.
+            (task_dir / "run_01" / "summary.json").write_text("{")
+            generate_parent(NeverCalledBackend())
+            run_1_summary = json.loads((task_dir / "run_01" / "summary.json").read_text())
+            self.assertEqual(run_1_summary["phase"], "generate_only")
+
     def test_default_run_id_uses_model_suffix_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "benchmarks"
@@ -1086,18 +1555,20 @@ class RunnerTests(unittest.TestCase):
                 backend=FakeBackend(),
                 benchmarks_dir=root,
             )
+            backend = FakeBackend()
             rebuilt = run_evaluation(
                 model="fake-model",
                 tasks="toy",
                 output_dir=out,
                 run_id="same_run",
-                backend=FakeBackend(),
+                backend=backend,
                 overwrite=True,
                 benchmarks_dir=root,
             )
             summary = rebuilt["results"]["toy"]
-            self.assertEqual(summary["existing_records"], 0)
-            self.assertEqual(summary["new_records"], 2)
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(summary["total_records"], 2)
+            self.assertTrue(summary["evaluation_complete"])
 
     def test_n_gt_1_with_zero_temperature_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
