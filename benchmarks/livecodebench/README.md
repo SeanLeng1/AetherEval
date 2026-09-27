@@ -51,14 +51,22 @@ Why `v6`:
 ## Prompting
 
 - Implemented in `task.py`
-- Uses the official generic chat prompt verbatim
+- Shared with HumanEval+, MBPP+ and LiveCodeBench in `benchmark_utils/code_prompt.py`.
+  It is the AetherRL training prompt (`data/process_code.py` `code_prompt`) verbatim:
+  a single user turn with no system message:
+  `### Question:` + the question, then `### Format:` + "Please think step by step, then
+  write the complete solution." + an interface line + "Put the final solution in one
+  Python code block:" and a ```` ```python ```` block.
+- This is not the official generic template
   ([prompts/code_generation.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/prompts/code_generation.py),
-  `get_generic_question_template_answer` with `SYSTEM_MESSAGE_GENERIC`):
-  - system: expert Python programmer instruction
-  - user sections: `### Question`, `### Format: ...` (one line), `### Answer`
-  - no additional reasoning instruction (OLMES's olmo3 variant adds one; we do not)
-  - with starter code: complete the provided stub
-  - without starter code: read from `stdin`, write to `stdout`
+  `get_generic_question_template_answer` with `SYSTEM_MESSAGE_GENERIC`); the Question/Format
+  sections are the same, but there is no system message, no `### Answer` line, and the
+  format asks for step-by-step reasoning.
+  - with starter code: "Return the completed Python function(s), preserving the requested
+    names and signatures. The tested callable is `<fn_name>`."; the code block shows the
+    starter code, as in the official template
+  - without starter code: "Read input from stdin and write the answer to stdout; do not
+    hard-code the examples."; the code block holds `# YOUR CODE HERE`
 - The framework applies the model chat template.
 
 ## Metrics

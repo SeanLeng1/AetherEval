@@ -15,8 +15,8 @@ The 32768-token ceiling includes reasoning and code; it is our evaluation choice
 not EvalPlus's reference decoder default of 768. The serving context must also
 accommodate the prompt. This ceiling does not require every response to use it.
 
-The chat prompt asks for reasoning plus fenced code, which is not EvalPlus's
-prompt. Local code-block assembly is followed by EvalPlus `sanitize`; execution
+The chat prompt is the AetherRL code-training prompt (step-by-step reasoning, then the
+complete solution in one fenced block), which is not EvalPlus's prompt. Local code-block assembly is followed by EvalPlus `sanitize`; execution
 uses EvalPlus commit `26d6d00bb1fd0fa37f39c99d5290da67891d1c5e`, with that
 revision's native tolerances, special oracles and time limits.
 
@@ -41,11 +41,15 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
 
 ## Prompting
 
-- Implemented in `benchmark_utils/evalplus.py`, shared with MBPP+
-- Uses chat-style prompt with explicit sections:
-  - system instruction for Python code completion
-  - user sections: `### Question`, `### Format`, `### Answer`
-- `### Format` asks for short reasoning plus completed function inside a fenced Python block.
+- Shared with HumanEval+, MBPP+ and LiveCodeBench in `benchmark_utils/code_prompt.py`.
+  It is the AetherRL training prompt (`data/process_code.py` `code_prompt`) verbatim:
+  a single user turn with no system message:
+  `### Question:` + the question, then `### Format:` + "Please think step by step, then
+  write the complete solution." + an interface line + "Put the final solution in one
+  Python code block:" and a ```` ```python ```` block.
+- Interface line: "Return the completed Python function(s), preserving the requested names
+  and signatures. The tested callable is `<entry_point>`."; the code block holds
+  `# YOUR CODE HERE`.
 - The framework applies the model chat template.
 
 ## Metrics

@@ -8,28 +8,11 @@ from typing import Any
 
 from aethereval.core.io import read_jsonl
 from aethereval.core.types import Sample
+from benchmark_utils.code_prompt import build_code_prompt
 
 
 TASK_NAME = "livecodebench"
 DATA_FILE = "data/eval.jsonl"
-
-_SYSTEM_PROMPT = (
-    "You are an expert Python programmer. "
-    "You will be given a question (problem specification) and will generate a correct "
-    "Python program that matches the specification and passes all tests."
-)
-
-_FORMATTING_MESSAGE_WITH_STARTER_CODE = (
-    "You will use the following starter code to write the solution to the problem "
-    "and enclose your code within delimiters."
-)
-
-_FORMATTING_WITHOUT_STARTER_CODE = (
-    "Read the inputs from stdin solve the problem and write the answer to stdout "
-    "(do not directly test on the sample inputs). Enclose your code within delimiters "
-    "as follows. Ensure that when the python program runs, it reads the inputs, runs "
-    "the algorithm and writes output to STDOUT."
-)
 
 
 def _ensure_str_list(value: Any, key: str, sample_id: str) -> list[str]:
@@ -175,19 +158,12 @@ def load_samples(task_dir: Path) -> list[Sample]:
 
 
 def build_prompt(sample: Sample) -> list[dict[str, str]]:
-    # Official generic chat template: lcb_runner/prompts/code_generation.py
-    # (get_generic_question_template_answer), with SYSTEM_MESSAGE_GENERIC.
+    # AetherRL's code prompt. Functional problems show their starter code in place of
+    # the placeholder, as the official template does, so the class and signature are given.
     question = str(sample.data["question_content"])
     starter_code = str(sample.data.get("starter_code", ""))
-    user_prompt = f"### Question:\n{question}\n\n"
-    if starter_code:
-        user_prompt += f"### Format: {_FORMATTING_MESSAGE_WITH_STARTER_CODE}\n"
-        user_prompt += f"```python\n{starter_code}\n```\n\n"
-    else:
-        user_prompt += f"### Format: {_FORMATTING_WITHOUT_STARTER_CODE}\n"
-        user_prompt += "```python\n# YOUR CODE HERE\n```\n\n"
-    user_prompt += "### Answer: (use the provided format with backticks)\n\n"
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
+    if not starter_code:
+        return build_code_prompt(question, stdin=True)
+    return build_code_prompt(
+        question, fn_name=sample.data.get("fn_name"), code_template=starter_code
+    )

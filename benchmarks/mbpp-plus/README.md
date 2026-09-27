@@ -22,9 +22,11 @@ aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
 
 ## Official source and protocol
 
-- Prompt uses the same short-reasoning-then-fenced-code format as our HumanEval+
-  task (shared in `benchmark_utils/evalplus.py`, with Base/Plus execution and
-  aggregation), with `### Question`, `### Format`, and `### Answer` sections. The question
+- Prompt is the AetherRL code-training prompt shared with HumanEval+ and
+  LiveCodeBench (`benchmark_utils/code_prompt.py`): one user turn, no system message,
+  "Please think step by step, then write the complete solution.", the function
+  interface line naming the tested callable, and one fenced Python block. Base/Plus
+  execution and aggregation are shared with HumanEval+ in `benchmark_utils/evalplus.py`. The question
   retains MBPP+'s original specification and examples; no reference solution or
   private test inputs are included. There is no assistant/code prefill.
   The local backend applies the model's chat template. This is a local reasoning

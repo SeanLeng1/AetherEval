@@ -1139,21 +1139,21 @@ class MetricsTests(unittest.TestCase):
                 "outputs": ["1"],
             },
         )
+        # AetherRL's code prompt (data/process_code.py code_prompt): one user turn.
         prompt_no_starter = bundle.task_module.build_prompt(sample_no_starter)
-        self.assertEqual(prompt_no_starter[0]["role"], "system")
-        self.assertIn(
-            "question (problem specification) and will generate a correct Python program",
-            prompt_no_starter[0]["content"],
-        )
-        self.assertIn("### Question:", prompt_no_starter[1]["content"])
-        self.assertIn(
-            "### Format: Read the inputs from stdin solve the problem",
-            prompt_no_starter[1]["content"],
-        )
-        self.assertNotIn("reasoning", prompt_no_starter[1]["content"])
-        self.assertIn(
-            "### Answer: (use the provided format with backticks)",
-            prompt_no_starter[1]["content"],
+        self.assertEqual(
+            prompt_no_starter,
+            [{
+                "role": "user",
+                "content": (
+                    "### Question:\nGiven n, print n.\n\n### Format:\n"
+                    "Please think step by step, then write the complete solution. "
+                    "Read input from stdin and write the answer to stdout; "
+                    "do not hard-code the examples.\n"
+                    "Put the final solution in one Python code block:\n"
+                    "```python\n# YOUR CODE HERE\n```"
+                ),
+            }],
         )
 
         sample_with_starter = Sample(
@@ -1169,11 +1169,14 @@ class MetricsTests(unittest.TestCase):
             },
         )
         prompt_with_starter = bundle.task_module.build_prompt(sample_with_starter)
-        self.assertIn(
-            "### Format: You will use the following starter code to write the solution",
-            prompt_with_starter[1]["content"],
-        )
-        self.assertIn("class Solution:", prompt_with_starter[1]["content"])
+        self.assertEqual(len(prompt_with_starter), 1)
+        self.assertTrue(prompt_with_starter[0]["content"].endswith(
+            "Please think step by step, then write the complete solution. "
+            "Return the completed Python function(s), preserving the requested names and "
+            "signatures. The tested callable is `add`.\n"
+            "Put the final solution in one Python code block:\n"
+            "```python\nclass Solution:\n    def add(self, a, b):\n        pass\n```"
+        ))
 
     @requires("evalplus")
     def test_mbpp_plus_offline_scoring(self) -> None:
@@ -1200,8 +1203,9 @@ class MetricsTests(unittest.TestCase):
             humaneval = load_task("humaneval-plus")
             expected = humaneval.task_module.build_prompt(samples[0])
             self.assertEqual(prompt, expected)
-            self.assertIn("Provide a SHORT reasoning", prompt[1]["content"])
-            self.assertEqual([message["role"] for message in prompt], ["system", "user"])
+            self.assertEqual([message["role"] for message in prompt], ["user"])
+            self.assertIn("Please think step by step, then write the complete solution.",
+                          prompt[0]["content"])
 
         sample = Sample(id="Mbpp/99999", data={
             "prompt": "", "entry_point": "f", "canonical_solution": "def f(x): return x",
@@ -1249,19 +1253,21 @@ class MetricsTests(unittest.TestCase):
         )
 
         prompt = bundle.task_module.build_prompt(sample)
-        self.assertIsInstance(prompt, list)
-        self.assertEqual(prompt[0]["role"], "system")
-        self.assertEqual(prompt[1]["role"], "user")
-        self.assertIn("### Question:", prompt[1]["content"])
-        self.assertIn("### Format:", prompt[1]["content"])
-        self.assertIn(
-            "Provide a SHORT reasoning on how to solve the task", prompt[1]["content"]
+        self.assertEqual(
+            prompt,
+            [{
+                "role": "user",
+                "content": (
+                    '### Question:\ndef add(a, b):\n    """Return sum of two numbers."""\n\n'
+                    "### Format:\n"
+                    "Please think step by step, then write the complete solution. "
+                    "Return the completed Python function(s), preserving the requested names "
+                    "and signatures. The tested callable is `add`.\n"
+                    "Put the final solution in one Python code block:\n"
+                    "```python\n# YOUR CODE HERE\n```"
+                ),
+            }],
         )
-        self.assertIn("# YOUR CODE HERE", prompt[1]["content"])
-        self.assertIn(
-            "### Answer: (use the provided format with backticks)", prompt[1]["content"]
-        )
-        self.assertIn(sample.data["prompt"], prompt[1]["content"])
 
         scored = metrics_module.score_generation(
             sample,

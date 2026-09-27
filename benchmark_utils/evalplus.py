@@ -11,33 +11,17 @@ from typing import Any, Callable
 from aethereval.core.types import GenerationRecord, Sample
 from aethereval.metrics.common import aggregate_binary_results, mean, mean_stderr, to_records
 
+from .code_prompt import build_code_prompt
+
 
 SCORING_PROTOCOL = "evalplus-26d6d00"
 
 
 def build_prompt(sample: Sample) -> list[dict[str, str]]:
-    # Short reasoning plus fenced code; no assistant/code prefill.
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are an expert Python programmer. "
-                "You will be given a function specification and must return a correct completed "
-                "Python function that passes all tests."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"### Question:\n{sample.data['prompt']}\n\n"
-                "### Format:\n"
-                "Provide a SHORT reasoning on how to solve the task, then return the completed "
-                "function enclosed in a Python code block as:\n"
-                "```python\n# YOUR CODE HERE\n```\n\n"
-                "### Answer: (use the provided format with backticks)\n\n"
-            ),
-        },
-    ]
+    # AetherRL's code prompt; no assistant/code prefill.
+    return build_code_prompt(
+        str(sample.data["prompt"]), fn_name=str(sample.data["entry_point"])
+    )
 
 
 def _deserialize(dataset: str, task_id: str, inputs: Any) -> Any:

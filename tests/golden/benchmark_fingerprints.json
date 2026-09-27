@@ -46,7 +46,7 @@
   },
   "humaneval-plus": {
     "count": 164,
-    "prompt_sha256": "f4abf65afabff29ce4627e98d7ad78c22f40127c5d0535b0baad67a36630cac0",
+    "prompt_sha256": "a59e45d180da02ec2dc8bfacd38db7c1d8dbb38766706c8b1b350bf1bc26736d",
     "sample_sha256": "ecfbfd4c2cfb95790e03ae22b29abfa1f4af1d8e943039ebf73408cb23001290"
   },
   "ifbench": {
@@ -61,7 +61,7 @@
   },
   "livecodebench": {
     "count": 175,
-    "prompt_sha256": "c46487877e479c93b8dd4104cd25bdda9c9433d33985f5dcb8294853f3b6293b",
+    "prompt_sha256": "ac4ff8d3e0860a0efa3e0af27308178b903cb8fb71e3d6830e6b8b475b734846",
     "sample_sha256": "6eae80d083a7513fc18007fe82c28d49ec60dde0016d5842a4213f6322469d8a"
   },
   "llmeval-med": {
@@ -76,7 +76,7 @@
   },
   "mbpp-plus": {
     "count": 378,
-    "prompt_sha256": "4155f0215cf1ab987a310d8097b3ba3c49798228b49ad93c59d19b9a5bd0e5c5",
+    "prompt_sha256": "3d14c36a986231a5e2981040f0429d38c58dafeccda3d43bc4322e8592bd6740",
     "sample_sha256": "711acbb48c4f2915d75022d1ce8802857b7d55f198d7fa7b35e7034dbfb71293"
   },
   "minerva": {
