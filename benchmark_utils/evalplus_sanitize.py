@@ -55,4 +55,11 @@ def code_extract(text: str) -> str:
 
 # sanitize() looks code_extract up as a module global.
 _upstream.code_extract = code_extract
-sanitize = _upstream.sanitize
+def sanitize(code: str, entrypoint: str | None = None) -> str:
+    """Upstream sanitize, or "" when the code nests too deeply for its recursive
+    dependency walk (e.g. a thousand-term ``a + b + ...``); an empty solution then
+    fails every test instead of aborting the evaluation."""
+    try:
+        return _upstream.sanitize(code, entrypoint=entrypoint)
+    except RecursionError:
+        return ""

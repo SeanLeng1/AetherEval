@@ -21,6 +21,18 @@ def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
     prompt = str(sample.data["prompt"])
     entry_point = str(sample.data["entry_point"])
     joiner = "" if prompt.endswith("\n") else "\n"
+    try:
+        code, full_solution = _assemble_blocks(generation, prompt, joiner, entry_point)
+    except RecursionError:
+        # Code nested too deeply for ast (e.g. a thousand-term expression): use
+        # EvalPlus's own extraction on the whole response.
+        code, full_solution = generation, False
+    return prompt + joiner + "\n" + sanitize(code, entrypoint=entry_point), full_solution
+
+
+def _assemble_blocks(
+    generation: str, prompt: str, joiner: str, entry_point: str
+) -> tuple[str, bool]:
     blocks = [
         body
         for tag, body in _CODE_BLOCK_RE.findall(generation)
@@ -63,8 +75,7 @@ def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
                 continue
             seen.add(node.name)
         kept.append(node)
-    code = ast.unparse(ast.Module(body=list(reversed(kept)), type_ignores=[]))
-    return prompt + joiner + "\n" + sanitize(code, entrypoint=entry_point), full_solution
+    return ast.unparse(ast.Module(body=list(reversed(kept)), type_ignores=[])), full_solution
 
 
 def score_generation(sample: Sample, generation: str) -> dict[str, Any]:

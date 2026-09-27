@@ -1414,6 +1414,37 @@ class MetricsTests(unittest.TestCase):
                 self.assertEqual(metrics_module.score_generation(sample, generation)["score"], 0.0)
 
     @requires("evalplus")
+    @requires("evalplus")
+    def test_humaneval_plus_survives_code_too_deep_for_ast(self) -> None:
+        from benchmark_utils.evalplus_sanitize import sanitize
+
+        metrics_module = load_task("humaneval_plus").metrics_module
+        sample = Sample(
+            id="HumanEval/test_deep",
+            gold=None,
+            meta={"entry_point": "add"},
+            data={
+                "task_id": "HumanEval/test_deep",
+                "prompt": 'def add(a, b):\n    """Return sum of two numbers."""\n',
+                "entry_point": "add",
+                "canonical_solution": "    return a + b\n",
+                "base_input": [[1, 2], [3, 4]],
+                "plus_input": [[-1, 1], [10, -3]],
+                "atol": 0.0,
+            },
+        )
+        deep = " + ".join(["a"] * 3000)
+        # ast.unparse and EvalPlus's recursive dependency walk both exceed the
+        # recursion limit on such code; scoring must not abort the evaluation.
+        self.assertEqual(sanitize(f"def add(a, b):\n    return {deep}\n", entrypoint="add"), "")
+        correct_plus_example = (
+            "```python\ndef add(a, b):\n    return a + b\n```\n"
+            f"```python\nx = 1\ny = {deep}\n```"
+        )
+        self.assertEqual(metrics_module.score_generation(sample, correct_plus_example)["score"], 1.0)
+        deep_solution = f"```python\ndef add(a, b):\n    return {deep}\n```"
+        self.assertEqual(metrics_module.score_generation(sample, deep_solution)["score"], 0.0)
+
     def test_humaneval_plus_skips_non_python_fences(self) -> None:
         metrics_module = load_task("humaneval_plus").metrics_module
         sample = Sample(
