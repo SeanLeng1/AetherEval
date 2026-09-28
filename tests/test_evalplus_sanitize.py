@@ -53,5 +53,57 @@ class EvalPlusCodeExtractTests(unittest.TestCase):
                     )
 
 
+    def test_tail_probe_matches_upstream_on_longer_mixed_texts(self) -> None:
+        from benchmark_utils import evalplus_sanitize
+
+        upstream = evalplus_sanitize.UPSTREAM_CODE_EXTRACT
+        pool = ["x=1", "", "    ", "def f():", "    return 1", "(", ")", "```python",
+                "The answer is:", "- first item", "1. step one", "if True:", "else:",
+                "import os", "assert f(1) == 2", '"""', "'''", "@wraps", "x)", "# note",
+                "    # indented comment", "print(", "return 1", "\\", "y = [", "]",
+                'f"{x', 'f"{x}"', "match x:", "    case 1:", "try:", "finally:"]
+        rnd = random.Random(7)
+        for _ in range(200):
+            text = "\n".join(rnd.choices(pool, k=rnd.randint(5, 32)))
+            self.assertEqual(evalplus_sanitize.code_extract(text), upstream(text), repr(text))
+
+    def test_degenerate_prose_response_is_extracted_quickly(self) -> None:
+        import time
+
+        from benchmark_utils import evalplus_sanitize
+
+        # Upstream (and the previous pruned version) scan this shape cubically:
+        # 480 prose lines already took ~4 s, and a real 16k-token truncated
+        # response stalled MBPP+ rescoring for hours.
+        prose = ["The answer is:", "It follows that the result holds.",
+                 "- see the step above", "1. rewrite the loop as follows"]
+        code = "def solve(x):\n    y = x + 1\n    return y * 2"
+        rnd = random.Random(1)
+        lines = [rnd.choice(prose) for _ in range(2000)]
+        lines[1000:1000] = code.split("\n")
+        started = time.monotonic()
+        self.assertEqual(evalplus_sanitize.code_extract("\n".join(lines)), code)
+        self.assertLess(time.monotonic() - started, 30.0)
+
+    def test_parse_budget_keeps_the_best_span_found_so_far(self) -> None:
+        import contextlib
+        import io
+        from unittest import mock
+
+        from benchmark_utils import evalplus_sanitize
+
+        text = "x = 1\ny = 2\nThe answer is:\nz = 3"
+        with mock.patch.object(evalplus_sanitize, "_PARSE_BUDGET_CHARS", 1):
+            log = io.StringIO()
+            with contextlib.redirect_stdout(log):
+                out = evalplus_sanitize.code_extract(text)
+        self.assertEqual(out, "x = 1")  # upstream's default span, nothing confirmed yet
+        self.assertIn("parse budget", log.getvalue())
+        self.assertEqual(
+            evalplus_sanitize.code_extract(text),
+            evalplus_sanitize.UPSTREAM_CODE_EXTRACT(text),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

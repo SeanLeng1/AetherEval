@@ -39,10 +39,10 @@ aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
   fit the prompt; EOS can end generation before the ceiling.
 - Use the official `sanitize`, `mbpp_deserialize_inputs`, and
   `untrusted_check(dataset="mbpp")`, including special oracles and official time limits.
-  `sanitize` runs with an output-identical, pruned `code_extract`
-  (`benchmark_utils/evalplus_sanitize.py`) that avoids upstream's cubic scan when
-  the code runs to near the end, e.g. assert floods or unclosed fences; code
-  followed by long prose is as slow as upstream. A differential test checks it
+  `sanitize` runs with an output-identical, bounded `code_extract`
+  (`benchmark_utils/evalplus_sanitize.py`) that avoids upstream's cubic scan, which
+  can grind for hours on a degenerate truncated response; a deterministic parse
+  budget backstops adversarial inputs, and a differential test checks the result
   against upstream.
   Reference execution also honors `MBPP_OUTPUT_NOT_NONE_TASKS`.
   This revision uses a 4-second minimum per-test time limit (0.3.1 used 1 second);

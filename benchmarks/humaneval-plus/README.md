@@ -60,10 +60,9 @@ Each row keeps EvalPlus fields (`task_id`, `prompt`, `entry_point`, `canonical_s
   - assemble imports, helpers and definitions across code blocks, retaining the
     last function/class definition and dropping top-level usage examples, then use
     EvalPlus `sanitize(..., entrypoint=...)` to retain the implementation dependencies
-    (`benchmark_utils/evalplus_sanitize.py` swaps in an output-identical, pruned
-    `code_extract` that avoids upstream's cubic scan when the code runs to near the
-    end, e.g. assert floods or unclosed fences; code followed by long prose is as
-    slow as upstream; a differential test checks it against upstream)
+    (`benchmark_utils/evalplus_sanitize.py` swaps in an output-identical, bounded
+    `code_extract` that avoids upstream's cubic scan, which can grind for hours on
+    a degenerate truncated response; a differential test checks it against upstream)
   - indented function bodies are parsed as `prompt + body`; the final body can
     replace an earlier complete draft, while prompt imports/helpers remain available
   - compute reference outputs from the canonical solution (cached per process)

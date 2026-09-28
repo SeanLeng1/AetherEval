@@ -23,9 +23,9 @@ def _candidate_solution(sample: Sample, generation: str) -> tuple[str, bool]:
     joiner = "" if prompt.endswith("\n") else "\n"
     try:
         code, full_solution = _assemble_blocks(generation, prompt, joiner, entry_point)
-    except RecursionError:
-        # Code nested too deeply for ast (e.g. a thousand-term expression): use
-        # EvalPlus's own extraction on the whole response.
+    except (RecursionError, ValueError):
+        # Code too deep for ast (a thousand-term expression), or a null byte on
+        # Python < 3.12: use EvalPlus's own extraction on the whole response.
         code, full_solution = generation, False
     return prompt + joiner + "\n" + sanitize(code, entrypoint=entry_point), full_solution
 
