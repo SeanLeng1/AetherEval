@@ -368,8 +368,8 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 benchmarks_dir=root,
                 metric_options={"probe": "ok"},
             )
-        self.assertEqual(result["results"]["hooked"]["primary_score"], 1.0)
-        self.assertEqual(resumed["results"]["hooked"]["primary_score"], 1.0)
+        self.assertEqual(result["results"]["hooked"]["primary_score"], 100.0)
+        self.assertEqual(resumed["results"]["hooked"]["primary_score"], 100.0)
 
     def test_llmeval_med_builds_prior_turn_history(self) -> None:
         bundle = load_task("llmeval_med", BENCHMARKS)

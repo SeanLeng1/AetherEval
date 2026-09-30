@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .io import write_json
+from .primary_score import normalize_task_summary
 
 
 def phase_name(*, generate_only: bool, eval_only: bool) -> str:
@@ -57,9 +58,17 @@ def _mean_numeric_metrics(
 
 
 def _mean_primary_score(task_summaries: dict[str, dict[str, Any]]) -> float | None:
+    if any(not summary.get("evaluation_complete") for summary in task_summaries.values()):
+        return None
+    bounded = [
+        summary for summary in task_summaries.values()
+        if summary.get("primary_score_scale") is not None
+    ]
+    if any(summary.get("primary_score") is None for summary in bounded):
+        return None
     values = [
         float(summary["primary_score"])
-        for summary in task_summaries.values()
+        for summary in bounded
         if isinstance(summary.get("primary_score"), (int, float))
     ]
     return sum(values) / len(values) if values else None
@@ -76,6 +85,11 @@ def build_run_summary(
     phase: str,
     task_summaries: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    task_summaries = {
+        name: normalize_task_summary(task_summary)
+        for name, task_summary in task_summaries.items()
+    }
+    missing_tasks = set(selected_tasks) - set(task_summaries)
     summary = {
         "run_id": run_id,
         "selected_tasks": selected_tasks,
@@ -89,10 +103,22 @@ def build_run_summary(
             task_name: {
                 "metric": task_summary.get("primary_metric"),
                 "score": task_summary.get("primary_score"),
+                "raw_score": task_summary.get("raw_primary_score"),
             }
             for task_name, task_summary in task_summaries.items()
         },
-        "primary_score_aggregate": _mean_primary_score(task_summaries),
+        "primary_score_aggregate": (
+            None if missing_tasks else _mean_primary_score(task_summaries)
+        ),
+        "primary_score_unit": "percent",
+        "primary_score_aggregate_tasks": sorted(
+            name for name, item in task_summaries.items()
+            if item.get("primary_score_scale") is not None
+        ),
+        "primary_score_excluded_tasks": sorted(
+            name for name, item in task_summaries.items()
+            if item.get("primary_score_scale") is None
+        ),
         "summary": {
             "num_tasks": len(task_summaries),
             "metrics": _mean_numeric_metrics(task_summaries),

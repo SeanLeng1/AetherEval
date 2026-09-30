@@ -205,6 +205,14 @@ The candidate backend starts only when a task has generations left, so a rerun o
 finished run never loads the model. Use `--overwrite` to discard old predictions and
 rerun from scratch.
 
+Resuming generation requires the same model and sampling settings. When new
+generations remain, the generation backend and its options must also match.
+Each task saves a fingerprint of sample IDs, golds, metadata, data and built
+prompts, and rejects changed inputs in both resume and `--eval-only`. Legacy
+runs without a fingerprint check saved prompts and golds before reuse. The
+generation manifest is written before inference so interrupted runs retain
+their provenance. Use a new run directory for a different model or protocol.
+
 A normal native-task run uses the same two phases automatically: it completes
 generation for every selected native task, unloads the candidate backend, and
 then evaluates every task. This ordering is shared by API judges, local judges,
@@ -394,6 +402,11 @@ Prompt handling:
 Recommended:
 
 - `PRIMARY_METRIC: str` (used by runner to surface report metric in `summary.json`)
+- `PRIMARY_SCORE_SCALE: float | None`: multiplier from the native primary metric
+  to 0–100 (`100.0` for a fraction, `1.0` for a percentage). Built-in metric names
+  have known defaults. Custom metric names require an explicit scale to enter
+  the run mean; `None` keeps an unbounded reward/utility only as a raw value.
+
 Batch scoring takes precedence when both entry points exist. Batch-only RM and
 judge tasks do not need a placeholder `score_generation`. The returned outer list
 must align with `generation_outputs`; each inner list aligns with its `generations`.
@@ -709,7 +722,7 @@ Per run (`<run-id>` only when `--run-id` is given):
 
 `summary.json` is task-level aggregate, and includes:
 
-- `metrics`: full metric dict from task aggregate
+- `metrics`: full metric dict from task aggregate, in the benchmark's native units
 - `metrics.avg_prompt_tokens` / `metrics.avg_response_tokens`: model-tokenized
   average prompt and response lengths
 - `token_usage`: average and total prompt/response token counts
@@ -723,16 +736,29 @@ Per run (`<run-id>` only when `--run-id` is given):
   Legacy predictions without finish reasons remain unknown on resume/rescoring.
   Repeats pool completed responses; the run summary retains task-macro averaging.
 - `primary_metric`: report metric name
-- `primary_score`: report metric value
+- `raw_primary_score`: primary metric in its native units
+- `primary_score_scale`: multiplier from the raw metric to 0–100
+- `primary_score`: report metric on 0–100; `null` for unbounded rewards/utilities
+  and custom metrics without a declared scale. Invalid values fail rather than
+  being silently clipped. Existing percentage metrics are not scaled again.
 
 `run_summary.json` is run-level summary:
 
 - `results`: all per-task summaries in the run directory, native and external,
   including tasks from earlier invocations
 - `phase`: the phase this invocation requested (`generate_and_eval` for a normal run)
-- `primary_scores`: each task's primary metric name/value
-- `primary_score_aggregate`: mean of task `primary_score` values (direct average across tasks)
-- `summary.metrics`: average of same metric names across tasks
+- `primary_scores`: each task's primary metric name, percentage `score` and native `raw_score`
+- `primary_score_unit`: `percent`
+- `primary_score_aggregate`: mean of bounded task primary scores on 0–100;
+  `null` while any selected task is missing or any task's evaluation is incomplete
+- `primary_score_aggregate_tasks` / `primary_score_excluded_tasks`: tasks included
+  in the mean / excluded because their primary metric has no bounded scale
+- `summary.metrics`: average of same metric names across tasks, in native units;
+  this diagnostic dictionary is not a combined percentage score
+
+Loading legacy task summaries normalizes their primary scores when building
+`run_summary.json`; saved native `metrics` remain compatible with report tables
+that already apply their own benchmark-specific scaling.
 
 ## Git LFS
 

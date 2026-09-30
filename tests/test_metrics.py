@@ -1007,6 +1007,33 @@ class MetricsTests(unittest.TestCase):
         self.assertTrue(scored["is_pass"])
         self.assertEqual(scored["parsed"]["passed_tests"], 1)
 
+    def test_livecodebench_caught_timeout_still_matches_official_stdout(self) -> None:
+        sample = Sample(
+            id="caught_timeout", data={"inputs": [""], "outputs": ["42\n"],
+                                       "fn_name": None, "timeout_sec": 2},
+        )
+        candidate = (
+            "```python\nimport signal\n"
+            "try:\n    signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)\n"
+            "except Exception:\n    print(42)\n```"
+        )
+        result = load_task("livecodebench").metrics_module.score_generation(sample, candidate)
+        self.assertEqual(result["score"], 0.0)
+        self.assertEqual(result["parsed"]["statuses"], [-2])
+
+    def test_livecodebench_timeout_exception_has_official_empty_message(self) -> None:
+        sample = Sample(
+            id="timeout_message", data={"inputs": ["0"], "outputs": ["0"],
+                                       "fn_name": "solve", "timeout_sec": 2},
+        )
+        candidate = (
+            "```python\nimport signal\ndef solve(unused):\n"
+            "    try:\n        signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)\n"
+            "    except Exception as exc:\n        return 0 if str(exc) == '' else 1\n```"
+        )
+        result = load_task("livecodebench").metrics_module.score_generation(sample, candidate)
+        self.assertEqual(result["score"], 1.0)
+
     def test_livecodebench_aggregate(self) -> None:
         bundle = load_task("livecodebench")
         metrics_module = bundle.metrics_module

@@ -24,6 +24,7 @@ from .io import (
     write_jsonl,
 )
 from .run_summary import build_run_summary, load_task_summaries, phase_name
+from .primary_score import primary_score_fields, primary_score_scale
 from .task_register import (
     BENCHMARKS_DIR,
     _load_module_from_path,
@@ -684,6 +685,18 @@ def _outputs_to_records(
     return records
 
 
+def _task_fingerprint(task_module: Any, samples: list[Sample]) -> str:
+    digest = hashlib.sha256()
+    for sample in samples:
+        payload = [
+            sample.id, sample.gold, sample.meta, sample.data,
+            _to_chat_prompt(task_module.build_prompt(sample)),
+        ]
+        digest.update(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _run_single_task(
     *,
     task_name: str,
@@ -721,10 +734,7 @@ def _run_single_task(
     run_config_path = task_output_dir / "run_config.json"
 
     prior_run_config: dict[str, Any] = {}
-    if (
-        (eval_only or (hasattr(task_module, "load_protocol") and not overwrite))
-        and run_config_path.exists()
-    ):
+    if not overwrite and run_config_path.exists():
         with run_config_path.open("r", encoding="utf-8") as f:
             loaded_run_config = json.load(f)
         if not isinstance(loaded_run_config, dict):
@@ -762,19 +772,23 @@ def _run_single_task(
             resolve_task_default_gen(task_name), gen_overrides
         )
     chat_template_kwargs = chat_template_kwargs_from_generation_config(gen_cfg)
-
-    if protocol is not None:
-        # Persist before generation so interrupted runs retain their protocol.
-        write_json(
-            run_config_path,
-            {
-                **run_config_common,
-                **prior_run_config,
-                "task": task_name,
-                "generation_config": gen_cfg,
-                "protocol": protocol,
-            },
-        )
+    task_fingerprint = _task_fingerprint(task_module, samples)
+    if predictions_path.exists() and not overwrite:
+        if not isinstance(saved_gen_cfg, dict):
+            raise ValueError(f"[{task_name}] saved predictions have no generation config; use a new run directory")
+        if not eval_only:
+            conflicts = {
+                key: {"saved": prior_run_config.get(key), "requested": run_config_common.get(key)}
+                for key in ("model", "model_name")
+                if prior_run_config.get(key) != run_config_common.get(key)
+            }
+            if saved_gen_cfg != gen_cfg:
+                conflicts["generation_config"] = {"saved": saved_gen_cfg, "requested": gen_cfg}
+            if conflicts:
+                raise ValueError(f"[{task_name}] resume generation settings differ: {conflicts}; use a new run directory")
+        saved_fingerprint = prior_run_config.get("task_fingerprint")
+        if saved_fingerprint is not None and saved_fingerprint != task_fingerprint:
+            raise ValueError(f"[{task_name}] saved task data or prompts differ; use a new run directory")
 
     n = int(gen_cfg["n"])
     _info(
@@ -810,6 +824,11 @@ def _run_single_task(
                     f"[{task_name}] existing prediction contains backend error for "
                     f"sample_id={record.sample_id} gen_idx={record.gen_idx}: {record.error}"
                 )
+            if prior_run_config.get("task_fingerprint") is None:
+                sample = samples_by_id[record.sample_id]
+                expected_prompt = _to_chat_prompt(task_module.build_prompt(sample))
+                if record.gold != sample.gold or record.prompt != expected_prompt:
+                    raise ValueError(f"[{task_name}] saved prediction prompt or gold differs; use a new run directory")
             dedup[(record.sample_id, record.gen_idx)] = record
         existing_records = list(dedup.values())
 
@@ -840,6 +859,32 @@ def _run_single_task(
         f"[{task_name}] existing_records={len(existing_records)} pending_samples={len(pending_inputs)} "
         f"pending_records={pending_record_count}"
     )
+
+    if generate_only and existing_records and pending_record_count:
+        conflicts = {
+            key: {"saved": prior_run_config.get(key), "requested": run_config_common.get(key)}
+            for key in ("backend", "backend_kwargs")
+            if prior_run_config.get(key) != run_config_common.get(key)
+        }
+        if conflicts:
+            raise ValueError(f"[{task_name}] resume generation settings differ: {conflicts}; use a new run directory")
+
+    # Preserve generation provenance when a backend is supplied only for scoring.
+    task_run_config = (
+        dict(prior_run_config)
+        if prior_run_config and (eval_only or not pending_record_count)
+        else dict(run_config_common)
+    )
+    if generate_only:
+        # Write before inference so interrupted runs retain their data and settings.
+        task_run_config.update({
+            "task": task_name,
+            "generation_config": gen_cfg,
+            "task_fingerprint": task_fingerprint,
+        })
+        if protocol is not None:
+            task_run_config["protocol"] = protocol
+        write_json(run_config_path, task_run_config)
 
     if eval_only and pending_record_count:
         missing_examples = [
@@ -1082,8 +1127,10 @@ def _run_single_task(
         and not generate_only,
         "metrics": metrics,
         "token_usage": token_usage,
-        "primary_metric": primary_metric,
-        "primary_score": primary_score,
+        **primary_score_fields(
+            primary_metric, primary_score,
+            scale=getattr(metrics_module, "PRIMARY_SCORE_SCALE", primary_score_scale(primary_metric)),
+        ),
         "warnings": warnings,
     }
     _info(
@@ -1094,16 +1141,12 @@ def _run_single_task(
     if warnings:
         _info(f"[{task_name}] warnings={warnings}")
 
-    task_run_config = (
-        dict(prior_run_config)
-        if eval_only and prior_run_config
-        else dict(run_config_common)
-    )
     task_run_config.update(
         {
             "task": task_name,
             "task_dir": str(task_dir),
             "generation_config": gen_cfg,
+            "task_fingerprint": task_fingerprint,
             "metric_options": {
                 **{
                     key: value
@@ -1374,8 +1417,10 @@ def _run_repeated_task(
         ),
         "metrics": metrics,
         "token_usage": token_usage,
-        "primary_metric": primary_metric,
-        "primary_score": primary_score,
+        **primary_score_fields(
+            primary_metric, primary_score,
+            scale=getattr(metrics_module, "PRIMARY_SCORE_SCALE", primary_score_scale(primary_metric)),
+        ),
         "warnings": warnings,
         "repeats": repeat_metadata,
     }

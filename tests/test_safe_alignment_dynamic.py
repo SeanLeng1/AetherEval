@@ -177,8 +177,9 @@ class DynamicAlignmentTests(unittest.TestCase):
         self.assertEqual(first["n"], 4)
         self.assertEqual(first["total_records"], len(self.samples) * 4)
         self.assertTrue(first["evaluation_complete"])
-        self.assertEqual(first["primary_score"], 1.5)
-        self.assertEqual(second["primary_score"], first["primary_score"])
+        self.assertEqual(first["raw_primary_score"], 1.5)
+        self.assertIsNone(first["primary_score"])
+        self.assertEqual(second["raw_primary_score"], first["raw_primary_score"])
         config = json.loads((self.root / "run/run_config.json").read_text())
         self.assertEqual(config["protocol"], protocol())
         for line in (self.root / "run/predictions.jsonl").read_text().splitlines():

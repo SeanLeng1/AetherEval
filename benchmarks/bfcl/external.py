@@ -1161,8 +1161,16 @@ def _write_summary(
         "verbose": spec.verbose,
         "metrics": metrics,
         **prediction_stats,
+        "generation_complete": bool(prediction_stats["prediction_records"]),
+        "evaluation_complete": bool(
+            spec.run_evaluation
+            and prediction_stats["prediction_records"]
+            and prediction_stats["prediction_records"] == prediction_stats["prediction_scored_records"]
+        ),
         "primary_metric": primary_metric,
         "primary_score": primary_score,
+        "raw_primary_score": primary_score,
+        "primary_score_scale": 1.0,
     }
     with open(out / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)

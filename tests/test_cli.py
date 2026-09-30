@@ -263,7 +263,10 @@ class ExternalCliTests(unittest.TestCase):
             ) as run_phase:
                 actual = run_selected_tasks(args, resolved)
 
-        self.assertEqual(actual["results"], result["results"])
+        self.assertEqual(
+            {name: item["metrics"] for name, item in actual["results"].items()},
+            {name: item["metrics"] for name, item in result["results"].items()},
+        )
         self.assertEqual(run_phase.call_count, 2)
         generate_call = run_phase.call_args_list[0].kwargs
         evaluate_call = run_phase.call_args_list[1].kwargs
@@ -304,7 +307,10 @@ class ExternalCliTests(unittest.TestCase):
             ) as run_phase:
                 actual = run_selected_tasks(args, resolved)
 
-        self.assertEqual(actual["results"], result["results"])
+        self.assertEqual(
+            {name: item["metrics"] for name, item in actual["results"].items()},
+            {name: item["metrics"] for name, item in result["results"].items()},
+        )
         self.assertEqual(run_phase.call_count, 2)
         generate_call = run_phase.call_args_list[0].kwargs
         evaluate_call = run_phase.call_args_list[1].kwargs
@@ -322,8 +328,10 @@ class ExternalCliTests(unittest.TestCase):
     def test_run_summary_lists_every_task_whatever_the_invocation_order(
         self,
     ) -> None:
-        ifeval = {"metrics": {"acc": 1.0}, "primary_score": 1.0}
-        bfcl = {"metrics": {"overall_acc": 50.0}, "primary_score": 50.0}
+        ifeval = {"metrics": {"acc": 1.0}, "primary_metric": "acc",
+                  "primary_score": 1.0, "evaluation_complete": True}
+        bfcl = {"metrics": {"overall_acc": 50.0}, "primary_metric": "overall_acc",
+                "primary_score": 50.0, "evaluation_complete": True}
 
         def run_native(**kwargs):  # noqa: ANN003
             run_root = run_output_dir(kwargs["output_dir"], "m", None, None)
@@ -352,7 +360,7 @@ class ExternalCliTests(unittest.TestCase):
 
                 self.assertEqual(summary["tasks"], ["bfcl", "ifeval"])
                 self.assertEqual(summary["phase"], "generate_and_eval")
-                self.assertEqual(summary["primary_score_aggregate"], 25.5)
+                self.assertEqual(summary["primary_score_aggregate"], 75.0)
 
     def test_thinking_mode_flags_are_tri_state(self) -> None:
         parser = build_parser()

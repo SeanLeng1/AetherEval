@@ -26,35 +26,42 @@ Long-reasoning evaluations should explicitly override the output budget and repo
 - Regeneration script: `prepare_data.py`
 
 Rows keep the source `problem` and `solution` fields. The full `solution` text is used
-directly as the gold answer for `math-verify`.
+as the gold answer, with the five symbolic physics repairs described below.
 
 ## Metrics
 
 - Primary metric: `accuracy`
-- Scored with shared `math-verify` logic from `benchmark_utils/`
+- Scored with shared `math-verify` logic from `benchmark_utils/`, except for the
+  five symbolic physics answers below
 - A prediction that does not match is parsed again with unit stripping disabled, as
   Qwen2.5-Math's `skip_unit` does for Minerva. Otherwise trailing variables are dropped
   as units (`\frac{37}{4} m` becomes `37/4`, `\frac{t}{4}\sin 2t` loses its last `t`).
   Other math tasks keep stock `math-verify`.
 - Reports `accuracy@n`, `pass@k`, and parsed-rate metrics when multiple generations are used
 
-### Rows that `math-verify` cannot grade symbolically
+### Symbolic physics grading repairs
 
 `math-verify` 0.9.0 cannot parse subscripted `E_{n}` (it reads `E` as Euler's number),
 `X_{\odot}`, or some products containing `\gamma` (read as the Gamma function).
-The following five rows have known parsing failures or incorrect extractions:
+`symbolic.py` repairs these five rows during scoring:
 
-| Row | Gold | Effect |
+| Row | Gold | Repair |
 |---|---|---|
-| `minervamath_27` | `\frac{dM}{dt}=\frac{10^{5} L_{\odot}}{...} M^{6}` | string comparison only |
-| `minervamath_261` | `\hbar \omega(v+1/2)-\frac{E_{0}^{2} e^{2}}{2 m \omega^{2}}` | incorrectly extracts `\omega` from the full solution; false positives and false negatives |
-| `minervamath_268` | `\frac{1}{3} E_{1}+\frac{2}{3} E_{2}` | string comparison only |
-| `minervamath_269` | `E_{1},E_{2}` | string comparison only |
-| `minervamath_138` | contains `\gamma` | parses to `zoo` |
+| `minervamath_27` | `\frac{dM}{dt}=\frac{10^{5} L_{\odot}}{...} M^{6}` | symbolic solar identifiers; compare the rate or an equivalent linear ODE |
+| `minervamath_261` | `\hbar \omega(v+1/2)-\frac{E_{0}^{2} e^{2}}{2 m \omega^{2}}` | extract the final boxed reference; treat indexed energy and electric charge as variables |
+| `minervamath_268` | `\frac{1}{3} E_{1}+\frac{2}{3} E_{2}` | symbolic indexed energies |
+| `minervamath_269` | `E_{1},E_{2}` | symbolic indexed energies; compare the answer set |
+| `minervamath_138` | contains `\gamma` | treat Lorentz gamma as a variable |
 
-On these rows (5/272, 1.8 points) the score depends on how the answer is typeset, not
-only on whether it is right. Tested equivalent notations did not resolve these
-issues. The data and model output are not rewritten to rename symbols; these
-remain documented scoring limitations, not repaired or uniformly-zero questions.
-The five rows can contribute up to 5/272 (1.84 percentage points) to a model's
-score; this is not a significance threshold for comparisons between models.
+The grader takes the final boxed reference, applies the same temporary symbol
+aliases to the reference and prediction, and compares finite SymPy expressions
+with `math-verify`. It disables unit stripping for these physics expressions.
+It does not fall back to string comparison or award credit for failed parsing.
+The original data, prompts, golds and saved model outputs remain intact, and all
+272 questions remain in the denominator. Regression cases cover algebraically
+equivalent answers and wrong signs, coefficients, missing terms and extra energies.
+
+Re-score saved predictions for **every compared model** with `--eval-only` after
+updating the scorer. Generation does not need to be repeated. The five rows can
+contribute up to 5/272 (1.84 percentage points); this is not a significance
+threshold for comparisons between models.

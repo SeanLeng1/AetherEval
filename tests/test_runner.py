@@ -1153,7 +1153,7 @@ class RunnerTests(unittest.TestCase):
 
             self.assertTrue(close_marker.exists())
             self.assertEqual(
-                result["results"]["batch-toy"]["primary_score"],
+                result["results"]["batch-toy"]["raw_primary_score"],
                 1.0,
             )
 
@@ -1174,7 +1174,10 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertFalse(close_marker.exists())
             self.assertEqual(supplied.calls, 0)
-            self.assertEqual(result["results"]["batch-toy"]["primary_score"], 1.0)
+            self.assertEqual(result["results"]["batch-toy"]["raw_primary_score"], 1.0)
+            self.assertIsNone(result["results"]["batch-toy"]["primary_score"])
+            saved = json.loads((out / "fake-model" / "backend_split" / "batch-toy" / "run_config.json").read_text())
+            self.assertEqual(saved["backend"], "vllm")
 
     def test_run_evaluation_without_phase_flag_generates_then_evaluates(self) -> None:
         from aethereval.core import runner
@@ -1264,7 +1267,7 @@ class RunnerTests(unittest.TestCase):
                 summary["metrics"]["avg_response_tokens"], 1.0, places=6
             )
             self.assertEqual(summary["primary_metric"], "accuracy_first")
-            self.assertAlmostEqual(float(summary["primary_score"]), 1.0, places=6)
+            self.assertAlmostEqual(float(summary["primary_score"]), 100.0, places=6)
             self.assertAlmostEqual(
                 first["summary"]["metrics"]["accuracy_first"],
                 1.0,
@@ -1273,10 +1276,10 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("primary_scores", first)
             self.assertEqual(first["primary_scores"]["toy"]["metric"], "accuracy_first")
             self.assertAlmostEqual(
-                float(first["primary_scores"]["toy"]["score"]), 1.0, places=6
+                float(first["primary_scores"]["toy"]["score"]), 100.0, places=6
             )
             self.assertAlmostEqual(
-                float(first["primary_score_aggregate"]), 1.0, places=6
+                float(first["primary_score_aggregate"]), 100.0, places=6
             )
             predictions_path = out / "fake-model" / "run1" / "toy" / "predictions.jsonl"
             with predictions_path.open("r", encoding="utf-8") as f:
@@ -1439,7 +1442,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary["token_usage"]["num_completed_responses"], 4)
             self.assertEqual(summary["metrics"]["avg_completed_response_tokens"], 1.0)
             self.assertEqual(summary["metrics"]["accuracy_first"], 1.0)
-            self.assertEqual(summary["primary_score"], 1.0)
+            self.assertEqual(summary["primary_score"], 100.0)
             self.assertFalse((task_dir / "predictions.jsonl").exists())
             self.assertTrue((task_dir / "run_01" / "predictions.jsonl").exists())
             self.assertTrue((task_dir / "run_02" / "predictions.jsonl").exists())
@@ -1691,7 +1694,7 @@ class RunnerTests(unittest.TestCase):
                 places=6,
             )
             self.assertAlmostEqual(
-                float(second["primary_score_aggregate"]), 1.0, places=6
+                float(second["primary_score_aggregate"]), 100.0, places=6
             )
 
 

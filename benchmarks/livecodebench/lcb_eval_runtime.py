@@ -73,7 +73,8 @@ class TimeoutException(Exception):
 
 def timeout_handler(signum: int, frame: Any) -> None:
     del signum, frame
-    raise TimeoutException("alarm went off")
+    print("timeout occured: alarm went off")
+    raise TimeoutException
 
 
 _GLOBAL_TIMEOUT_GRACE_SEC = 5
