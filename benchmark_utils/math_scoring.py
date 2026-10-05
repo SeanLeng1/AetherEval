@@ -23,7 +23,7 @@ def _small_number(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ArithmeticError):
         return None
     return number if 0.0 < abs(number) < 1e-3 else None
 
@@ -35,7 +35,7 @@ def _verify_pair(verify: Any, gold: Any, prediction: Any) -> bool:
     if small_gold is not None and getattr(prediction, "is_number", False):
         try:
             return math.isclose(small_gold, float(prediction), rel_tol=1e-6)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, ArithmeticError):
             return False
     return bool(verify(gold, prediction, 6))
 
@@ -80,6 +80,19 @@ def _keep_units_pred_target() -> tuple[Any, ...]:
     )
 
 
+def format_extractions(values: list[Any]) -> list[str]:
+    """Render diagnostics without letting SymPy's printer abort scoring."""
+    rendered = []
+    for value in values:
+        try:
+            rendered.append(str(value))
+        except (ArithmeticError, RecursionError) as error:
+            # Ordering an Add can evaluate its terms (e.g. csc(0)). Keep the
+            # expression for verification; this string is only output metadata.
+            rendered.append(f"<unprintable {type(value).__name__}: {type(error).__name__}>")
+    return rendered
+
+
 def _matches(verify: Any, golds: list[Any], predictions: list[Any]) -> bool:
     return any(_verify_pair(verify, g, p) for g in golds for p in predictions)
 
@@ -101,7 +114,8 @@ def score_with_math_verify(
     parse() and verify() absorb their own timeouts and errors (returning [] and
     False). They raise only when called off the main thread, which must fail loudly
     instead of scoring every record 0. _verify_pair's small-gold comparison catches
-    only TypeError/ValueError from float(); any other error there raises too.
+    numeric conversion failures from float(). Formatting extracted expressions
+    is diagnostic only and must not change the mathematical comparison.
     """
     # Normalize dataset gold notation during preparation, not arbitrary model text.
     gold_text = str(gold).strip()
@@ -114,8 +128,8 @@ def score_with_math_verify(
     if not boxed_gold and not extracted_golds:
         extracted_golds = parse(gold_input, expr_target)
 
-    pred_strings = [str(x) for x in extracted_predictions]
-    gold_strings = [str(x) for x in extracted_golds]
+    pred_strings = format_extractions(extracted_predictions)
+    gold_strings = format_extractions(extracted_golds)
 
     if not extracted_golds:
         return 0.0, pred_strings, gold_strings, "no gold extraction"
@@ -127,6 +141,6 @@ def score_with_math_verify(
         unit_predictions = parse(prediction, _keep_units_pred_target())
         matched = _matches(verify, extracted_golds, unit_predictions)
         if matched:
-            pred_strings = [str(x) for x in unit_predictions]
+            pred_strings = format_extractions(unit_predictions)
 
     return (1.0 if matched else 0.0), pred_strings, gold_strings, None

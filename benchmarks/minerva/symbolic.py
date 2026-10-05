@@ -9,6 +9,8 @@ from math_verify.utils import timeout
 from sympy import Basic, Derivative, Equality, Poly, nan, oo, zoo
 from sympy.polys.polyerrors import PolynomialError
 
+from benchmark_utils.math_scoring import format_extractions
+
 REPAIRED_SAMPLES = frozenset(
     f"minervamath_{index}" for index in (27, 138, 261, 268, 269)
 )
@@ -114,13 +116,13 @@ def score_symbolic_answer(gold: str, prediction: str) -> dict:
                 break
         if matched:
             break
-    prediction_strings = [str(value) for value in predictions]
+    prediction_strings = format_extractions(predictions)
     return {
         "score": float(matched),
         "is_pass": matched,
         "parsed": {
             "prediction_extracted": prediction_strings,
-            "gold_extracted": [str(value) for value in references],
+            "gold_extracted": format_extractions(references),
         },
         "meta": {
             "prediction_extracted": prediction_strings[0] if predictions else None,
