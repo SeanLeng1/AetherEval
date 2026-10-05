@@ -345,6 +345,22 @@ its official external runner manages its data. No temporary upstream checkout is
 required. Task-specific options remain available via
 `python -m benchmarks.<task>.prepare_data --help` where supported.
 
+GuideBench and LongBench-Write are native tasks. Prepare their
+pinned public data, then include them in the usual task list:
+
+```bash
+python benchmarks/init.py guidebench longbench-write
+aethereval --model /path/to/candidate \
+  --tasks guidebench,longbench-write \
+  --judge-backend local --judge-models /path/to/gemma,/path/to/qwen \
+  --no-judge-enable-thinking --output-dir outputs
+```
+
+GuideBench is scored once, while LongBench-Write is scored
+by each judge. LongBench-Write reports both writing quality and word-count
+compliance and defaults to a 32768-token output budget. Its local-judge results
+must be labeled as adaptations, not official GPT-4o leaderboard scores.
+
 Most sources are pinned to a commit, release or dataset revision (the GPQA CSV by
 sha256). The exceptions: Arena-Hard baseline answers and its style cohort follow
 the upstream `main` branch, HealthBench reads a fixed but unhashed blob URL, and
@@ -576,6 +592,37 @@ to judge (so a group whose judgments are all reused never loads it) and unloaded
 before the next group.
 Per-task prompts, sampling settings and scoring rules remain separate, and API
 judging and candidate generation retain their original task order.
+
+To score the **same generated answers with two judges**, use `--judge-models`
+instead of `--judge-model`:
+
+```bash
+aethereval \
+  --model /path/to/candidate \
+  --tasks writingbench,creative_writing_v3 \
+  --output-dir /output \
+  --run-id dual-judge \
+  --judge-backend local \
+  --judge-models /path/to/gemma-judge,/path/to/qwen-judge \
+  --no-judge-enable-thinking
+```
+
+Candidate answers are generated once. Each local judge is loaded and unloaded
+in turn; non-judge benchmarks are scored once and included in both reports.
+The usual judge flags apply to both judges, while each benchmark keeps its own
+prompt and parser. `--judge-tp-size`, `--judge-dp-size`, thinking flags and
+`--judge-sglang-arg` apply to every judge; this mode has no per-judge overrides.
+In YAML, use `metrics.judge_models: "model_a,model_b"` (a YAML list also works).
+
+The run's `judges/<model-name>-<identity-hash>/` directories each contain their
+own task predictions, manifests, summaries, and `run_summary.json`. The root
+`run_summary.json` lists both reports under `judges`, keyed by full judge model
+name. There is no aggregate across judges and no legacy-layout score mirror.
+The root task predictions contain the shared, unscored candidate generations.
+A normal rerun reuses each judge's completed scores independently; adding a
+judge only scores the new judge. Explicit `--eval-only` rejudges all requested
+judges without generating new answers. This mode supports native benchmarks,
+not the external BFCL adapter.
 
 Local judging is opt-in. It preserves each benchmark's existing judge prompt,
 sampling settings, and parser, but replacing its official GPT/Claude judge with a

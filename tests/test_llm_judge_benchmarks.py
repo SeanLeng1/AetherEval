@@ -67,7 +67,7 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
             for name in list_tasks(BENCHMARKS)
             if "judge_model" in resolve_task_default_metrics(name)
         ]
-        self.assertEqual(len(judge_tasks), 6)
+        self.assertEqual(len(judge_tasks), 7)
         for task_name in judge_tasks:
             with self.subTest(task=task_name):
                 defaults = resolve_task_default_metrics(task_name)

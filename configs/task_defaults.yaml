@@ -84,6 +84,13 @@ gpqa-diamond:
   temperature: 0.6
   top_p: 0.95
 
+guidebench:
+  # Official generate_resp.py uses greedy decoding and a 4096-token ceiling.
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.0
+  top_p: 1.0
+
 healthbench:
   # simple-evals non-reasoning ChatCompletionSampler profile; not all model profiles.
   n: 1
@@ -140,6 +147,18 @@ llmeval-med:
     judge_temperature: 1.0
     judge_top_p: 1.0
     judge_max_new_tokens: 4096
+
+longbench-write:
+  # Official pred.py, full bilingual 120-prompt release.
+  n: 1
+  max_new_tokens: 32768
+  temperature: 0.5
+  # Upstream leaves top_p model-dependent; explicit AetherEval sampling default.
+  top_p: 1.0
+  metrics:
+    judge_model: gpt-4o-2024-05-13
+    judge_temperature: 0.5
+    judge_max_new_tokens: 1024
 
 math500:
   n: 16

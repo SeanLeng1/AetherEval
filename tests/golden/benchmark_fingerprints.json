@@ -39,6 +39,11 @@
     "prompt_sha256": "c9c997a3bc9e02353b24d0a4f6f52c88984ed2c592c72a0dee0025226cf838d3",
     "sample_sha256": "7d997b5f4df105aa395efe952ee182b45c0a97c0dbb068716e3229632fcb3ccc"
   },
+  "guidebench": {
+    "count": 1042,
+    "prompt_sha256": "df7a8baabea7f566cffbd2446fc08f5e38eb4c95a856d0892b4a08b17f3c70b8",
+    "sample_sha256": "85f988a713133190fa76ae38364c1d92d6835e45c6af048d4a7132b35d280ce1"
+  },
   "healthbench": {
     "count": 5000,
     "prompt_sha256": "1a4bc51aa43ef16f92669fdbc28f07c56affd786ee476d91f7297a396c698752",
@@ -68,6 +73,11 @@
     "count": 667,
     "prompt_sha256": "c740edc47eea0906409a5b3deca21ea9fd54239b3275329225807ddb7f654539",
     "sample_sha256": "8bb0d36926385320a42b59b58455bacadecf4013e9b416fb39c2b2aaf45ead4a"
+  },
+  "longbench-write": {
+    "count": 120,
+    "prompt_sha256": "743176c7b0aca484fa127478a90a269b32a97cf04afd4b9f6beb6fe3401dc908",
+    "sample_sha256": "27f619681acfa1854ecbf0b9c34a8f2e687f80da6373d016e69cdbd5d1aa79ee"
   },
   "math500": {
     "count": 500,

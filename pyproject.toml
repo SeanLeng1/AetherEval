@@ -45,7 +45,7 @@ include = ["aethereval*", "benchmark_utils*", "benchmarks*"]
 [tool.setuptools.package-data]
 "aethereval.backends.sglang" = ["encodings/*.tiktoken"]
 # Keys must be importable names; hyphenated task dirs go in the path.
-"benchmarks" = ["creative-writing-v3/prompts/*.txt"]
+"benchmarks" = ["creative-writing-v3/prompts/*.txt", "longbench-write/judge.txt", "guidebench/LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
