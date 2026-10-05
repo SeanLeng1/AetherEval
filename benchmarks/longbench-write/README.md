@@ -43,7 +43,7 @@ that is assessed separately by `S_l`.
 ```bash
 python benchmarks/init.py longbench-write
 aethereval --model /path/to/model --tasks longbench-write \
-  --judge-backend local --judge-models /path/to/gemma /path/to/qwen \
+  --judge-backend local --judge-models /path/to/gemma,/path/to/qwen \
   --no-judge-enable-thinking
 ```
 
