@@ -9,6 +9,8 @@ and send array("q") token ids, so no request shims are needed. Reward-model
 import os
 from typing import Any
 
+from aethereval.backends.sglang.olmo3_config import install_olmo3_config_compatibility
+
 
 def disable_smg_http_sidecar(server: Any) -> None:
     # SGLang's legacy SMG entrypoint (sglang.srt.entrypoints.grpc_server) imports
@@ -24,6 +26,7 @@ def disable_smg_http_sidecar(server: Any) -> None:
 
 
 def main() -> None:
+    install_olmo3_config_compatibility()
     if os.environ.get("SGLANG_EXTERNAL_MODEL_PACKAGE") == "aethereval.backends.sglang.models":
         from aethereval.backends.sglang.models.gpt2_context import install_context_patch
 
@@ -38,3 +41,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+elif __name__ == "__mp_main__":
+    # SGLang's spawned schedulers reconstruct ModelConfig in fresh interpreters.
+    install_olmo3_config_compatibility()
