@@ -528,10 +528,13 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
                 "chat_completion",
                 return_value="invalid",
             ):
-                with self.assertRaisesRegex(ValueError, "failed to generate a score"):
-                    writing.metrics_module.score_generations_batch(
-                        [writing_sample], [writing_output], options
-                    )
+                writing_failed = writing.metrics_module.score_generations_batch(
+                    [writing_sample], [writing_output], options
+                )[0][0]
+            self.assertEqual(writing_failed["score"], 0.0)
+            self.assertTrue(
+                all(grade["judge_failed"] for grade in writing_failed["parsed"])
+            )
 
             creative = load_task("creative_writing_v3", BENCHMARKS)
             creative_sample = creative.task_module.load_samples(creative.spec.task_dir)[
@@ -880,6 +883,44 @@ class LlmJudgeBenchmarkTests(unittest.TestCase):
         for prompt in prompts:
             self.assertIn("final answer", prompt)
             self.assertNotIn("secret plan", prompt)
+
+    def test_writingbench_keeps_the_score_of_a_reason_cut_off_at_the_token_limit(
+        self,
+    ) -> None:
+        writing = load_task("writingbench", BENCHMARKS)
+        sample = writing.task_module.load_samples(writing.spec.task_dir)[0]
+        output = GenerationOutput(sample.id, "prompt", ["answer"])
+        truncated = '{\n    "score": 4,\n    "reason": "it lists \'1' + "0" * 50
+        with mock.patch.object(
+            writing.metrics_module, "chat_completion", return_value=truncated
+        ):
+            record = writing.metrics_module.score_generations_batch(
+                [sample], [output], {"judge_workers": 1}
+            )[0][0]
+        self.assertEqual(record["score"], 4.0)
+        self.assertTrue(all(grade["recovered"] for grade in record["parsed"]))
+        metrics = writing.metrics_module.aggregate(
+            [{"sample_id": sample.id, "meta": sample.meta, "records": [record]}]
+        )
+        self.assertEqual(metrics["overall_score"], 40.0)
+        self.assertIn(
+            f"{len(record['parsed'])} criterion scores", metrics["__warnings__"][0]
+        )
+        # Without a usable leading score the criterion is scored 0, not aborted.
+        for unusable in ('{"reason": "x', '{"score": 45, "reason": "x'):
+            with mock.patch.object(
+                writing.metrics_module, "chat_completion", return_value=unusable
+            ):
+                failed = writing.metrics_module.score_generations_batch(
+                    [sample], [output], {"judge_workers": 1}
+                )[0][0]
+            self.assertEqual(failed["score"], 0.0)
+            self.assertTrue(all(grade["judge_failed"] for grade in failed["parsed"]))
+        metrics = writing.metrics_module.aggregate(
+            [{"sample_id": sample.id, "meta": sample.meta, "records": [failed]}]
+        )
+        self.assertEqual(metrics["overall_score"], 0.0)
+        self.assertIn("scored 0", metrics["__warnings__"][0])
 
     def test_researchqa_reports_answer_words_without_reasoning_or_citations(self) -> None:
         research = load_task("researchqa", BENCHMARKS)

@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -31,6 +32,11 @@ GRADE_SCHEMA = {
     "required": ["score", "reason"],
     "additionalProperties": False,
 }
+# The score precedes the reason, so it survives a reason that cannot be parsed.
+_SCORE_BEFORE_REASON_RE = re.compile(
+    r'\s*(?:```(?:json)?\s*)?\{\s*"score"\s*:\s*(10|[1-9])\s*,\s*"reason"\s*:\s*"(.*)',
+    re.DOTALL,
+)
 EVALUATE_PROMPT = """
 Evaluate the Response based on the Query and Criteria provided following the Scoring Rules.
 
@@ -116,7 +122,7 @@ def score_generations_batch(
 
     def judge(job: tuple[str, str]) -> dict[str, Any]:
         name, prompt = job
-        # The abort message names the last parse or request error, as before.
+        # A criterion scored 0 for a malformed judgment records the last parse error.
         last_error: BaseException | None = None
 
         def complete(*args: Any, **kwargs: Any) -> str:
@@ -146,11 +152,18 @@ def score_generations_batch(
             complete=complete,
         )
         if grade is None:
-            # The official evaluator aborts when its format retries are exhausted.
-            raise ValueError(
-                f"WritingBench judge failed to generate a score: {last_error}; "
-                f"last response={last_text!r}"
-            )
+            # A judge quoting a degenerate response can loop inside the reason until
+            # the token limit; the official evaluator would abort the whole run here.
+            grade = _recover_grade(name, last_text)
+        if grade is None:
+            grade = {
+                "name": name,
+                "score": 0,
+                "reason": "",
+                "raw": last_text,
+                "judge_failed": True,
+                "error": str(last_error),
+            }
         return grade
 
     def combine(
@@ -188,7 +201,7 @@ def score_generations_batch(
 def aggregate(
     sample_results: list[dict[str, Any]],
     metric_options: dict[str, Any] | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     del metric_options
     all_scores: list[float] = []
     domain1: dict[str, list[float]] = defaultdict(list)
@@ -215,7 +228,15 @@ def aggregate(
                         )
                     requirement_c[str(dimension)].append(float(criterion_scores[name]))
 
-    metrics: dict[str, float] = {
+    grades = [
+        grade
+        for sample in sample_results
+        for record in sample.get("records", [])
+        for grade in record.get("parsed") or []
+    ]
+    recovered = sum(bool(grade.get("recovered")) for grade in grades)
+    failed = sum(bool(grade.get("judge_failed")) for grade in grades)
+    metrics: dict[str, Any] = {
         "overall_raw_1_10": _mean(all_scores),
         "overall_score": _mean(all_scores) * 10.0,
     }
@@ -226,6 +247,19 @@ def aggregate(
     for dimension in ("style", "format", "length"):
         metrics[f"requirement/{dimension}_R"] = _mean(requirement_r[dimension]) * 10.0
         metrics[f"requirement/{dimension}_C"] = _mean(requirement_c[dimension]) * 10.0
+    warnings = []
+    if recovered:
+        warnings.append(
+            f"{recovered} criterion scores were read from judge responses whose "
+            "reason could not be parsed"
+        )
+    if failed:
+        warnings.append(
+            f"{failed} criteria were scored 0 because the judge returned no "
+            "parseable score"
+        )
+    if warnings:
+        metrics["__warnings__"] = warnings
     return metrics
 
 
@@ -244,6 +278,19 @@ def _parse_grade(name: str, text: str) -> dict[str, Any]:
     if not isinstance(reason, str):
         raise ValueError("judge reason must be a string")
     return {"name": name, "score": score, "reason": reason, "raw": text}
+
+
+def _recover_grade(name: str, text: str) -> dict[str, Any] | None:
+    match = _SCORE_BEFORE_REASON_RE.match(text)
+    if match is None:
+        return None
+    return {
+        "name": name,
+        "score": int(match.group(1)),
+        "reason": match.group(2),
+        "raw": text,
+        "recovered": True,
+    }
 
 
 def _mean(values: list[float]) -> float:

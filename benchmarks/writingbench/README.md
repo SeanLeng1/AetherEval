@@ -22,6 +22,12 @@ Native implementation of the 1,000-item WritingBench release.
 - Candidate generation: `n=1`, temperature `0.7`, top-p `0.8`, top-k `20`, max new tokens `16000` (or the model's actual lower limit).
 - Judge: `claude-sonnet-4-5`, temperature `1.0`, top-p `0.95`, max tokens `2048`.
 - Each of the five instance-specific criteria is judged independently once.
+- Upstream aborts the run when a criterion's judge response stays malformed
+  after the format retries. Here the run continues: a response that already
+  states its score before a reason that cannot be parsed (typically one cut off
+  at the token limit) keeps that score, and any other malformed response scores
+  the criterion 0. Both cases are flagged per criterion and counted in a
+  summary warning. Judge request errors still abort.
 - `overall_score` is the upstream 1–10 mean scaled to 0–100.
 - The current style/format/length requirement subset files are included; both
   response-level (`*_R`) and selected-criterion (`*_C`) metrics follow
