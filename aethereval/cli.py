@@ -42,6 +42,8 @@ def run_selected_tasks(
             "--inspect is only supported for native tasks; external tasks requested: "
             f"{', '.join(external_tasks)}"
         )
+    if resolved["metric_options"].get("judge_models") and external_tasks:
+        raise ValueError("--judge-models is supported for native tasks only")
 
     if resolved["inspect"]:
         inspected = inspect_prompts(
@@ -86,6 +88,8 @@ def run_selected_tasks(
             generate_only=resolved["generate_only"],
             eval_only=resolved["eval_only"],
         )
+        if "judges" in native_result:
+            return native_result
 
     # The run summary covers this invocation's tasks plus every other native or
     # external task summary already in the run directory, whatever was selected.
@@ -323,6 +327,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Override the benchmark's aligned default LLM judge model.",
+    )
+    judge_group.add_argument(
+        "--judge-models",
+        type=str,
+        default=None,
+        metavar="MODEL,MODEL",
+        help=(
+            "Comma-separated judge models; score the same generations, saving separate "
+            "results under judges/. Scores are not averaged across judges. "
+            "Mutually exclusive with --judge-model."
+        ),
     )
     judge_group.add_argument(
         "--judge-backend",

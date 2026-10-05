@@ -1598,6 +1598,16 @@ def run_evaluation(
         backend_kwargs=backend_kwargs,
         benchmarks_dir=benchmarks_dir,
     )
+    if (metric_options or {}).get("judge_models") is not None:
+        from .multi_judge import run_multi_judge
+
+        return run_multi_judge(
+            options=options,
+            overwrite=overwrite,
+            backend=backend,
+            generate_only=generate_only,
+            eval_only=eval_only,
+        )
     if generate_only or eval_only:
         return _run_phase(
             **options,
@@ -1652,6 +1662,7 @@ def _run_phase(
     generate_only: bool,
     eval_only: bool,
     rescore_existing: bool,
+    run_root_override: Path | None = None,
 ) -> dict[str, Any]:
     phase = phase_name(generate_only=generate_only, eval_only=eval_only)
     effective_model_kwargs = backend_kwargs
@@ -1665,7 +1676,7 @@ def _run_phase(
     out_dir = Path(output_dir)
     effective_model_name = model_output_name(model, model_name)
     this_run_id = run_id or effective_model_name
-    run_root = run_output_dir(out_dir, model, run_id, model_name)
+    run_root = run_root_override or run_output_dir(out_dir, model, run_id, model_name)
     ensure_dir(run_root)
     prior_run_summary: dict[str, Any] = {}
     prior_run_summary_path = run_root / "run_summary.json"

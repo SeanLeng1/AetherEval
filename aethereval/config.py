@@ -256,6 +256,7 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         "rm_dtype",
         "rm_trust_remote_code",
         "judge_model",
+        "judge_models",
         "judge_base_url",
         "judge_api_key_env",
         "judge_workers",
@@ -271,6 +272,20 @@ def resolve_run_arguments(args: Any, cfg: dict[str, Any]) -> dict[str, Any]:
         key: _pick(getattr(args, key, None), get(key, "metrics")) for key in metric_keys
     }
     metric_options = {k: v for k, v in metric_options.items() if v is not None}
+    cli_judge = getattr(args, "judge_model", None)
+    cli_judges = getattr(args, "judge_models", None)
+    if cli_judge is not None and cli_judges is not None:
+        raise ValueError("--judge-model and --judge-models are mutually exclusive")
+    if cli_judges is not None:
+        metric_options.pop("judge_model", None)
+    elif cli_judge is not None:
+        metric_options.pop("judge_models", None)
+    if "judge_models" in metric_options:
+        if "judge_model" in metric_options:
+            raise ValueError("Use either metrics.judge_model or metrics.judge_models")
+        from .core.multi_judge import validate_judge_models
+
+        metric_options["judge_models"] = validate_judge_models(metric_options["judge_models"])
     if "num_proc" in metric_options:
         metric_options["num_proc"] = int(metric_options["num_proc"])
         if metric_options["num_proc"] < 1:
