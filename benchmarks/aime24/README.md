@@ -12,7 +12,7 @@ config `aime24`, with transcriptions from MathArena's
 This is not an official MAA LLM evaluator.
 
 No official MAA model-generation repository or temperature/top-p/token budget was
-identified. The defaults `n=16, temperature=0.6, top_p=0.95,
+identified. The defaults `n=32, temperature=0.6, top_p=0.95,
 max_new_tokens=32768` are an **AetherEval long-reasoning profile**, not an
 official AIME protocol. Average accuracy estimates single-sample success;
 `pass@k` is a different statistic, and neither is majority-vote accuracy.
@@ -43,7 +43,7 @@ benchmarks/aime24/
 - Implemented in `task.py`
 - Uses AetherRL math template style:
   - `{Question}\n\nPlease think step by step, and put your final answer within \boxed{}.`
-- Default generation config sets `n=16` (for pass@k style evaluation)
+- Default generation config sets `n=32` (for pass@k style evaluation)
 
 ## Metrics
 

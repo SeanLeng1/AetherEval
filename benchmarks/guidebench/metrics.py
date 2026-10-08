@@ -1,7 +1,7 @@
 import json
 from collections import defaultdict
 
-from aethereval.metrics.common import mean
+from aethereval.metrics.common import mean, mean_stderr
 
 PRIMARY_METRIC = "accuracy"
 MC_CATEGORIES = ("chat", "summary", "hallu")
@@ -53,6 +53,7 @@ def aggregate(sample_results, metric_options=None):
         categories[item["meta"]["category"]].append(value)
     return {
         "accuracy": mean(scores),
+        "accuracy_stderr": mean_stderr(scores),
         "parsed_rate": mean(parsed),
         **{
             f"category/{name}": mean(values)

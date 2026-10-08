@@ -1,10 +1,12 @@
 import random
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
+from aethereval.metrics.common import mean_stderr
 from benchmark_utils.llm_judge import (
     chat_completion,
     judge_generations,
@@ -141,6 +143,7 @@ def aggregate(
 ) -> dict[str, Any]:
     options = metric_options or {}
     scores: list[float] = []
+    by_prompt: dict[str, list[float]] = defaultdict(list)
     generation_failures = 0
     judge_failures = 0
     for sample in sample_results:
@@ -152,10 +155,13 @@ def aggregate(
                 judge_failures += 1
                 continue
             scores.append(float(record["score"]))
+            by_prompt[str(sample["meta"]["prompt_id"])].append(float(record["score"]))
     raw = _mean(scores)
     metrics: dict[str, Any] = {
         "creative_score_0_20": round(raw, 2),
         "eqbench_creative_score": round(raw * 5.0, 2),
+        # A prompt's pieces share its premise: the error is over prompt means, as over problems elsewhere.
+        "eqbench_creative_score_stderr": mean_stderr([_mean(v) for v in by_prompt.values()]) * 5.0,
         "scored_pieces": float(len(scores)),
         "generation_failures": float(generation_failures),
         "judge_failures": float(judge_failures),

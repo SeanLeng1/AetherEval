@@ -31,8 +31,8 @@ aethereval --model /path/to/policy --tasks mbpp-plus --output-dir outputs
   private test inputs are included. There is no assistant/code prefill.
   The local backend applies the model's chat template. This is a local reasoning
   chat profile, not the unmodified EvalPlus chat or completion prompt.
-- Greedy defaults: `n=1`, `temperature=0`, `top_p=0.95`, `max_new_tokens=32768`.
-  `top_p` follows the official chat request helper (temperature zero is greedy).
+- Sampling defaults: `n=10`, `temperature=0.6`, `top_p=0.95`, `max_new_tokens=32768`,
+  the OLMES `olmo3:adapt` profile and not EvalPlus's greedy decoding, reporting pass@1/5/10.
   The output budget is a local extension of the reference decoder's 768-token
   default. It accommodates reasoning plus code without forcing a model-specific
   thinking mode. The serving context must also

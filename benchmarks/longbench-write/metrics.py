@@ -3,7 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from aethereval.core.task_defaults import resolve_task_default_metrics
-from aethereval.metrics.common import mean
+from aethereval.metrics.common import mean, mean_stderr
 from benchmark_utils.llm_judge import (
     judge_generations,
     judge_with_format_retries,
@@ -148,6 +148,7 @@ def aggregate(sample_results, metric_options=None):
                 dims[name].append((parsed["grade"][name] - 1) * 25)
     return {
         "overall_score": mean(overall),
+        "overall_score_stderr": mean_stderr(overall),
         "quality_score": mean(quality),
         "length_score": mean(lengths),
         "avg_response_words": mean(words),

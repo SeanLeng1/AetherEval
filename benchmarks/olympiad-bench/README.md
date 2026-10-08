@@ -11,8 +11,8 @@ and the released model-specific evaluators.
 The GPT-4 path sets `temperature=0, max_tokens=2048`; other model paths are
 different, so this is not a universal cross-model sampling mandate.
 AetherEval does not use that budget: the prompt asks for step-by-step reasoning, which
-2048 tokens truncate. Defaults are the shared math profile `n=16, temperature=0.6,
-top_p=0.95, max_new_tokens=32768`; `accuracy` is the mean over the 16 samples.
+2048 tokens truncate. Defaults are the shared math profile `n=32, temperature=0.6,
+top_p=0.95, max_new_tokens=32768`; `accuracy` is the mean over the 32 samples.
 The local text subset and math-verify scoring do not
 reproduce the full bilingual, multimodal OlympiadBench suite. Report the subset
 and generation budget explicitly.

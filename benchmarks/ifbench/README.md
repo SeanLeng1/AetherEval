@@ -11,8 +11,9 @@ and [config.py](https://github.com/allenai/IFBench/blob/1c40f0c10d9b5c5c2f10a175
 The paper protocol stated in the README uses temperature 0, model-dependent
 output budgets, and final-answer extraction for thinking models. The newer
 utility config instead defaults to temperature 0.6 and 4096 tokens.
-AetherEval deliberately follows the stated paper protocol's greedy decoding:
-`n=1, temperature=0, top_p=1, max_new_tokens=4096`.
+AetherEval follows the OLMES `olmo3:adapt` sampling profile, which shares that temperature,
+and not the paper protocol's greedy decoding:
+`n=1, temperature=0.6, top_p=0.95, max_new_tokens=4096`.
 The 4096 ceiling is a local non-thinking budget, not the paper's universal limit.
 For thinking models, also verify the output budget and reasoning removal before
 comparing prompt-level loose accuracy.

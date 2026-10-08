@@ -10,21 +10,21 @@ agieval-en:
 
 aime24:
   # Local long-reasoning profile, not a decoding standard published by MAA.
-  n: 16
+  n: 32
   max_new_tokens: 32768
   temperature: 0.6
   top_p: 0.95
 
 aime25:
   # Local long-reasoning profile, not a decoding standard published by MAA.
-  n: 16
+  n: 32
   max_new_tokens: 32768
   temperature: 0.6
   top_p: 0.95
 
 amc23:
   # Local long-reasoning profile, not a decoding standard published by MAA.
-  n: 16
+  n: 32
   max_new_tokens: 32768
   temperature: 0.6
   top_p: 0.95
@@ -104,31 +104,33 @@ healthbench:
     judge_max_new_tokens: 2048
 
 humaneval-plus:
-  # Greedy decoding with a local extended output budget (EvalPlus defaults to 768).
-  n: 1
-  max_new_tokens: 32768
-  temperature: 0.0
-  top_p: 1.0
-
-ifbench:
-  # Paper protocol in upstream README is greedy; config.py's 0.6 is not that protocol.
-  n: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-ifeval:
-  # Upstream supplies response checkers, not a common decoder; local greedy profile.
-  n: 1
-  max_new_tokens: 4096
-  temperature: 0.0
-  top_p: 1.0
-
-livecodebench:
-  # Reference sampling settings; local extended budget instead of 2000 tokens.
+  # OLMES olmo3:adapt sampling, not EvalPlus's greedy; local output budget (EvalPlus: 768).
   n: 10
   max_new_tokens: 32768
-  temperature: 0.2
+  temperature: 0.6
+  top_p: 0.95
+  metrics:
+    pass_k_values: [1, 5, 10]
+
+ifbench:
+  # OLMES olmo3:adapt sampling, as upstream config.py's 0.6; the paper protocol is greedy.
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.6
+  top_p: 0.95
+
+ifeval:
+  # Upstream supplies response checkers, not a common decoder; OLMES olmo3:adapt sampling.
+  n: 1
+  max_new_tokens: 4096
+  temperature: 0.6
+  top_p: 0.95
+
+livecodebench:
+  # OLMES olmo3:adapt sampling (the reference uses 0.2); local budget, not 2000 tokens.
+  n: 10
+  max_new_tokens: 32768
+  temperature: 0.6
   top_p: 0.95
   # No stop: the reference "###" is for base-model completion and would cut a
   # reasoning answer at the first markdown heading, before any code.
@@ -161,19 +163,22 @@ longbench-write:
     judge_max_new_tokens: 1024
 
 math500:
-  n: 16
+  n: 32
   max_new_tokens: 32768
   temperature: 0.6
   top_p: 0.95
 
 mbpp-plus:
-  n: 1
+  # OLMES olmo3:adapt sampling, not EvalPlus's greedy; local output budget (EvalPlus: 768).
+  n: 10
   max_new_tokens: 32768
-  temperature: 0.0
+  temperature: 0.6
   top_p: 0.95
+  metrics:
+    pass_k_values: [1, 5, 10]
 
 minerva:
-  n: 16
+  n: 32
   max_new_tokens: 32768
   temperature: 0.6
   top_p: 0.95
@@ -189,7 +194,7 @@ mmlu-pro:
 olympiad-bench:
   # Same long-reasoning profile as the other math tasks; the official 2048-token GPT-4
   # reference budget truncates reasoning models.
-  n: 16
+  n: 32
   max_new_tokens: 32768
   temperature: 0.6
   top_p: 0.95

@@ -8,8 +8,9 @@ Official repository: [LiveCodeBench/LiveCodeBench](https://github.com/LiveCodeBe
 Checked [runner/parser.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/parser.py)
 and [vllm_runner.py](https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/runner/vllm_runner.py).
 
-Defaults retain the reference sampling settings with a local extended budget:
-`n=10, temperature=0.2, top_p=0.95, max_new_tokens=32768`, reporting pass@1/5/10.
+Defaults keep the reference `n` and `top_p`, take the temperature of the OLMES `olmo3:adapt`
+profile (the reference uses 0.2), and use a local extended budget:
+`n=10, temperature=0.6, top_p=0.95, max_new_tokens=32768`, reporting pass@1/5/10.
 The 32768-token ceiling includes reasoning and code, replacing the reference
 runner's 2000-token default. Report this budget explicitly; it is not the
 unmodified reference profile. The serving context must also fit the prompt.

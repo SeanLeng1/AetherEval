@@ -4,6 +4,7 @@ from typing import Any
 
 from aethereval.core.types import GenerationOutput, Sample
 from aethereval.core.task_defaults import resolve_task_default_metrics
+from aethereval.metrics.common import mean_stderr
 from benchmark_utils.llm_judge import (
     chat_completion,
     judge_generations,
@@ -239,6 +240,7 @@ def aggregate(
     metrics: dict[str, Any] = {
         "overall_raw_1_10": _mean(all_scores),
         "overall_score": _mean(all_scores) * 10.0,
+        "overall_score_stderr": mean_stderr(all_scores) * 10.0,
     }
     for name, values in sorted(domain1.items()):
         metrics[f"domain1/{name}"] = _mean(values) * 10.0

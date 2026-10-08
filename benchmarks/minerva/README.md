@@ -13,7 +13,7 @@ contains OCW-style problems; it is not the lm-evaluation-harness
 
 The paper uses a 512-token generation limit, greedy single-sample evaluation,
 and `temperature=0.6, top_p=0.95` for multiple samples (64 for OCW majority
-voting). AetherEval uses the shared math profile `n=16, temperature=0.6, top_p=0.95, max_new_tokens=32768`
+voting). AetherEval uses the shared math profile `n=32, temperature=0.6, top_p=0.95, max_new_tokens=32768`
 instead of the 512-token path: the prompt asks for step-by-step reasoning, which 512 tokens truncate.
 The local prompt and math-verify scorer still differ from the paper's few-shot
 evaluation; this is not a reproduction of the paper's protocol.

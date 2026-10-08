@@ -9,8 +9,9 @@ Checked [codegen.py](https://github.com/evalplus/evalplus/blob/26d6d00bb1fd0fa37
 [DecoderBase](https://github.com/evalplus/evalplus/blob/26d6d00bb1fd0fa37f39c99d5290da67891d1c5e/evalplus/provider/base.py), and
 [vLLM provider](https://github.com/evalplus/evalplus/blob/26d6d00bb1fd0fa37f39c99d5290da67891d1c5e/evalplus/provider/vllm.py).
 
-Defaults retain greedy decoding with a local extended output budget:
-`n=1, temperature=0, top_p=1, max_new_tokens=32768`.
+Defaults follow the OLMES `olmo3:adapt` sampling profile, not EvalPlus's greedy decoding,
+with a local extended output budget:
+`n=10, temperature=0.6, top_p=0.95, max_new_tokens=32768`, reporting pass@1/5/10.
 The 32768-token ceiling includes reasoning and code; it is our evaluation choice,
 not EvalPlus's reference decoder default of 768. The serving context must also
 accommodate the prompt. This ceiling does not require every response to use it.

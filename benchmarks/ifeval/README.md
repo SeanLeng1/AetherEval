@@ -9,8 +9,8 @@ The [official README](https://github.com/google-research/google-research/blob/ma
 accepts a JSONL of already-generated prompt/response pairs; it does not prescribe
 one model-independent temperature/top-p/output limit.
 
-The defaults `n=1, temperature=0, top_p=1, max_new_tokens=4096`
-are an explicit local greedy profile. The raw prompts and instruction checkers
+The defaults `n=1, temperature=0.6, top_p=0.95, max_new_tokens=4096`
+follow the OLMES `olmo3:adapt` sampling profile. The raw prompts and instruction checkers
 come from the release, but the decoding tuple is not an official requirement.
 Report whether strict or loose, prompt-level or instruction-level accuracy is
 being compared. AetherEval's primary metric is prompt-level loose accuracy.
