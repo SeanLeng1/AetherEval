@@ -87,7 +87,10 @@ Why `v6`:
   line, so a candidate that catches the timeout and prints the expected answer
   still fails with Wrong Answer (`[-2]`). Re-score saved predictions for every
   compared model with `--eval-only` if they used the older silent handler.
-- Code extraction uses fenced-code parsing (last fenced block; no raw-text fallback).
+- Code extraction uses fenced-code parsing (last fenced block), as upstream. One local fallback: a response with
+  fewer than two fence lines gives its longest span of lines that parses as Python (EvalPlus's `code_extract`, which
+  HumanEval+ and MBPP+ use here), where upstream scores it as empty. The prompt ends with the block to fill, and
+  some models write its content with no fence (`extract_method: longest_valid_span`).
 - Per generation score:
   - `1.0` if all tests pass
   - `0.0` otherwise

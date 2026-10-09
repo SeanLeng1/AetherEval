@@ -1,7 +1,10 @@
 from typing import Any
 
+from evalplus.syncheck import syntax_check
+
 from aethereval.metrics.common import aggregate_binary_results
 from aethereval.core.types import GenerationRecord, Sample
+from benchmark_utils.evalplus_sanitize import code_extract
 from benchmarks.livecodebench.lcb_eval_runtime import evaluate_candidate
 
 
@@ -12,7 +15,9 @@ def _extract_code(text: str) -> tuple[str, str]:
     output_lines = text.split("\n")
     fence_lines = [i for i, line in enumerate(output_lines) if "```" in line]
     if len(fence_lines) < 2:
-        return "", "no_fenced_code"
+        # No complete block: the longest span that parses, as EvalPlus extracts code for HumanEval+ and MBPP+.
+        program = code_extract(text).strip()
+        return (program, "longest_valid_span") if program and syntax_check(program) else ("", "no_fenced_code")
 
     start, end = fence_lines[-2], fence_lines[-1]
     if end <= start:

@@ -1128,7 +1128,7 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(scored["score"], 1.0)
         self.assertEqual(sys.get_int_max_str_digits(), limit)
 
-    def test_livecodebench_score_generation_requires_fenced_code(self) -> None:
+    def test_livecodebench_score_generation_takes_fenced_code_or_a_whole_program(self) -> None:
         bundle = load_task("livecodebench")
         metrics_module = bundle.metrics_module
 
@@ -1145,10 +1145,18 @@ class MetricsTests(unittest.TestCase):
                 "timeout_sec": 6,
             },
         )
-        scored = metrics_module.score_generation(sample, "print(42)")
+        scored = metrics_module.score_generation(sample, "The answer is 42.")
         self.assertEqual(scored["score"], 0.0)
         self.assertFalse(scored["is_pass"])
         self.assertFalse(scored["parsed"]["had_code"])
+        self.assertEqual(scored["parsed"]["extract_method"], "no_fenced_code")
+        # Without a complete block the longest span that parses is run: the program alone, before a lone closing fence, or after prose.
+        for response in ("print(42)", "print(42)\n```", "The answer:\n\nimport sys\nprint(42)"):
+            scored = metrics_module.score_generation(sample, response)
+            self.assertTrue(scored["is_pass"])
+            self.assertEqual(scored["parsed"]["extract_method"], "longest_valid_span")
+        # An opened block that never closes with code that does not parse stays without code.
+        scored = metrics_module.score_generation(sample, "```python\nprint(42")
         self.assertEqual(scored["parsed"]["extract_method"], "no_fenced_code")
 
     def test_livecodebench_prompt_template_alignment(self) -> None:
